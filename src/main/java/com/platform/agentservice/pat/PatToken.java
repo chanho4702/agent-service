@@ -33,4 +33,24 @@ public class PatToken {
         t.expiresAt = expiresAt;
         return t;
     }
+
+    /** PatAuthFilter가 검증 성공 시 스로틀 적용 후 호출한다. */
+    public void touch(Instant at) {
+        this.lastUsedAt = at;
+    }
+
+    /** 멱등 — 이미 철회된 토큰에 다시 호출해도 최초 철회 시각을 유지한다. */
+    public void revoke(Instant at) {
+        if (this.revokedAt == null) {
+            this.revokedAt = at;
+        }
+    }
+
+    public boolean isRevoked() {
+        return revokedAt != null;
+    }
+
+    public boolean isExpired(Instant now) {
+        return expiresAt != null && expiresAt.isBefore(now);
+    }
 }
