@@ -6,6 +6,8 @@ import com.platform.agentservice.client.dto.IssueCreateRequest;
 import com.platform.agentservice.client.dto.IssuePageResponse;
 import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.client.dto.IssueUpdateRequest;
+import com.platform.agentservice.client.dto.ProjectResponse;
+import com.platform.agentservice.client.dto.ProjectSettingsResponse;
 import com.platform.agentservice.client.dto.WorklogRequest;
 import com.platform.agentservice.client.dto.WorklogResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -34,6 +36,8 @@ public class AlmClient {
     private static final ParameterizedTypeReference<List<CommentResponse>> COMMENT_LIST =
             new ParameterizedTypeReference<>() {};
     private static final ParameterizedTypeReference<List<WorklogResponse>> WORKLOG_LIST =
+            new ParameterizedTypeReference<>() {};
+    private static final ParameterizedTypeReference<List<ProjectResponse>> PROJECT_LIST =
             new ParameterizedTypeReference<>() {};
 
     private final RestClient almRestClient;
@@ -120,6 +124,45 @@ public class AlmClient {
                     .body(WORKLOG_LIST);
         } catch (RestClientException e) {
             throw DownstreamErrors.map(e, "워크로그 조회");
+        }
+    }
+
+    /** {@code GET /api/alm/projects} — 접근 가능한 프로젝트 전체(S10). */
+    public List<ProjectResponse> listProjects(String bearer) {
+        try {
+            return almRestClient.get()
+                    .uri("/api/alm/projects")
+                    .header(HttpHeaders.AUTHORIZATION, bearer)
+                    .retrieve()
+                    .body(PROJECT_LIST);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "프로젝트 목록 조회");
+        }
+    }
+
+    /** {@code GET /api/alm/projects/{id}}. */
+    public ProjectResponse getProject(long projectId, String bearer) {
+        try {
+            return almRestClient.get()
+                    .uri("/api/alm/projects/{id}", projectId)
+                    .header(HttpHeaders.AUTHORIZATION, bearer)
+                    .retrieve()
+                    .body(ProjectResponse.class);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "프로젝트 조회");
+        }
+    }
+
+    /** {@code GET /api/alm/projects/{id}/settings} — 유효 스킴(정규화된 상태/전이/타입/우선순위/필드). */
+    public ProjectSettingsResponse getProjectSettings(long projectId, String bearer) {
+        try {
+            return almRestClient.get()
+                    .uri("/api/alm/projects/{id}/settings", projectId)
+                    .header(HttpHeaders.AUTHORIZATION, bearer)
+                    .retrieve()
+                    .body(ProjectSettingsResponse.class);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "프로젝트 설정 조회");
         }
     }
 

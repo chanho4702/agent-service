@@ -1,24 +1,48 @@
 package com.platform.agentservice.client;
 
+import com.platform.agentservice.client.dto.MemberResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.util.List;
+
 /**
- * org-service 호출 두 가지: 에이전트 페르소나를 조직 멤버로 등록하고, 리소스 권한을
- * 부여한다. 둘 다 호출자(관리자)의 Authorization 헤더를 그대로 전달한다 — grant는
- * 대상 리소스의 ADMIN 권한을 요구하므로 페르소나 자신의 토큰으로는 절대 성공하지 않는다.
+ * org-service 호출: 에이전트 페르소나를 조직 멤버로 등록하고, 리소스 권한을 부여하고
+ * (둘 다 호출자(관리자)의 Authorization 헤더를 그대로 전달 — grant는 대상 리소스의 ADMIN
+ * 권한을 요구하므로 페르소나 자신의 토큰으로는 절대 성공하지 않는다), 멤버 명단을 조회한다
+ * ({@link #listMembers}만 인증만 있으면 되는 조회라 페르소나 토큰으로도 호출된다, S10).
  */
 @Component
 public class OrgClient {
+
+    private static final ParameterizedTypeReference<List<MemberResponse>> MEMBER_LIST =
+            new ParameterizedTypeReference<>() {};
 
     private final RestClient orgRestClient;
 
     public OrgClient(@Qualifier("orgRestClient") RestClient orgRestClient) {
         this.orgRestClient = orgRestClient;
+    }
+
+    /**
+     * {@code GET /api/org/members} — 기본 필터(status=ACTIVE, kind=HUMAN)를 그대로 쓴다.
+     * 조회 전용이라 관리자 토큰이 아니라 호출자의(보통 페르소나) 토큰을 그대로 실어도 된다.
+     */
+    public List<MemberResponse> listMembers(String bearer) {
+        try {
+            return orgRestClient.get()
+                    .uri("/api/org/members")
+                    .header(HttpHeaders.AUTHORIZATION, bearer)
+                    .retrieve()
+                    .body(MEMBER_LIST);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "조직 멤버 목록 조회");
+        }
     }
 
     private record AgentMemberRequest(long id, String displayName, String email) {}

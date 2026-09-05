@@ -6,6 +6,8 @@ import com.platform.agentservice.client.dto.IssueDetailsRequest;
 import com.platform.agentservice.client.dto.IssuePageResponse;
 import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.client.dto.IssueUpdateRequest;
+import com.platform.agentservice.client.dto.ProjectResponse;
+import com.platform.agentservice.client.dto.ProjectSettingsResponse;
 import com.platform.agentservice.client.dto.WorklogRequest;
 import com.platform.agentservice.client.dto.WorklogResponse;
 import com.platform.common.error.ConflictException;
@@ -136,6 +138,80 @@ class AlmClientTest {
 
         assertThat(worklogs).hasSize(1);
         assertThat(worklogs.get(0).hours()).isEqualByComparingTo("2.5");
+        server.verify();
+    }
+
+    @Test
+    void listProjects_sends_correct_path_and_header() {
+        RestClient.Builder builder = builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        AlmClient client = new AlmClient(builder.build());
+
+        server.expect(requestTo("http://alm-backend/api/alm/projects"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header(HttpHeaders.AUTHORIZATION, BEARER))
+                .andRespond(withSuccess(
+                        "[{\"id\":9,\"key\":\"PROJ\",\"name\":\"프로젝트\",\"description\":\"d\",\"version\":1}]",
+                        MediaType.APPLICATION_JSON));
+
+        List<ProjectResponse> projects = client.listProjects(BEARER);
+
+        assertThat(projects).hasSize(1);
+        assertThat(projects.get(0).key()).isEqualTo("PROJ");
+        assertThat(projects.get(0).name()).isEqualTo("프로젝트");
+        server.verify();
+    }
+
+    @Test
+    void getProject_sends_correct_path_and_header() {
+        RestClient.Builder builder = builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        AlmClient client = new AlmClient(builder.build());
+
+        server.expect(requestTo("http://alm-backend/api/alm/projects/9"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header(HttpHeaders.AUTHORIZATION, BEARER))
+                .andRespond(withSuccess(
+                        "{\"id\":9,\"key\":\"PROJ\",\"name\":\"프로젝트\"}", MediaType.APPLICATION_JSON));
+
+        ProjectResponse project = client.getProject(9L, BEARER);
+
+        assertThat(project.id()).isEqualTo(9L);
+        assertThat(project.key()).isEqualTo("PROJ");
+        server.verify();
+    }
+
+    @Test
+    void getProjectSettings_sends_correct_path_and_header_and_parses_body() {
+        RestClient.Builder builder = builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        AlmClient client = new AlmClient(builder.build());
+
+        server.expect(requestTo("http://alm-backend/api/alm/projects/9/settings"))
+                .andExpect(method(HttpMethod.GET))
+                .andExpect(header(HttpHeaders.AUTHORIZATION, BEARER))
+                .andRespond(withSuccess("""
+                        {"body":{
+                          "statuses":[{"id":"todo"},{"id":"inprogress"},{"id":"done"}],
+                          "transitions":[],
+                          "enabledTypes":["task","bug"],
+                          "enabledPriorities":["highest","high","medium","low","lowest"],
+                          "defaultPriority":"medium",
+                          "fields":[{"id":"assignee","visible":true,"required":true}],
+                          "fieldsByType":{}
+                        },
+                        "source":"scheme",
+                        "scheme":{"id":"default","name":"기본","isDefault":true,"body":{}}}
+                        """, MediaType.APPLICATION_JSON));
+
+        ProjectSettingsResponse settings = client.getProjectSettings(9L, BEARER);
+
+        assertThat(settings.body().statuses()).extracting(ProjectSettingsResponse.StatusEntry::id)
+                .containsExactly("todo", "inprogress", "done");
+        assertThat(settings.body().enabledTypes()).containsExactly("task", "bug");
+        assertThat(settings.body().defaultPriority()).isEqualTo("medium");
+        assertThat(settings.body().fields()).extracting(ProjectSettingsResponse.FieldConfigEntry::id)
+                .containsExactly("assignee");
         server.verify();
     }
 

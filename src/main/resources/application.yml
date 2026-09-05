@@ -11,6 +11,13 @@ spring:
         protocol: STREAMABLE          # SSE 아님 — 2.0 기본
         streamable-http:
           mcp-endpoint: /api/agent/mcp
+        instructions: >
+          플랫폼 ALM·Wiki 기록 도구다. 규약: (1) 작업 시작 전 get_project_context로 스킴·명단 확인,
+          (2) 이슈를 집으면 claim_issue, 진행 코멘트는 add_comment, 시간은 log_work,
+          (3) 결정·설계·작업 내용은 위키에 create_page/append_to_page로 페르소나 명의의 작업
+          보고서를 남기고 add_comment로 이슈에 링크한다 — 보고서 없는 완료는 금지,
+          (4) PR은 link_pr로 연결, (5) 완료 시 작업 보고서 링크 코멘트 → update_issue_status(done 계열) 순서.
+          모든 기록은 현재 페르소나 명의로 남는다.
   # 모든 자격증명/URL은 env로 오버라이드 가능. 기본값은 로컬 dev 전용 — 운영에서는 반드시 주입.
   datasource:
     url: ${AGENT_DB_URL:jdbc:postgresql://localhost:5433/agentdb}
