@@ -35,6 +35,11 @@ class ToolRegistrySnapshotTest {
 
     @Test
     void registeredToolNames_matchExactSet() {
+        // 이름 집합 비교 전에 개수부터 확인한다 — 이름이 중복 등록돼도(예: 두 빈이 같은
+        // @McpTool(name=...)을 쓰는 실수) Set으로 모으면 조용히 뭉개지므로, 리스트 크기가
+        // 18인지 먼저 잡아야 그런 회귀를 놓치지 않는다(리뷰 반영, S10).
+        assertThat(toolSpecs).hasSize(18);
+
         Set<String> names = toolSpecs.stream()
                 .map(spec -> spec.tool().name())
                 .collect(Collectors.toSet());

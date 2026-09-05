@@ -120,8 +120,16 @@ class ContextToolsTest {
 
     // ---- get_project_context: 프로젝트 + 설정 + 멤버 통합 ----
 
+    /**
+     * 멤버 목록에 {@code kind="AGENT"} 항목이 섞여 있어도 그대로 통과해 요약에 나타나야 한다
+     * (리뷰 반영, S10) — {@code get_project_context}의 담당자 후보 명단은 사람뿐 아니라
+     * 에이전트 페르소나도 보여야 하므로 {@link OrgClient#listMembers}가 {@code kind=ALL}로
+     * 호출한다({@link com.platform.agentservice.client.OrgClientTest}가 그 쿼리 파라미터
+     * 자체를 검증). 이 테스트는 {@link OrgClient}를 목으로 대체하므로 실제 쿼리 파라미터는
+     * 못 보지만, "AGENT 멤버가 응답에 오면 도구가 그대로 통과시키는지"는 여기서 확인한다.
+     */
     @Test
-    void get_project_context_aggregates_project_settings_and_members() throws Exception {
+    void get_project_context_surfaces_agent_persona_members_alongside_human_members() throws Exception {
         when(almClient.getProject(9L, BEARER)).thenReturn(new ProjectResponse(9L, "PROJ", "프로젝트"));
         ProjectSettingsResponse settings = new ProjectSettingsResponse(new ProjectSettingsResponse.SettingsBody(
                 List.of(new ProjectSettingsResponse.StatusEntry("todo"),
@@ -152,6 +160,9 @@ class ContextToolsTest {
         assertThat(requiredFields).hasSize(1);
         assertThat(requiredFields.get(0).asText()).isEqualTo("assignee");
         assertThat(json.get("members")).hasSize(2);
+        assertThat(json.get("members").get(0).get("kind").asText()).isEqualTo("HUMAN");
+        assertThat(json.get("members").get(1).get("id").asLong()).isEqualTo(2L);
+        assertThat(json.get("members").get(1).get("displayName").asText()).isEqualTo("페르소나봇");
         assertThat(json.get("members").get(1).get("kind").asText()).isEqualTo("AGENT");
         verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_project_context"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
     }

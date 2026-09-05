@@ -30,13 +30,18 @@ public class OrgClient {
     }
 
     /**
-     * {@code GET /api/org/members} — 기본 필터(status=ACTIVE, kind=HUMAN)를 그대로 쓴다.
-     * 조회 전용이라 관리자 토큰이 아니라 호출자의(보통 페르소나) 토큰을 그대로 실어도 된다.
+     * {@code GET /api/org/members?kind=ALL} — {@code get_project_context}의 담당자 후보
+     * 명단은 에이전트 페르소나도 보여야 하므로 기본 {@code kind=HUMAN} 필터를 명시적으로
+     * 해제한다(리뷰 반영, S10). {@code status}는 기본값(ACTIVE)을 그대로 둔다 — 비활성
+     * 멤버는 사람이든 페르소나든 담당자 후보가 아니다. 조회 전용이라 관리자 토큰이 아니라
+     * 호출자의(보통 페르소나) 토큰을 그대로 실어도 된다.
      */
     public List<MemberResponse> listMembers(String bearer) {
         try {
             return orgRestClient.get()
-                    .uri("/api/org/members")
+                    .uri(uriBuilder -> uriBuilder.path("/api/org/members")
+                            .queryParam("kind", "ALL")
+                            .build())
                     .header(HttpHeaders.AUTHORIZATION, bearer)
                     .retrieve()
                     .body(MEMBER_LIST);
