@@ -38,19 +38,24 @@ $env:JAVA_HOME = "C:\Program Files\Java\jdk-24"
 GitHub Packages(`com.platform:common-starter`) 인증은 `GITHUB_TOKEN` env 또는
 `~/.gradle/gradle.properties`의 `gpr.token`.
 
-## MCP 접속 가이드 (2026-09-06 E2E 도그푸딩 검증 완료)
+## MCP 접속 가이드 (2026-09-06 E2E 도그푸딩 검증 완료, 09-06 게이트웨이 수정 후 재검증)
 
-### 알려진 이슈 — 게이트웨이 경유 PAT 인증이 막혀 있다
+### 게이트웨이 경유 접속이 정식 경로다
 
-**`gateway-server`의 `PatExchangeWebFilter`(`filter/PatExchangeWebFilter.java:48`)가 PAT 접두사를
-`chanho_pat_`로 하드코딩하고 있는데, 이 서비스(`PatService.java:36`)가 실제로 발급하는 PAT 접두사는
-`agp_`다.** 그래서 `agp_*` 토큰으로 게이트웨이(`:18000`)를 거치면 `PatExchangeWebFilter`가 PAT로
-인식조차 못 하고 그대로 흘려보내고, 그 뒤 JWT 리소스서버가 `agp_...`를 JWT로 디코드하다 실패해
-빈 바디 401을 낸다. **agent-service 자체(`:9160`/`:19160`)에 직접 붙으면 정상 동작한다** — 이
-서비스의 `PatAuthFilter`는 `agp_*`를 올바르게 검증한다(`SecurityConfig`가 `/api/agent/mcp`를 별도
-체인으로 분리해 JWT 리소스서버를 아예 태우지 않는다). 아래 가이드는 이 버그가 고쳐지기 전까지
-**agent-service 직접 접속**을 기본으로 안내한다. 게이트웨이 경유(`:18000`)는 버그 수정 후 URL만
-바꾸면 된다 — 나머지 절차는 동일하다.
+`http://localhost:18000/api/agent/mcp`(dev) / `http://localhost:8000/api/agent/mcp`(운영)로
+PAT(`agp_*`)를 그대로 태워 접속한다 — 별도 교환·변환 없이 agent-service가 PAT을 직접 검증한다.
+
+한때 이 경로가 401로 막혀 있었다: `gateway-server`의 보안 체인에서 `/api/agent/mcp/**`를
+`permitAll()`로 열어 두긴 했지만, **`permitAll()`은 인가(authorization) 단계만 건너뛴다** —
+같은 체인에 `oauth2ResourceServer(jwt)`가 붙어 있으면 인가보다 먼저 도는
+`BearerTokenAuthenticationFilter`가 경로와 무관하게 모든 `Authorization: Bearer` 값을 JWT로
+디코드하려 시도한다. PAT(`agp_*`)는 JWT가 아니므로 이 디코드가 실패해 인가 단계에 닿기도 전에
+401로 체인이 끊겼다(agent-service 자체의 `PatAuthFilter` 설계 때 겪었던 것과 동일한 함정 —
+`SecurityConfig`가 그때도 `/api/agent/mcp`를 JWT 리소스서버가 아예 없는 별도 체인으로 분리해
+피해 갔었다). `gateway-server` a535be4가 같은 방식으로 `/api/agent/mcp/**`를
+`oauth2ResourceServer` 없는 별도 `SecurityWebFilterChain`(순서 1)으로 완전히 분리해 고쳤다 —
+나머지 경로는 기존 JWT 체인(순서 2) 그대로. 2026-09-06 실측: 게이트웨이 경유 `initialize` →
+`tools/list`(18종) 정상 확인.
 
 ### 1. 관리자로 페르소나·PAT 부트스트랩
 
@@ -90,21 +95,19 @@ PAT 관리: `GET /api/agent/tokens`(인증된 누구나, 해시는 노출 안 �
 
 ### 2. Claude Code에 MCP 서버 등록
 
-버그가 고쳐지기 전(현재): agent-service에 직접 연결한다.
-
-```bash
-claude mcp add --transport http agent-platform http://localhost:19160/api/agent/mcp \
-  --header "Authorization: Bearer agp_..."
-```
-
-버그 수정 후(의도된 최종 형태): 게이트웨이 단일 진입점을 쓴다.
+게이트웨이 단일 진입점을 쓴다(dev):
 
 ```bash
 claude mcp add --transport http agent-platform http://localhost:18000/api/agent/mcp \
   --header "Authorization: Bearer agp_..."
 ```
 
-연결 확인: `ping`(pong 응답) → `whoami`(방금 만든 페르소나 이름) → `list_projects`.
+운영은 `:8000`. 연결 확인: `ping`(pong 응답) → `whoami`(방금 만든 페르소나 이름) →
+`list_projects`.
+
+디버깅용 참고: agent-service는 `/api/agent/mcp`에 자체 `PatAuthFilter`를 갖고 있어
+`http://localhost:19160/api/agent/mcp`(dev) / `:9160`(운영)로 **직접** 접속해도 동일하게
+동작한다 — 게이트웨이 자체를 의심할 때(라우팅·보안 체인 변경 검증 등) 비교 대상으로 쓴다.
 
 ### 3. 도구 규약 (서버가 `initialize` 응답 `instructions`로도 내려준다)
 
@@ -127,4 +130,6 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
 2026-09-06 dev 오프셋 클러스터(전 서비스 +10000)에서 실제 왕복 검증 완료 — 페르소나 `jiho`(memberId=3)
 로 이슈 `AGP-1` 생성부터 `done` 전환까지 13회 도구 호출 전부 `tool_call_audit`에 `OK`로 기록,
 이슈 assignee/reporter·코멘트 author·워크로그 author·위키 `updatedBy`가 모두 페르소나 memberId와
-일치함을 REST로 교차 확인. 상세: `.superpowers/sdd/2026-09-05-agent-service-p1/task-14-report.md`.
+일치함을 REST로 교차 확인(최초 검증은 위 게이트웨이 버그 때문에 agent-service 직결로 수행).
+같은 날 게이트웨이 수정(`gateway-server` a535be4) 후 게이트웨이 경유 `initialize`/`tools/list`
+(18종) 재검증 완료. 상세: `.superpowers/sdd/2026-09-05-agent-service-p1/task-14-report.md`.
