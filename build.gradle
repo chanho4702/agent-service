@@ -26,6 +26,7 @@ dependencyManagement {
     imports {
         mavenBom "org.springframework.cloud:spring-cloud-dependencies:${springCloudVersion}"
         mavenBom "org.testcontainers:testcontainers-bom:${testcontainersVersion}"
+        mavenBom "org.springframework.ai:spring-ai-bom:2.0.0"
     }
 }
 
@@ -33,6 +34,7 @@ def sharedVersion = providers.gradleProperty('commonProtoVersion').getOrElse('0.
 
 dependencies {
     implementation "com.platform:common-starter:${sharedVersion}"
+    implementation 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
     implementation 'org.springframework.boot:spring-boot-starter-web'
     implementation 'org.springframework.boot:spring-boot-starter-security'
@@ -48,6 +50,7 @@ dependencies {
     annotationProcessor 'org.projectlombok:lombok:1.18.46'
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
     testImplementation 'org.springframework.security:spring-security-test'
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'
     testImplementation 'org.testcontainers:postgresql'

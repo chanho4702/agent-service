@@ -3,6 +3,14 @@ server:
 spring:
   application:
     name: agent-service
+  ai:
+    mcp:
+      server:
+        name: platform-agent
+        version: 0.1.0
+        protocol: STREAMABLE          # SSE 아님 — 2.0 기본
+        streamable-http:
+          mcp-endpoint: /api/agent/mcp
   # 모든 자격증명/URL은 env로 오버라이드 가능. 기본값은 로컬 dev 전용 — 운영에서는 반드시 주입.
   datasource:
     url: ${AGENT_DB_URL:jdbc:postgresql://localhost:5433/agentdb}
