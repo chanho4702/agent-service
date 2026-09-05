@@ -32,4 +32,11 @@ public class Persona {
         p.emoji = emoji; p.voicePrompt = voicePrompt;
         return p;
     }
+
+    /** 재부트스트랩(같은 slug 재호출) 시 표시용 필드만 갱신한다 — memberId/slug/role은 불변이다. */
+    public void refresh(String name, String emoji, String voicePrompt) {
+        this.name = name;
+        this.emoji = emoji;
+        this.voicePrompt = voicePrompt;
+    }
 }
