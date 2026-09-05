@@ -58,7 +58,16 @@ class PersonaServiceTest {
     }
 
     @Test
-    void bootstrap_calls_auth_then_org_member_then_grants_in_order_and_saves_persona() {
+    // MockRestServiceServer는 서버 인스턴스별로 기대를 검증하므로(auth/org가 서로 다른
+    // 인스턴스) 이 테스트가 직접 증명하는 것은 (1) org-service 안에서 멤버 등록이 grant보다
+    // 먼저 나간다는 것과 (2) 그 grant의 subjectId가 auth 응답의 userId(9001)와 정확히
+    // 일치한다는 것이다. auth 호출이 org 호출보다 먼저 일어난다는 것 자체는 이 두
+    // MockRestServiceServer 사이의 교차 시퀀싱으로 검증되는 게 아니라, 구조적으로 강제된다
+    // — org 요청 본문(id=9001)을 만들려면 auth 응답의 userId가 이미 있어야 하고, 그 값은
+    // 스텁이 아니라 PersonaService.bootstrap이 실제로 auth 응답을 역참조해서 넣은 것이다
+    // (하드코딩했다면 org 쪽 jsonPath("$.id")/jsonPath("$.subjectId") 검증이 우연히만
+    // 맞아떨어질 텐데, auth stub의 userId를 9001이 아닌 값으로 바꾸면 이 테스트가 깨진다).
+    void bootstrap_uses_auth_memberId_for_org_member_then_grant_in_order_and_saves_persona() {
         authServer.expect(requestTo("http://auth-server/api/auth/agents"))
                 .andExpect(method(HttpMethod.POST))
                 .andExpect(header("Authorization", ADMIN_BEARER))
