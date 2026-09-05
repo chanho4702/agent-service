@@ -19,11 +19,15 @@ import java.util.Map;
 import java.util.Optional;
 
 /**
- * {@code /api/agent/mcp} (그리고 그 하위 경로) 요청만 처리한다. SecurityConfig에서 이
- * 경로는 permitAll이라 이 필터가 실질적인 인증 게이트다 — {@code Authorization: Bearer
- * agp_*}를 검증하지 못하면 체인을 진행시키지 않고 여기서 401을 직접 써서 끝낸다
- * (MCP 핸들러에 닿지 않게). 다른 경로는 그대로 통과시킨다 — JWT 인증은
- * BearerTokenAuthenticationFilter가 이어서 처리한다.
+ * {@code /api/agent/mcp}(그리고 그 하위 경로) 전용 체인에서만 도는 필터다 —
+ * SecurityConfig의 {@code mcpFilterChain}이 이 경로만 이 필터로 라우팅하므로 이 필터가
+ * 실질적인 인증 게이트다: {@code Authorization: Bearer agp_*}를 검증하지 못하면 체인을
+ * 진행시키지 않고 여기서 401을 직접 써서 끝낸다(MCP 핸들러에 닿지 않게).
+ *
+ * <p>경로 매칭은 {@code mcpFilterChain}의 {@code securityMatcher(MCP_PATH, MCP_SUBPATHS)}와
+ * 정확히 대응한다({@code /api/agent/mcp} 자체이거나 {@code /api/agent/mcp/}로 시작) — 이
+ * 체인에 걸리는 요청은 이 필터가 전부 처리하므로 실질적으로 이 검사는 항상 참이지만,
+ * 필터를 다른 체인에 잘못 재사용하는 실수를 방지하는 방어선으로 남겨 둔다.
  *
  * <p>일반 Spring 빈으로 등록하지 않는다 — Filter 빈은 Boot가 서블릿 컨테이너에도
  * {@code /*}로 자동 등록해 이중 실행을 유발한다. SecurityConfig가 직접
@@ -32,7 +36,8 @@ import java.util.Optional;
 @RequiredArgsConstructor
 public class PatAuthFilter extends OncePerRequestFilter {
 
-    private static final String MCP_PATH_PREFIX = "/api/agent/mcp";
+    private static final String MCP_PATH = "/api/agent/mcp";
+    private static final String MCP_PATH_WITH_TRAILING_SLASH = "/api/agent/mcp/";
     private static final String BEARER_PREFIX = "Bearer ";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -41,7 +46,7 @@ public class PatAuthFilter extends OncePerRequestFilter {
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
-        if (!request.getRequestURI().startsWith(MCP_PATH_PREFIX)) {
+        if (!isMcpPath(request.getRequestURI())) {
             chain.doFilter(request, response);
             return;
         }
@@ -56,6 +61,10 @@ public class PatAuthFilter extends OncePerRequestFilter {
 
         SecurityContextHolder.getContext().setAuthentication(authenticationFor(principal.get()));
         chain.doFilter(request, response);
+    }
+
+    private boolean isMcpPath(String uri) {
+        return uri.equals(MCP_PATH) || uri.startsWith(MCP_PATH_WITH_TRAILING_SLASH);
     }
 
     private UsernamePasswordAuthenticationToken authenticationFor(PatPrincipal principal) {
