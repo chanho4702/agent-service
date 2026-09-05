@@ -36,7 +36,8 @@ final class DownstreamErrors {
         return new ServiceUnavailableException(context + " 실패: 연결할 수 없습니다");
     }
 
-    private static String extractMessage(HttpStatusCodeException e, String fallbackContext) {
+    /** AlmClient가 409(낙관적 락 충돌)를 별도 예외로 분리해 던질 때 메시지 추출에 재사용한다. */
+    static String extractMessage(HttpStatusCodeException e, String fallbackContext) {
         try {
             Map<?, ?> body = MAPPER.readValue(e.getResponseBodyAsString(), Map.class);
             Object error = body.get("error");
