@@ -30,14 +30,20 @@ class PatAuthFilterTest {
     }
 
     @Test
-    void non_mcp_path_passes_through_untouched() throws Exception {
+    void non_mcp_raw_uri_is_rejected_fail_closed() throws Exception {
+        // 이 필터는 securityMatcher(MCP_PATH, MCP_SUBPATHS)로 이미 이 경로만 라우팅된
+        // permitAll 체인 안에서 돈다 — 원본 URI가 MCP 경로와 일치하지 않는데도 여기 들어왔다는
+        // 것은 percent-encoding 등으로 경로 파싱이 갈라졌다는 신호이므로, 통과시키지 않고
+        // 401로 막아야 한다(fail-closed). chain.doFilter를 호출하면 인증 없이 permitAll
+        // 체인을 그대로 통과해 MCP 핸들러까지 뚫린다.
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/agent/tokens");
         MockHttpServletResponse response = new MockHttpServletResponse();
         FilterChain chain = mock(FilterChain.class);
 
         filter.doFilter(request, response, chain);
 
-        verify(chain).doFilter(request, response);
+        assertThat(response.getStatus()).isEqualTo(401);
+        verifyNoInteractions(chain);
         verifyNoInteractions(patService);
         assertThat(SecurityContextHolder.getContext().getAuthentication()).isNull();
     }

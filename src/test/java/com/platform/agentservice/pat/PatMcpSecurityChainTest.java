@@ -4,18 +4,21 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.http.HttpMethod;
 import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
+import java.net.URI;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.BDDMockito.given;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.request;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
@@ -59,6 +62,22 @@ class PatMcpSecurityChainTest {
         given(patService.validate("agp_bad")).willReturn(Optional.empty());
 
         mvc.perform(post("/api/agent/mcp/anything").header("Authorization", "Bearer agp_bad"))
+                .andExpect(status().isUnauthorized());
+    }
+
+    /**
+     * C1 회귀: percent-encoding으로 원본 URI({@code getRequestURI()}, 미디코드)와
+     * securityMatcher(디코드 매칭)가 서로 갈라지는 경로다 — {@code %6d} = {@code m}이므로
+     * {@code /api/agent/%6dcp}는 디코드하면 {@code /api/agent/mcp}와 같다. 이 요청이
+     * (디코드 매칭으로) permitAll인 mcpFilterChain에 들어가더라도, PatAuthFilter가 원본
+     * URI 불일치를 감지해 인증 없이 통과시키지 않고 401로 막아야 한다(fail-closed) — 설령
+     * 매칭기가 이 요청을 mcpFilterChain으로 안 걸러 JWT 체인(2번)으로 넘기더라도 토큰이
+     * 없으므로 그쪽도 401이다. 어느 경로든 401이어야 하며, 인증 우회로 MCP 핸들러에
+     * 닿아서는 절대 안 된다.
+     */
+    @Test
+    void percent_encoded_mcp_path_is_rejected_not_bypassed() throws Exception {
+        mvc.perform(request(HttpMethod.POST, URI.create("/api/agent/%6dcp")))
                 .andExpect(status().isUnauthorized());
     }
 

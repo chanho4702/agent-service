@@ -91,7 +91,7 @@ curl -s -X POST $GATEWAY/api/agent/tokens \
 ```
 
 PAT 관리: `GET /api/agent/tokens`(인증된 누구나, 해시는 노출 안 함) · `DELETE /api/agent/tokens/{id}`
-(관리자만). 페르소나 목록: `GET /api/agent/personas`(인증 불요, 슬러그/역할/emoji만 노출).
+(관리자만). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자 누구나 — JWT 필요, 슬러그/역할/emoji만 노출).
 
 ### 2. Claude Code에 MCP 서버 등록
 

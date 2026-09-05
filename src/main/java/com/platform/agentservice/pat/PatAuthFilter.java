@@ -47,7 +47,12 @@ public class PatAuthFilter extends OncePerRequestFilter {
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response, FilterChain chain)
             throws ServletException, IOException {
         if (!isMcpPath(request.getRequestURI())) {
-            chain.doFilter(request, response);
+            // securityMatcher(MCP_PATH, MCP_SUBPATHS)는 디코드된 경로로 매칭하지만 여기서는
+            // request.getRequestURI()(원본, 미디코드)를 비교한다 — 매칭 대상이 이 필터에
+            // 도달했는데 원본 URI가 일치하지 않는다면 그건 percent-encoding(예: %6dcp) 등으로
+            // 경로 파싱이 갈라졌다는 신호다. 이 체인은 permitAll이라 여기서 통과시키면 인증
+            // 검증 없이 MCP 핸들러까지 뚫린다 — fail-open은 절대 안 된다. 무조건 401로 막는다.
+            writeUnauthorized(response);
             return;
         }
 
