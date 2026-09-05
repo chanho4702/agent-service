@@ -1,0 +1,56 @@
+server:
+  port: 9160
+spring:
+  application:
+    name: agent-service
+  # 모든 자격증명/URL은 env로 오버라이드 가능. 기본값은 로컬 dev 전용 — 운영에서는 반드시 주입.
+  datasource:
+    url: ${AGENT_DB_URL:jdbc:postgresql://localhost:5433/agentdb}
+    username: ${AGENT_DB_USERNAME:keycloak}
+    password: ${AGENT_DB_PASSWORD:keycloak}
+  jpa:
+    hibernate:
+      ddl-auto: validate        # 스키마 변경은 Flyway로만
+    open-in-view: false
+  flyway:
+    enabled: true
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: ${AUTH_JWKS_URI:http://localhost:9000/.well-known/jwks.json}
+
+eureka:
+  client:
+    service-url:
+      defaultZone: ${EUREKA_URI:http://localhost:8761/eureka}
+  instance:
+    # Windows/사설망에서 DNS 해석 불가 호스트명 등록 시 게이트웨이 lb:// 해석이 죽는다 — IP로 등록 (E2E 실측).
+    prefer-ip-address: true
+
+platform:
+  jwt:
+    # auth-server 자체 AT의 issuer/audience — common-starter가 이 두 값으로 검증기를 만든다.
+    issuer: ${PLATFORM_ISSUER:http://localhost:9000}
+    audience: ${PLATFORM_AUDIENCE:platform-api}
+  agent:
+    auth-base-url: ${AUTH_BASE_URL:http://localhost:9000}
+    alm-base-url: ${ALM_BASE_URL:http://localhost:9120}
+    wiki-base-url: ${WIKI_BASE_URL:http://localhost:9110}
+    org-base-url: ${ORG_BASE_URL:http://localhost:9130}
+    internal-secret: ${AGENT_INTERNAL_SECRET:}   # 비면 페르소나 토큰 발급 불가(fail-closed)
+
+---
+spring:
+  config:
+    activate:
+      on-profile: docker
+# docker 프로필: Eureka 미등록(게이트웨이가 AGENT_SERVICE_URI DNS 직결 — org/search 패턴)
+eureka:
+  client:
+    enabled: false
+logging:
+  # 컨테이너에서는 stdout JSON. Alloy가 긁어 Loki로 보낸다. 앱에서 Loki 직결 금지.
+  structured:
+    format:
+      console: ecs

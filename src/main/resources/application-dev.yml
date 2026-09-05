@@ -1,0 +1,21 @@
+# dev 프로필 — 도커 풀스택과 나란히 실행 (포트 +10000).
+# issuer/audience는 접속 포트가 아니라 토큰 문자열 계약이라 dev도 기본값(:9000)을 유지한다.
+server:
+  port: 19160
+spring:
+  security:
+    oauth2:
+      resourceserver:
+        jwt:
+          jwk-set-uri: http://localhost:19000/.well-known/jwks.json
+eureka:
+  client:
+    service-url:
+      defaultZone: http://localhost:18761/eureka
+
+platform:
+  agent:
+    auth-base-url: http://localhost:19000
+    alm-base-url: http://localhost:19120
+    wiki-base-url: http://localhost:19110
+    org-base-url: http://localhost:19130

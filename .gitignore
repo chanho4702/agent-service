@@ -1,0 +1,16 @@
+# build / deps
+.gradle/
+build/
+out/
+# IDE
+.idea/
+*.iml
+# gradle wrapper noise / caches (anchored to root — gradle/wrapper/ below must stay tracked)
+/caches/
+/daemon/
+/native/
+/wrapper/
+# gradle 임시 파일 (bootRun 중 생성)
+.tmp/
+# annotation-processor generated sources
+src/main/generated/
