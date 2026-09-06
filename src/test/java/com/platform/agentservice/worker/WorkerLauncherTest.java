@@ -86,8 +86,9 @@ class WorkerLauncherTest {
     void clones_repo_before_running_claude_and_command_targets_claude_binary_with_flags() {
         stubTokenIssuance();
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        // 톱레벨 total_cost_usd — 실측(v2.1.263) shape. usage.total_cost_usd 아님(T3 micro follow-up).
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0,
-                "{\"result\":\"done\",\"session_id\":\"sess-1\",\"usage\":{\"total_cost_usd\":0.5}}", "", false));
+                "{\"result\":\"done\",\"session_id\":\"sess-1\",\"total_cost_usd\":0.5}", "", false));
 
         WorkerJob job = new WorkerJob("https://example.com/repo.git", "제목", "본문", List.of());
         WorkerResult result = launcher.launch(run(null), job);
@@ -117,6 +118,54 @@ class WorkerLauncherTest {
         // T6b: 커밋 파서가 실제 워크스페이스를 찾을 수 있도록 결과에 실제 경로를 싣는다
         // (run.workspacePath DB 컬럼은 "pending" 그대로다 — WorkerResult가 대신 나른다).
         assertThat(result.workspacePath()).isEqualTo(workDir.resolve("run-" + RUN_ID).toString());
+    }
+
+    @Test
+    void parses_real_cli_output_shape_top_level_cost_and_direct_usage_tokens() {
+        // T3 micro follow-up: 이 머신에서 실측한 `claude -p --output-format json`(v2.1.263)의
+        // 실제 shape 그대로 재현한 픽스처. total_cost_usd/session_id는 톱레벨, 토큰은
+        // usage.input_tokens/output_tokens에 직접 있고 usage.models 맵은 없다. 톱레벨
+        // model·modelUsage 존재 여부는 미확인이라 이 픽스처에는 넣지 않는다(폴백 결과는 null).
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0,
+                "{\"result\":\"done\",\"session_id\":\"sess-1\",\"total_cost_usd\":0.5,"
+                        + "\"usage\":{\"input_tokens\":120,\"output_tokens\":340,"
+                        + "\"cache_creation_input_tokens\":10,\"cache_read_input_tokens\":5,"
+                        + "\"output_tokens_details\":{\"reasoning_tokens\":0}},"
+                        + "\"iterations\":[{\"note\":\"n/a\"}]}",
+                "", false));
+
+        WorkerResult result = launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(result.resultText()).isEqualTo("done");
+        assertThat(result.sessionId()).isEqualTo("sess-1");
+        assertThat(result.costUsd()).isEqualByComparingTo(BigDecimal.valueOf(0.5));
+        assertThat(result.inputTokens()).isEqualTo(120L);
+        assertThat(result.outputTokens()).isEqualTo(340L);
+        assertThat(result.model()).isNull();
+    }
+
+    @Test
+    void parses_legacy_nested_usage_models_shape_as_fallback() {
+        // 레거시(당초 가정했던) shape: total_cost_usd가 usage 아래 중첩, 토큰은 usage.models
+        // 맵의 모델별 항목으로. 실측과 다르지만 혹시 남아있는 변형에 대비한 폴백 경로 검증.
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0,
+                "{\"result\":\"legacy-done\",\"session_id\":\"sess-legacy\","
+                        + "\"usage\":{\"total_cost_usd\":0.75,\"models\":{\"claude-sonnet-5\":"
+                        + "{\"input_tokens\":50,\"output_tokens\":75}}}}",
+                "", false));
+
+        WorkerResult result = launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(result.resultText()).isEqualTo("legacy-done");
+        assertThat(result.sessionId()).isEqualTo("sess-legacy");
+        assertThat(result.costUsd()).isEqualByComparingTo(BigDecimal.valueOf(0.75));
+        assertThat(result.inputTokens()).isEqualTo(50L);
+        assertThat(result.outputTokens()).isEqualTo(75L);
+        assertThat(result.model()).isEqualTo("claude-sonnet-5");
     }
 
     @Test

@@ -224,36 +224,62 @@ public class WorkerLauncher {
         String resultText = textOrNull(root, "result");
         String sessionId = textOrNull(root, "session_id");
 
-        BigDecimal costUsd = null;
-        long inputTokens = 0L;
-        long outputTokens = 0L;
-        String model = textOrNull(root, "model");
+        // costUsd: 실측(v2.1.263, T3 micro follow-up)은 톱레벨 total_cost_usd. 혹시 다른
+        // 버전/변형이 usage 아래 중첩해서 내려주는 경우를 대비해 레거시 폴백을 남긴다.
+        BigDecimal costUsd = decimalOrNull(root, "total_cost_usd");
 
         JsonNode usage = root.get("usage");
+        long inputTokens = 0L;
+        long outputTokens = 0L;
         if (usage != null && usage.isObject()) {
-            JsonNode totalCost = usage.get("total_cost_usd");
-            if (totalCost != null && totalCost.isNumber()) {
-                costUsd = totalCost.decimalValue();
+            if (costUsd == null) {
+                costUsd = decimalOrNull(usage, "total_cost_usd");
             }
-            JsonNode models = usage.get("models");
-            if (models != null && models.isObject()) {
-                String firstModelKey = null;
-                for (Map.Entry<String, JsonNode> entry : models.properties()) {
-                    if (firstModelKey == null) {
-                        firstModelKey = entry.getKey();
+            if (usage.has("input_tokens") || usage.has("output_tokens")) {
+                // 실측 shape: usage 바로 아래 토큰 카운트(usage.models 맵은 없다).
+                inputTokens = longOrZero(usage, "input_tokens");
+                outputTokens = longOrZero(usage, "output_tokens");
+            } else {
+                // 레거시 폴백: usage.models 맵이 있으면 전 모델 합산.
+                JsonNode models = usage.get("models");
+                if (models != null && models.isObject()) {
+                    for (Map.Entry<String, JsonNode> entry : models.properties()) {
+                        JsonNode modelUsage = entry.getValue();
+                        inputTokens += longOrZero(modelUsage, "input_tokens");
+                        outputTokens += longOrZero(modelUsage, "output_tokens");
                     }
-                    JsonNode modelUsage = entry.getValue();
-                    inputTokens += longOrZero(modelUsage, "input_tokens");
-                    outputTokens += longOrZero(modelUsage, "output_tokens");
-                }
-                if (model == null) {
-                    model = firstModelKey;
                 }
             }
         }
 
+        // model: 실측 응답에 톱레벨 model·modelUsage가 있는지는 미확인이라 3단 폴백을 둔다
+        // (톱레벨 model → 톱레벨 modelUsage 첫 키 → usage.models 첫 키 → null).
+        String model = textOrNull(root, "model");
+        if (model == null) {
+            model = firstKey(root.get("modelUsage"));
+        }
+        if (model == null && usage != null) {
+            model = firstKey(usage.get("models"));
+        }
+
         return new WorkerResult(execResult.exitCode(), false, resultText, sessionId, costUsd,
                 inputTokens, outputTokens, model, rawTail(execResult), workspacePath);
+    }
+
+    private BigDecimal decimalOrNull(JsonNode node, String field) {
+        JsonNode value = node == null ? null : node.get(field);
+        return (value != null && value.isNumber()) ? value.decimalValue() : null;
+    }
+
+    /** 주어진 노드가 객체면 첫 프로퍼티 키를(삽입 순서 기준), 아니면 {@code null}을 반환한다. */
+    private String firstKey(JsonNode objectNode) {
+        if (objectNode == null || !objectNode.isObject()) {
+            return null;
+        }
+        for (Map.Entry<String, JsonNode> entry : objectNode.properties()) {
+            return entry.getKey();
+        }
+        return null;
     }
 
     private JsonNode parseLastJsonObject(String stdout) {
