@@ -12,6 +12,7 @@ CREATE TABLE run (
     workspace_path VARCHAR(400),
     session_id     VARCHAR(80),
     pat_id         BIGINT,
+    model          VARCHAR(60),                               -- 워커가 `claude -p --model`에 넘길 페르소나별 모델 지정
     attempt        INT          NOT NULL DEFAULT 1,
     error          TEXT,
     started_at     timestamptz,

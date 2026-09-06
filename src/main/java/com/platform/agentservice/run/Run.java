@@ -40,6 +40,8 @@ public class Run {
     @Column(length = 400) private String workspacePath;
     @Column(length = 80) private String sessionId;
     private Long patId;
+    /** 워커가 {@code claude -p --model}에 넘길 페르소나별 모델 지정. 미지정 시 워커 기본값을 쓴다. */
+    @Column(length = 60) private String model;
     @Column(nullable = false) private int attempt = 1;
     @Column(columnDefinition = "text") private String error;
     private Instant startedAt;
@@ -47,7 +49,8 @@ public class Run {
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
     @UpdateTimestamp @Column(nullable = false) private Instant updatedAt;
 
-    public static Run queued(RunType type, String issueKey, long projectId, long personaId, RunTrigger trigger, String harnessRef) {
+    public static Run queued(RunType type, String issueKey, long projectId, long personaId, RunTrigger trigger,
+                              String harnessRef, String model) {
         Run r = new Run();
         r.type = type;
         r.issueKey = issueKey;
@@ -55,6 +58,7 @@ public class Run {
         r.personaId = personaId;
         r.trigger = trigger;
         r.harnessRef = harnessRef;
+        r.model = model;
         r.status = RunStatus.QUEUED;
         r.attempt = 1;
         return r;
@@ -75,6 +79,7 @@ public class Run {
         r.personaId = prior.personaId;
         r.trigger = prior.trigger;
         r.harnessRef = prior.harnessRef;
+        r.model = prior.model;
         r.status = RunStatus.QUEUED;
         r.attempt = prior.attempt + 1;
         return r;

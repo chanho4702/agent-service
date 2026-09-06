@@ -10,7 +10,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class RunTransitionTest {
 
     private Run queued() {
-        return Run.queued(RunType.TASK, "AGP-4", 1L, 2L, RunTrigger.USER, "harness://local");
+        return Run.queued(RunType.TASK, "AGP-4", 1L, 2L, RunTrigger.USER, "harness://local", "claude-opus-5");
     }
 
     // ---- 합법 전이 ----
@@ -109,6 +109,7 @@ class RunTransitionTest {
         assertThat(next.getPersonaId()).isEqualTo(r.getPersonaId());
         assertThat(next.getType()).isEqualTo(r.getType());
         assertThat(next.getTrigger()).isEqualTo(r.getTrigger());
+        assertThat(next.getModel()).isEqualTo(r.getModel());
     }
 
     @Test
