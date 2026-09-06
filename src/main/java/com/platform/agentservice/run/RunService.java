@@ -1,0 +1,296 @@
+package com.platform.agentservice.run;
+
+import com.platform.agentservice.client.AlmClient;
+import com.platform.agentservice.client.IssueClaimSupport;
+import com.platform.agentservice.client.TokenService;
+import com.platform.agentservice.client.dto.CommentResponse;
+import com.platform.agentservice.client.dto.IssueResponse;
+import com.platform.agentservice.budget.LedgerScope;
+import com.platform.agentservice.budget.UsageLedger;
+import com.platform.agentservice.budget.UsageLedgerRepository;
+import com.platform.agentservice.persona.Persona;
+import com.platform.agentservice.persona.PersonaRepository;
+import com.platform.agentservice.run.dto.RunSummaryResponse;
+import com.platform.agentservice.worker.WorkerJob;
+import com.platform.agentservice.worker.WorkerLauncher;
+import com.platform.agentservice.worker.WorkerProperties;
+import com.platform.agentservice.worker.WorkerResult;
+import com.platform.common.error.ConflictException;
+import com.platform.common.error.NotFoundException;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.scheduling.annotation.Async;
+import org.springframework.stereotype.Service;
+
+import java.math.BigDecimal;
+import java.util.EnumSet;
+import java.util.List;
+import java.util.Set;
+
+/**
+ * run 생성·실행·종결 오케스트레이션(P2a T4) — {@link Dispatcher}가 소비하고, T5(예산·게이트
+ * 승인 재큐)가 이 위에 더 얹는다. {@link #execute}는 {@code @Async}로 워커 실행 전체를
+ * 백그라운드 스레드에 태운다 — {@link WorkerLauncher#launch}가 프로세스 실행 동안(최대
+ * {@code timeoutMinutes}) 블로킹되므로, 이 메서드 안에서 하나의 긴 DB 트랜잭션을 걸지
+ * 않는다: 각 상태 전이는 {@code findById → 엔티티 메서드 → save}로 짧게 끊어서 커밋하고,
+ * 그 사이(워커 실행 중)에 {@code report_result}/{@code request_gate} 같은 다른 요청
+ * 스레드가 같은 run을 스스로 종결할 수 있다는 것을 전제로 한다({@link #applyOutcome}이
+ * 재조회해서 상태가 이미 RUNNING이 아니면 존중하고 물러난다).
+ *
+ * <p>워크스페이스/PAT 발급은 {@link WorkerLauncher}가 스스로 처리한다(T3 규칙 — launch()는
+ * run 상태를 건드리지 않는다). 그래서 이 서비스는 launch 호출 전에 {@code
+ * workspacePath="pending"}, {@code patId=null}로 먼저 RUNNING 전이를 커밋해 둔다(T4
+ * 브리핑 확정 결정) — 실제 workspacePath는 어차피 로컬 파일시스템 경로일 뿐 이 서비스가
+ * 이후 참조하지 않는다.
+ */
+@Slf4j
+@Service
+public class RunService {
+
+    /** {@link Run#existsByIssueKeyAndStatusIn} 등에서 "이미 진행 중"으로 보는 상태 — WAITING_APPROVAL 포함. */
+    public static final Set<RunStatus> ACTIVE_STATUSES =
+            EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL);
+
+    private static final String PENDING_WORKSPACE = "pending";
+    /** {@code harnessRef}는 현재 전역 하네스 번들 하나뿐이다(T3) — run별 선택지가 없어 상수로 둔다. */
+    private static final String DEFAULT_HARNESS_REF = "harness://default";
+    private static final String CLAIM_STATUS = "inprogress";
+    private static final int RECENT_COMMENTS_LIMIT = 10;
+    private static final int SUMMARY_MAX_LENGTH = 500;
+
+    private final RunRepository runRepository;
+    private final AlmClient almClient;
+    private final IssueClaimSupport issueClaimSupport;
+    private final TokenService tokenService;
+    private final PersonaRepository personaRepository;
+    private final WorkerLauncher workerLauncher;
+    private final WorkerProperties workerProperties;
+    private final UsageLedgerRepository usageLedgerRepository;
+    private final SchedulerProperties schedulerProperties;
+
+    public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
+                       TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
+                       WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
+                       SchedulerProperties schedulerProperties) {
+        this.runRepository = runRepository;
+        this.almClient = almClient;
+        this.issueClaimSupport = issueClaimSupport;
+        this.tokenService = tokenService;
+        this.personaRepository = personaRepository;
+        this.workerLauncher = workerLauncher;
+        this.workerProperties = workerProperties;
+        this.usageLedgerRepository = usageLedgerRepository;
+        this.schedulerProperties = schedulerProperties;
+    }
+
+    /** Dispatcher가 새 이슈를 픽업할 때 넘기는 최소 참조. */
+    public record IssueRef(String issueKey, long projectId, long personaId) {
+    }
+
+    /** 같은 이슈에 이미 활성(QUEUED/RUNNING/WAITING_APPROVAL) run이 있으면 409로 거부한다. */
+    public Run createQueuedForIssue(IssueRef issue, RunTrigger trigger, String model) {
+        if (runRepository.existsByIssueKeyAndStatusIn(issue.issueKey(), ACTIVE_STATUSES)) {
+            throw new ConflictException("이미 진행 중인 run이 있습니다: " + issue.issueKey());
+        }
+        Run run = Run.queued(RunType.TASK, issue.issueKey(), issue.projectId(), issue.personaId(),
+                trigger, DEFAULT_HARNESS_REF, model);
+        return runRepository.save(run);
+    }
+
+    /**
+     * QUEUED run 하나를 워커로 실행한다. 워커 준비(리포 매핑 해석·이슈 claim) 실패 시
+     * RUNNING을 거쳐 곧바로 실패 처리한다 — {@link Run#fail}이 RUNNING에서만 허용되므로
+     * 상태 규약을 지키려면 실패도 RUNNING을 통과해야 한다.
+     */
+    @Async("workerExecutor")
+    public void execute(long runId) {
+        Run run = runRepository.findById(runId).orElse(null);
+        if (run == null) {
+            log.warn("run을 찾을 수 없어 실행을 건너뜁니다: id={}", runId);
+            return;
+        }
+        if (run.getStatus() != RunStatus.QUEUED) {
+            log.debug("QUEUED 상태가 아니라 실행을 건너뜁니다: id={} status={}", runId, run.getStatus());
+            return;
+        }
+
+        WorkerJob job;
+        try {
+            job = buildJob(run);
+        } catch (Exception e) {
+            run.start(PENDING_WORKSPACE, null);
+            runRepository.save(run);
+            finishFailed(runId, describeFailure(e));
+            return;
+        }
+
+        run.start(PENDING_WORKSPACE, null);
+        runRepository.save(run);
+
+        WorkerResult result;
+        try {
+            Run runningRun = runRepository.findById(runId).orElseThrow();
+            result = workerLauncher.launch(runningRun, job);
+        } catch (Exception e) {
+            finishFailed(runId, "실행 인프라 오류: " + e.getMessage());
+            return;
+        }
+
+        applyOutcome(runId, result);
+    }
+
+    /** {@code POST /api/agent/runs/{id}/cancel} — 실행 중인 워커 OS 프로세스 강제 종료는 P2a 범위 밖이다. */
+    public void cancel(long runId) {
+        Run run = runRepository.findById(runId)
+                .orElseThrow(() -> new NotFoundException("run을 찾을 수 없습니다: " + runId));
+        run.cancel();
+        runRepository.save(run);
+        commentBestEffort(run, "🛑 관리자 요청으로 취소됨 — 이미 실행 중인 워커 프로세스는 강제 종료되지 않습니다(P2a 범위 밖).");
+    }
+
+    /** {@code GET /api/agent/runs?status=} 감독 API — 최소 필드 목록. */
+    public List<RunSummaryResponse> list(RunStatus status) {
+        List<Run> runs = status != null ? runRepository.findByStatus(status) : runRepository.findAll();
+        return runs.stream().map(RunSummaryResponse::of).toList();
+    }
+
+    // ---- 내부 ----
+
+    /**
+     * 리포 매핑 해석 → 이슈 claim(담당자=페르소나, 상태=inprogress) → 최근 코멘트 조회 순.
+     * 리포 매핑이 없으면 ALM을 건드리지 않고 바로 실패시킨다(claim으로 이슈 상태를
+     * 바꿔놓고 워커를 못 띄우는 상황을 피한다).
+     */
+    private WorkerJob buildJob(Run run) {
+        String repoUrl = resolveRepoUrl(run.getIssueKey());
+
+        Persona persona = personaRepository.findById(run.getPersonaId())
+                .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));
+        String bearer = tokenService.bearerFor(persona.getMemberId());
+
+        IssueResponse claimed = issueClaimSupport.claim(run.getIssueKey(), persona.getMemberId(), CLAIM_STATUS, bearer);
+        List<CommentResponse> comments = almClient.comments(claimed.id(), bearer);
+        List<String> recentComments = comments.stream()
+                .skip(Math.max(0, comments.size() - RECENT_COMMENTS_LIMIT))
+                .map(CommentResponse::body)
+                .toList();
+
+        return new WorkerJob(repoUrl, claimed.title(), claimed.description(), recentComments);
+    }
+
+    private String resolveRepoUrl(String issueKey) {
+        String projectKey = projectKeyOf(issueKey);
+        String repoUrl = workerProperties.repos().get(projectKey);
+        if (repoUrl == null || repoUrl.isBlank()) {
+            throw new MissingRepoMappingException("리포 매핑 없음: " + projectKey);
+        }
+        return repoUrl;
+    }
+
+    private static String projectKeyOf(String issueKey) {
+        int dash = issueKey.indexOf('-');
+        return dash > 0 ? issueKey.substring(0, dash) : issueKey;
+    }
+
+    private String describeFailure(Exception e) {
+        return e.getMessage() != null ? e.getMessage() : e.getClass().getSimpleName();
+    }
+
+    /**
+     * 워커 실행 결과를 반영한다. 원장 기록(세션 id·비용)은 run이 이미 다른 경로(워커의
+     * MCP {@code report_result}/{@code request_gate})로 종결됐어도 항상 남긴다 — 실제로
+     * 토큰이 소모됐다는 사실은 최종 상태와 무관하다. 상태 전이는 run이 여전히 RUNNING일
+     * 때만 이 메서드가 결정한다(이미 다른 상태라면 그쪽이 진실의 원천이므로 덮지 않는다).
+     */
+    private void applyOutcome(long runId, WorkerResult result) {
+        recordSessionAndLedger(runId, result);
+
+        Run run = runRepository.findById(runId).orElseThrow();
+        if (run.getStatus() != RunStatus.RUNNING) {
+            log.debug("워커가 이미 스스로 종결했습니다(run={}, status={}) — 재전이하지 않습니다.", runId, run.getStatus());
+            return;
+        }
+
+        if (result.timedOut()) {
+            finishFailed(runId, "시간 초과");
+            return;
+        }
+        if (!result.succeeded()) {
+            finishFailed(runId, truncate(result.rawTail()));
+            return;
+        }
+
+        run.complete();
+        runRepository.save(run);
+        commentBestEffort(run, "✅ 워커 종료: " + truncate(result.resultText()));
+    }
+
+    private void recordSessionAndLedger(long runId, WorkerResult result) {
+        Run run = runRepository.findById(runId).orElseThrow();
+        if (result.sessionId() != null && !result.sessionId().isBlank()) {
+            run.recordSession(result.sessionId());
+            runRepository.save(run);
+        }
+        if (result.costUsd() != null && result.costUsd().compareTo(BigDecimal.ZERO) > 0) {
+            usageLedgerRepository.save(UsageLedger.of(runId, LedgerScope.PROJECT, String.valueOf(run.getProjectId()),
+                    result.costUsd(), result.inputTokens(), result.outputTokens(), result.model()));
+            usageLedgerRepository.save(UsageLedger.of(runId, LedgerScope.PLATFORM, "platform",
+                    result.costUsd(), result.inputTokens(), result.outputTokens(), result.model()));
+        }
+    }
+
+    /** RUNNING일 때만 FAILED로 옮기고 재시도/차단을 판단한다(이미 다른 상태면 손대지 않는다). */
+    private void finishFailed(long runId, String error) {
+        Run run = runRepository.findById(runId).orElseThrow();
+        if (run.getStatus() != RunStatus.RUNNING) {
+            return;
+        }
+        run.fail(error);
+        runRepository.save(run);
+        handleRetryOrBlock(run);
+    }
+
+    /**
+     * attempt &lt; 한도면 continuation(QUEUED)을 만들어 다음 Dispatcher 틱의 drain이
+     * 집어가게 한다(여기서 즉시 실행하지 않는다 — Dispatcher 책임과 분리). 한도에 닿으면
+     * BLOCKED로 에스컬레이션한다.
+     */
+    private void handleRetryOrBlock(Run failedRun) {
+        int maxAttempts = schedulerProperties.retryMaxAttempts();
+        if (failedRun.getAttempt() < maxAttempts) {
+            Run next = runRepository.save(Run.continuation(failedRun));
+            commentBestEffort(failedRun, "🔁 재시도 " + next.getAttempt() + "/" + maxAttempts);
+        } else {
+            String blockReason = maxAttempts + "회 실패 — 사람 확인 필요";
+            failedRun.block(blockReason);
+            runRepository.save(failedRun);
+            commentBestEffort(failedRun, "⛔ " + blockReason);
+        }
+    }
+
+    /** 상태 전이는 이미 커밋된 뒤의 부가 알림이다 — 실패해도 run 처리 흐름을 막지 않는다. */
+    private void commentBestEffort(Run run, String body) {
+        try {
+            Persona persona = personaRepository.findById(run.getPersonaId())
+                    .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));
+            String bearer = tokenService.bearerFor(persona.getMemberId());
+            IssueResponse issue = almClient.getByKey(run.getIssueKey(), bearer);
+            almClient.addComment(issue.id(), body, bearer);
+        } catch (Exception e) {
+            log.warn("run={} 이슈 코멘트 기록 실패(상태는 저장됨): {}", run.getId(), e.getMessage());
+        }
+    }
+
+    private String truncate(String text) {
+        if (text == null || text.isBlank()) {
+            return "(결과 없음)";
+        }
+        return text.length() <= SUMMARY_MAX_LENGTH ? text : text.substring(0, SUMMARY_MAX_LENGTH);
+    }
+
+    /** 리포 매핑이 없을 때만 던지는 내부 전용 예외 — 실패 메시지 구성 목적만 있다. */
+    private static final class MissingRepoMappingException extends RuntimeException {
+        MissingRepoMappingException(String message) {
+            super(message);
+        }
+    }
+}

@@ -73,6 +73,14 @@ platform:
       allowed-tools: 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gradlew *),Bash(./gradlew *),Bash(npm *),Bash(pnpm *),Agent,mcp__agent-platform__*'
       mcp-url: ${WORKER_MCP_URL:http://localhost/api/agent/mcp}
       repos: {}   # 프로젝트키→git URL 매핑, env/yml로 주입 (예: AGP: https://github.com/chanho4702/agent-service.git)
+    scheduler:
+      # 디스패처(P2a T4) — 무인 자동화 루프. 기본 OFF(킬스위치), 반드시 명시적으로 켠다.
+      enabled: ${SCHEDULER_ENABLED:false}
+      interval-ms: ${SCHEDULER_INTERVAL_MS:60000}
+      max-concurrent-global: ${SCHEDULER_MAX_GLOBAL:2}
+      max-concurrent-per-project: ${SCHEDULER_MAX_PER_PROJECT:1}
+      default-persona-slug: ${SCHEDULER_PERSONA:jiho}
+      retry-max-attempts: ${SCHEDULER_RETRY_MAX_ATTEMPTS:3}
 
 # Actuator — 내부망 전용. 게이트웨이 관리자 대시보드(/api/platform/health)가 20초 캐시로 프로브한다.
 # health·info 둘만 노출하고(SecurityConfig의 전용 체인에서 이 둘만 permitAll), 관리 포트는 따로
