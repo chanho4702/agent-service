@@ -125,6 +125,19 @@ class RunTransitionTest {
     }
 
     @Test
+    void continuation_fromFailed_createsNewQueuedRun() {
+        Run r = queued();
+        r.start("/work/AGP-4", 9L);
+        r.fail("timeout");
+
+        Run next = Run.continuation(r);
+
+        assertThat(next.getStatus()).isEqualTo(RunStatus.QUEUED);
+        assertThat(next.getAttempt()).isEqualTo(2);
+        assertThat(next.getModel()).isEqualTo(r.getModel());
+    }
+
+    @Test
     void recordSession_setsSessionId() {
         Run r = queued();
         r.start("/work/AGP-4", 9L);
@@ -148,6 +161,23 @@ class RunTransitionTest {
         Gate g = Gate.request(1L, GateKind.ESCALATION, "계속 진행할까요?");
         g.reject(42L);
         assertThat(g.getDecision()).isEqualTo(GateDecision.REJECT);
+    }
+
+    // ---- 불법 전이: continuation 경계 (I1 — FAILED 재시도는 continuation, RUNNING/DONE은 불법) ----
+
+    @Test
+    void continuation_fromRunning_isIllegal() {
+        Run r = queued();
+        r.start("/work/AGP-4", 9L);
+        assertThatThrownBy(() -> Run.continuation(r)).isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void continuation_fromDone_isIllegal() {
+        Run r = queued();
+        r.start("/work/AGP-4", 9L);
+        r.complete();
+        assertThatThrownBy(() -> Run.continuation(r)).isInstanceOf(ConflictException.class);
     }
 
     // ---- 불법 전이 (최소 4건) ----
@@ -185,5 +215,19 @@ class RunTransitionTest {
         Gate g = Gate.request(1L, GateKind.PLAN, "계획대로 진행할까요?");
         g.approve(42L);
         assertThatThrownBy(() -> g.approve(42L)).isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void gate_rejectThenReject_isIllegal() {
+        Gate g = Gate.request(1L, GateKind.MERGE, "머지해도 될까요?");
+        g.reject(42L);
+        assertThatThrownBy(() -> g.reject(42L)).isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void gate_approveThenReject_isIllegal() {
+        Gate g = Gate.request(1L, GateKind.ESCALATION, "계속 진행할까요?");
+        g.approve(42L);
+        assertThatThrownBy(() -> g.reject(42L)).isInstanceOf(ConflictException.class);
     }
 }
