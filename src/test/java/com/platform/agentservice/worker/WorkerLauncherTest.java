@@ -18,7 +18,9 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
 
+import java.io.IOException;
 import java.math.BigDecimal;
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -182,8 +184,15 @@ class WorkerLauncherTest {
         assertThat(cmd.get(idx + 1)).isEqualTo("claude-sonnet-5");
     }
 
+    /**
+     * F1(P2a T7 fix round): {@code --mcp-config}는 이제 인라인 JSON이 아니라 워크스페이스
+     * 안 파일 경로다 — Windows ProcessBuilder 인자 손상 재발 방지(task-7 3회 재현). 인자
+     * 값 자체가 순수 경로 문자열(따옴표·중괄호 없음)인지, 그 경로의 파일이 CLI 호출
+     * 시점에는 올바른 JSON을 담고 있었는지(FakeCommandExecutor가 호출 순간 내용을 캡처),
+     * 실행이 끝난 뒤에는 삭제됐는지(토큰 잔존 방지)를 모두 확인한다.
+     */
     @Test
-    void mcp_config_json_contains_mcp_url_and_bearer_token() {
+    void mcp_config_is_written_to_a_file_and_deleted_after_run_completes() {
         stubTokenIssuance();
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"ok\"}", "", false));
@@ -192,10 +201,31 @@ class WorkerLauncherTest {
 
         List<String> cmd = commandExecutor.calls.get(1).command();
         int idx = cmd.indexOf("--mcp-config");
-        String json = cmd.get(idx + 1);
-        assertThat(json).contains("http://localhost/api/agent/mcp");
-        assertThat(json).contains("Bearer agp_secret-token");
-        assertThat(json).contains("agent-platform");
+        assertThat(idx).isGreaterThanOrEqualTo(0);
+        String passedArg = cmd.get(idx + 1);
+        Path expectedPath = workDir.resolve("run-" + RUN_ID).resolve(".mcp-run.json");
+        assertThat(passedArg).isEqualTo(expectedPath.toString());
+        // 인라인 JSON이었다면 반드시 있었을 문자들이 인자 값에는 전혀 없어야 한다(재발 방지 가드).
+        assertThat(passedArg).doesNotContain("{").doesNotContain("\"");
+
+        String contentAtCallTime = commandExecutor.mcpConfigContentAtCall;
+        assertThat(contentAtCallTime).contains("http://localhost/api/agent/mcp");
+        assertThat(contentAtCallTime).contains("Bearer agp_secret-token");
+        assertThat(contentAtCallTime).contains("agent-platform");
+
+        assertThat(Files.exists(expectedPath)).isFalse();
+    }
+
+    @Test
+    void mcp_config_file_is_deleted_even_when_claude_exits_nonzero() {
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(1, "not json at all", "boom", false));
+
+        launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        Path expectedPath = workDir.resolve("run-" + RUN_ID).resolve(".mcp-run.json");
+        assertThat(Files.exists(expectedPath)).isFalse();
     }
 
     @Test
@@ -254,6 +284,8 @@ class WorkerLauncherTest {
                 .hasMessage("boom");
 
         verify(patService).revoke(9L);
+        // F1: 실행기가 던져도 mcp-config 파일(토큰 포함)이 워크스페이스에 남으면 안 된다.
+        assertThat(Files.exists(workDir.resolve("run-" + RUN_ID).resolve(".mcp-run.json"))).isFalse();
     }
 
     @Test
@@ -320,6 +352,8 @@ class WorkerLauncherTest {
         final List<Call> calls = new ArrayList<>();
         private final List<ExecResult> queuedResults = new ArrayList<>();
         private RuntimeException throwOnNext;
+        /** F1: {@code --mcp-config} 인자가 있으면 그 경로가 가리키는 파일 내용을 호출 시점에 캡처한다(그 뒤 삭제되므로 나중엔 못 읽는다). */
+        String mcpConfigContentAtCall;
 
         void enqueue(ExecResult result) {
             queuedResults.add(result);
@@ -332,6 +366,14 @@ class WorkerLauncherTest {
         @Override
         public ExecResult exec(List<String> command, Path cwd, Map<String, String> extraEnv, Duration timeout) {
             calls.add(new Call(command, cwd, extraEnv, timeout));
+            int mcpConfigIdx = command.indexOf("--mcp-config");
+            if (mcpConfigIdx >= 0 && mcpConfigIdx + 1 < command.size()) {
+                try {
+                    mcpConfigContentAtCall = Files.readString(Path.of(command.get(mcpConfigIdx + 1)));
+                } catch (IOException e) {
+                    mcpConfigContentAtCall = null;
+                }
+            }
             if (calls.size() > queuedResults.size() && throwOnNext != null) {
                 RuntimeException toThrow = throwOnNext;
                 throwOnNext = null;

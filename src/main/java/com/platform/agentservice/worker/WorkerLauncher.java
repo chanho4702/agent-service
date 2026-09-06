@@ -4,11 +4,13 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.agentservice.run.Run;
 import com.platform.agentservice.run.RunTokenService;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.math.BigDecimal;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -26,14 +28,28 @@ import java.util.Map;
  * 여기서 다루지 않는다(리텐션 정책은 후속 태스크).
  *
  * <p>흐름: 워크스페이스 준비 → {@code git clone}(실패 시 즉시 실패 반환, 토큰 발급 전이라
- * revoke 불필요) → 하네스 실체화({@link HarnessMaterializer}) → run 토큰 발급 → 프롬프트·
- * 커맨드 조립 → 실행(타임아웃) → 토큰 철회(반드시, {@code finally}) → stdout JSON 파싱.
+ * revoke 불필요) → 하네스 실체화({@link HarnessMaterializer}) → run 토큰 발급 → mcp-config
+ * 파일 작성 → 프롬프트·커맨드 조립 → 실행(타임아웃) → 토큰 철회 + mcp-config 파일 삭제
+ * (반드시, {@code finally}) → stdout JSON 파싱.
+ *
+ * <p><b>mcp-config는 파일로 넘긴다(P2a T7 fix, F1)</b>: 이전에는 {@code --mcp-config}에
+ * JSON 문자열을 인라인 인자로 직접 넘겼는데, Windows에서 {@link ProcessBuilder}가 인자를
+ * 재조립(re-quote)하는 과정에서 JSON 안의 큰따옴표가 통째로 사라지고 {@code /}가
+ * {@code \}로 바뀌어 claude CLI가 그 손상된 문자열을 "상대 파일 경로"로 오인해 즉시
+ * 죽는 결정적 버그가 있었다(task-7 E2E 실측, 3회 100% 동일 재현: "MCP config file not
+ * found: C:\agent-work\run-N\{mcpServers:..."). 그래서 JSON을 워크스페이스 안 파일
+ * ({@value #MCP_CONFIG_FILENAME})에 써 두고 그 절대경로만 인자로 넘긴다 — 경로 문자열에는
+ * 따옴표·중괄호가 없어 이 손상 경로 자체가 성립하지 않는다. 이 파일에는 run 토큰(Bearer)이
+ * 그대로 담기므로 내용을 절대 로그로 남기지 않고, {@code finally}에서 PAT 철회와 함께
+ * 반드시 삭제한다.
  */
+@Slf4j
 @Component
 public class WorkerLauncher {
 
     private static final Duration CLONE_TIMEOUT = Duration.ofMinutes(5);
     private static final int RAW_TAIL_LIMIT = 2000;
+    private static final String MCP_CONFIG_FILENAME = ".mcp-run.json";
 
     private final WorkerProperties properties;
     private final HarnessMaterializer harnessMaterializer;
@@ -61,13 +77,16 @@ public class WorkerLauncher {
         harnessMaterializer.materialize(workspace);
 
         RunTokenService.IssuedRunToken issued = runTokenService.issueFor(run);
+        Path mcpConfigPath = workspace.resolve(MCP_CONFIG_FILENAME);
         try {
-            List<String> command = buildCommand(run, buildPrompt(run, job), issued.token());
+            writeMcpConfigFile(mcpConfigPath, issued.token());
+            List<String> command = buildCommand(run, buildPrompt(run, job), mcpConfigPath);
             CommandExecutor.ExecResult execResult = commandExecutor.exec(
                     command, workspace, workerEnv(), Duration.ofMinutes(properties.timeoutMinutes()));
             return toWorkerResult(execResult, workspace);
         } finally {
             runTokenService.revoke(issued.patId());
+            deleteQuietly(mcpConfigPath);
         }
     }
 
@@ -155,7 +174,8 @@ public class WorkerLauncher {
         return (value == null || value.isBlank()) ? "(없음)" : value;
     }
 
-    List<String> buildCommand(Run run, String prompt, String token) {
+    /** {@code --mcp-config}에는 이제 JSON이 아니라 {@link #writeMcpConfigFile}이 써 둔 파일의 절대경로를 넘긴다(F1). */
+    List<String> buildCommand(Run run, String prompt, Path mcpConfigPath) {
         List<String> command = new ArrayList<>();
         command.add(properties.claudeBin());
         command.add("-p");
@@ -168,7 +188,7 @@ public class WorkerLauncher {
         command.add(properties.allowedTools());
         command.add("--strict-mcp-config");
         command.add("--mcp-config");
-        command.add(buildMcpConfigJson(token));
+        command.add(mcpConfigPath.toAbsolutePath().toString());
         command.add("--output-format");
         command.add("json");
         command.add("--max-turns");
@@ -198,6 +218,25 @@ public class WorkerLauncher {
             return objectMapper.writeValueAsString(root);
         } catch (Exception e) {
             throw new IllegalStateException("mcp-config JSON 생성 실패", e);
+        }
+    }
+
+    /** JSON을 워크스페이스 안 파일에 쓴다(F1) — 내용에 run 토큰이 담기므로 절대 로그로 남기지 않는다. */
+    private void writeMcpConfigFile(Path path, String token) {
+        String json = buildMcpConfigJson(token);
+        try {
+            Files.writeString(path, json, StandardCharsets.UTF_8);
+        } catch (IOException e) {
+            throw new UncheckedIOException("mcp-config 파일 쓰기 실패: " + path, e);
+        }
+    }
+
+    /** 실행이 끝나면(성공·실패·타임아웃·예외 무관) 항상 지운다 — 토큰이 담긴 파일을 워크스페이스에 남기지 않는다. */
+    private void deleteQuietly(Path path) {
+        try {
+            Files.deleteIfExists(path);
+        } catch (IOException e) {
+            log.warn("mcp-config 파일 삭제 실패(자격증명 파일이 워크스페이스에 남을 수 있음): {}", path);
         }
     }
 

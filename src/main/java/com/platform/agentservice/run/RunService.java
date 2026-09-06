@@ -55,9 +55,20 @@ import java.util.Set;
 @Service
 public class RunService {
 
-    /** {@link Run#existsByIssueKeyAndStatusIn} 등에서 "이미 진행 중"으로 보는 상태 — WAITING_APPROVAL 포함. */
+    /**
+     * {@link Run#existsByIssueKeyAndStatusIn} / {@link Dispatcher#pickNewIssue}의 "이미
+     * 진행 중이라 재선택하면 안 되는" 상태 — WAITING_APPROVAL(사람 승인 대기)뿐 아니라
+     * {@code BLOCKED}도 포함한다(fix round, P2a T7, F2b). BLOCKED는 재시도 한도를 다 쓰고
+     * 사람 확인이 필요한 상태라 "끝난 것"이 아니다 — 여기 빠져 있으면 다음 Dispatcher 틱이
+     * 사람이 보기도 전에 같은 이슈를 attempt=1부터 완전히 새로 픽업해 버린다(task-7 E2E
+     * 실측: BLOCKED 승격이 안 되던 버그와 겹쳐서 15개 run에 걸쳐 1→2→3→(재시작)1→2→3...
+     * 패턴이 5회 반복됨 — F2a로 BLOCKED 승격 자체를 고쳤어도 이 가드가 없으면 여전히
+     * 재선택됐을 것이다). BLOCKED에서 벗어나는 유일한 합법 경로는 {@link Run#continuation}
+     * (사람이 게이트를 승인하는 재개 흐름, {@link GateService} 참고)이며, 그 경로는 이
+     * 집합을 거치지 않고 직접 continuation을 만들기 때문에 이 가드와 충돌하지 않는다.
+     */
     public static final Set<RunStatus> ACTIVE_STATUSES =
-            EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL);
+            EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED);
 
     private static final String PENDING_WORKSPACE = "pending";
     /** {@code harnessRef}는 현재 전역 하네스 번들 하나뿐이다(T3) — run별 선택지가 없어 상수로 둔다. */
@@ -193,9 +204,10 @@ public class RunService {
         return new WorkerJob(repoUrl, claimed.title(), claimed.description(), recentComments);
     }
 
+    /** F3(fix round, task-7): 대소문자 무관 조회 — env var 주입 시 Spring relaxed binding이 맵 키를 소문자로 접기 때문. */
     private String resolveRepoUrl(String issueKey) {
         String projectKey = projectKeyOf(issueKey);
-        String repoUrl = workerProperties.repos().get(projectKey);
+        String repoUrl = workerProperties.repoFor(projectKey);
         if (repoUrl == null || repoUrl.isBlank()) {
             throw new MissingRepoMappingException("리포 매핑 없음: " + projectKey);
         }
@@ -338,14 +350,25 @@ public class RunService {
         commentBestEffort(run, "⚠️ run 비용 상한 초과: $" + result.costUsd() + " > $" + cap);
     }
 
-    /** RUNNING일 때만 FAILED로 옮기고 재시도/차단을 판단한다(이미 다른 상태면 손대지 않는다). */
+    /**
+     * RUNNING일 때만 FAILED로 옮기고 재시도/차단을 판단한다(이미 다른 상태면 손대지 않는다).
+     *
+     * <p><b>fix round(P2a T7, F2a)</b>: {@code run = runRepository.save(run)}로 반환값을
+     * 반드시 다시 담는다 — {@code save()}는 detached 엔티티를 merge하며, DB에 반영된 최신
+     * {@code @Version}을 담은 "새" 인스턴스를 돌려준다(원래 인자 {@code run}의 in-memory
+     * version 필드는 그대로 남는다). 이 재할당 없이 그대로 {@code handleRetryOrBlock(run)}에
+     * 넘기면, attempt==한도 분기에서 그 stale-version 인스턴스로 {@code block()+save()}를
+     * 한 번 더 시도하다 {@code ObjectOptimisticLockingFailureException}을 던진다 — task-7
+     * E2E 실측(run id=3)에서 정확히 이 지점에서 터졌고, run이 FAILED에 멈춘 채 BLOCKED로
+     * 승격되지 못한 원인이었다(재현: {@code RunServiceOptimisticLockingTest}).
+     */
     private void finishFailed(long runId, String error) {
         Run run = runRepository.findById(runId).orElseThrow();
         if (run.getStatus() != RunStatus.RUNNING) {
             return;
         }
         run.fail(error);
-        runRepository.save(run);
+        run = runRepository.save(run);
         handleRetryOrBlock(run);
     }
 

@@ -116,6 +116,18 @@ class RunServiceTest {
         verify(runRepository, never()).save(any());
     }
 
+    // ---- F2b (fix round, task-7): BLOCKED must count as an active/"in progress" status ----
+
+    @Test
+    void active_statuses_includes_blocked_so_a_stuck_chain_cannot_be_repicked() {
+        // Dispatcher.pickNewIssue와 createQueuedForIssue 둘 다 이 상수 하나로 "이미 진행
+        // 중" 여부를 판정한다 — BLOCKED가 빠지면 사람이 확인하기 전에 같은 이슈가
+        // attempt=1부터 새로 픽업된다(task-7 E2E 실측 버그, 5회 반복).
+        assertThat(RunService.ACTIVE_STATUSES).contains(
+                RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED);
+        assertThat(RunService.ACTIVE_STATUSES).doesNotContain(RunStatus.DONE, RunStatus.FAILED, RunStatus.CANCELLED);
+    }
+
     @Test
     void createQueuedForIssue_saves_queued_run_when_no_active_run() {
         when(runRepository.existsByIssueKeyAndStatusIn(ISSUE_KEY, RunService.ACTIVE_STATUSES)).thenReturn(false);
@@ -546,6 +558,44 @@ class RunServiceTest {
         assertThat(run.getError()).contains("리포 매핑 없음");
         verify(issueClaimSupport, never()).claim(anyString(), anyLong(), anyString(), anyString());
         verify(workerLauncher, never()).launch(any(), any());
+    }
+
+    /**
+     * F3(fix round, task-7 실측): env var({@code PLATFORM_AGENT_WORKER_REPOS_AGP=...})로
+     * repos 맵을 주입하면 Spring relaxed binding이 키를 소문자로 접는다({@code "agp"}) —
+     * ALM 프로젝트 키는 항상 대문자({@code "AGP"})이므로 대소문자 무관 조회가 아니면 이
+     * 조합은 매번 "리포 매핑 없음"으로 죽는다(실측: run 1~12, 12회 반복). 이 테스트는
+     * 소문자 키 맵으로 별도 RunService를 만들어 그래도 정상 해결되는지 확인한다.
+     */
+    @Test
+    void execute_resolves_repo_mapping_even_when_map_key_is_lowercased_by_env_binding() {
+        WorkerProperties lowercasedRepos = new WorkerProperties(
+                "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("agp", "https://example.com/agp.git"));
+        RunService serviceWithLowercasedRepos = new RunService(runRepository, almClient, issueClaimSupport,
+                tokenService, personaRepository, workerLauncher, lowercasedRepos, usageLedgerRepository,
+                schedulerProperties, new com.platform.agentservice.budget.BudgetProperties(
+                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser);
+
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-1", null, 0L, 0L, null, "raw", null);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        serviceWithLowercasedRepos.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        ArgumentCaptor<WorkerJob> jobCaptor = ArgumentCaptor.forClass(WorkerJob.class);
+        verify(workerLauncher).launch(any(Run.class), jobCaptor.capture());
+        assertThat(jobCaptor.getValue().repoUrl()).isEqualTo("https://example.com/agp.git");
     }
 
     // ---- execute: launcher throws (infra failure) ----

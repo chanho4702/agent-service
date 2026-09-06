@@ -72,7 +72,14 @@ platform:
       timeout-minutes: ${WORKER_TIMEOUT_MIN:40}
       allowed-tools: 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gradlew *),Bash(./gradlew *),Bash(npm *),Bash(pnpm *),Agent,mcp__agent-platform__*'
       mcp-url: ${WORKER_MCP_URL:http://localhost/api/agent/mcp}
-      repos: {}   # 프로젝트키→git URL 매핑, env/yml로 주입 (예: AGP: https://github.com/chanho4702/agent-service.git)
+      # 프로젝트키→git URL 매핑, env/yml/프로그램 인자로 주입 (예: AGP: https://github.com/chanho4702/agent-service.git)
+      # 주의(F3, task-7 E2E 실측): PLATFORM_AGENT_WORKER_REPOS_AGP=... 같은 env var로 넘기면
+      # Spring Boot relaxed binding이 맵 키를 소문자로 접는다(repos.get("agp"), "AGP" 아님) —
+      # ALM 프로젝트 키는 항상 대문자라 그 경로로 주입하면 매번 "리포 매핑 없음"이 난다.
+      # WorkerProperties.repoFor(key)가 대소문자 무관 조회로 이 문제를 흡수하지만, env var로
+      # 주입할 땐 --args="--platform.agent.worker.repos.AGP=..."(프로그램 인자, 대소문자 보존)
+      # 나 이 YAML처럼 직접 쓰는 쪽을 우선한다.
+      repos: {}
     scheduler:
       # 디스패처(P2a T4) — 무인 자동화 루프. 기본 OFF(킬스위치), 반드시 명시적으로 켠다.
       enabled: ${SCHEDULER_ENABLED:false}
