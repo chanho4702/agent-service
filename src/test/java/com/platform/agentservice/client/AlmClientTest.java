@@ -8,6 +8,7 @@ import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.client.dto.IssueUpdateRequest;
 import com.platform.agentservice.client.dto.ProjectResponse;
 import com.platform.agentservice.client.dto.ProjectSettingsResponse;
+import com.platform.agentservice.client.dto.WebLinkResponse;
 import com.platform.agentservice.client.dto.WorklogRequest;
 import com.platform.agentservice.client.dto.WorklogResponse;
 import com.platform.common.error.ConflictException;
@@ -350,6 +351,47 @@ class AlmClientTest {
         WorklogResponse worklog = client.addWorklog(7L, request, BEARER);
 
         assertThat(worklog.id()).isEqualTo(21L);
+        server.verify();
+    }
+
+    @Test
+    void addWebLink_sends_exact_body_and_path_and_returns_created_link() {
+        RestClient.Builder builder = builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        AlmClient client = new AlmClient(builder.build());
+
+        server.expect(requestTo("http://alm-backend/api/alm/issues/7/web-links"))
+                .andExpect(method(HttpMethod.POST))
+                .andExpect(header(HttpHeaders.AUTHORIZATION, BEARER))
+                .andExpect(content().json("{\"url\":\"https://github.com/o/r/pull/1\",\"title\":\"PR\",\"kind\":\"PR\"}", false))
+                .andRespond(withStatus(HttpStatus.CREATED)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"id\":31,\"issueId\":7,\"url\":\"https://github.com/o/r/pull/1\",\"title\":\"PR\",\"kind\":\"PR\",\"createdBy\":42,\"createdAt\":\"2026-09-01T00:00:00Z\"}"));
+
+        WebLinkResponse link = client.addWebLink(7L, "https://github.com/o/r/pull/1", "PR", "PR", BEARER);
+
+        assertThat(link.id()).isEqualTo(31L);
+        assertThat(link.kind()).isEqualTo("PR");
+        server.verify();
+    }
+
+    /** 같은 issue+url이면 alm-backend가 200으로 기존 링크를 돌려준다(멱등) — 클라이언트는 상태코드와 무관하게 그대로 파싱해야 한다. */
+    @Test
+    void addWebLink_parses_body_when_alm_backend_returns_200_for_idempotent_existing_link() {
+        RestClient.Builder builder = builder();
+        MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
+        AlmClient client = new AlmClient(builder.build());
+
+        server.expect(requestTo("http://alm-backend/api/alm/issues/7/web-links"))
+                .andExpect(method(HttpMethod.POST))
+                .andRespond(withStatus(HttpStatus.OK)
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .body("{\"id\":31,\"issueId\":7,\"url\":\"https://github.com/o/r/commit/abc\",\"title\":\"fix: x\",\"kind\":\"COMMIT\",\"createdBy\":42,\"createdAt\":\"2026-09-01T00:00:00Z\"}"));
+
+        WebLinkResponse link = client.addWebLink(7L, "https://github.com/o/r/commit/abc", "fix: x", "COMMIT", BEARER);
+
+        assertThat(link.id()).isEqualTo(31L);
+        assertThat(link.kind()).isEqualTo("COMMIT");
         server.verify();
     }
 

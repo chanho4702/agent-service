@@ -114,6 +114,9 @@ class WorkerLauncherTest {
         assertThat(result.resultText()).isEqualTo("done");
         assertThat(result.sessionId()).isEqualTo("sess-1");
         assertThat(result.costUsd()).isEqualByComparingTo(BigDecimal.valueOf(0.5));
+        // T6b: 커밋 파서가 실제 워크스페이스를 찾을 수 있도록 결과에 실제 경로를 싣는다
+        // (run.workspacePath DB 컬럼은 "pending" 그대로다 — WorkerResult가 대신 나른다).
+        assertThat(result.workspacePath()).isEqualTo(workDir.resolve("run-" + RUN_ID).toString());
     }
 
     @Test
@@ -213,6 +216,9 @@ class WorkerLauncherTest {
         assertThat(result.exitCode()).isEqualTo(128);
         assertThat(result.timedOut()).isFalse();
         assertThat(result.rawTail()).contains("fatal: repository not found");
+        // T6b: clone이 실패해도 워크스페이스 디렉터리 자체는 이미 만들어졌으니 경로를 싣는다
+        // (거기서 git log를 돌리면 실패할 뿐 — 커밋 파서가 빈 리스트로 처리한다).
+        assertThat(result.workspacePath()).isEqualTo(workDir.resolve("run-" + RUN_ID).toString());
         assertThat(commandExecutor.calls).hasSize(1); // claude는 아예 실행되지 않았다
         verify(patService, org.mockito.Mockito.never()).issue(any(), org.mockito.ArgumentMatchers.anyLong());
     }

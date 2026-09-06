@@ -12,6 +12,7 @@ import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.persona.PersonaRole;
+import com.platform.agentservice.worker.CommitLinkParser;
 import com.platform.agentservice.worker.WorkerJob;
 import com.platform.agentservice.worker.WorkerLauncher;
 import com.platform.agentservice.worker.WorkerProperties;
@@ -62,6 +63,7 @@ class RunServiceTest {
     @Mock PersonaRepository personaRepository;
     @Mock WorkerLauncher workerLauncher;
     @Mock UsageLedgerRepository usageLedgerRepository;
+    @Mock CommitLinkParser commitLinkParser;
 
     private RunService runService;
     private SchedulerProperties schedulerProperties;
@@ -74,12 +76,15 @@ class RunServiceTest {
                 "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
         BudgetProperties budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
-                workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties);
+                workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
+                commitLinkParser);
 
         Persona persona = Persona.of(PERSONA_MEMBER_ID, "jiho", PersonaRole.BACKEND, "지호", "🔧", null);
         ReflectionTestUtils.setField(persona, "id", PERSONA_ID);
         org.mockito.Mockito.lenient().when(personaRepository.findById(PERSONA_ID)).thenReturn(Optional.of(persona));
         org.mockito.Mockito.lenient().when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
+        // 기본은 워크스페이스 없음(=커밋 파서를 태우지 않음) — 커밋 링크 테스트만 명시적으로 스텁한다.
+        org.mockito.Mockito.lenient().when(commitLinkParser.parse(any())).thenReturn(List.of());
     }
 
     private Run queuedRun(long id) {
@@ -140,7 +145,7 @@ class RunServiceTest {
                 new CommentResponse(1L, 1L, PERSONA_MEMBER_ID, "댓글1", null, null)));
 
         WorkerResult result = new WorkerResult(0, false, "작업 완료했습니다", "sess-1",
-                new BigDecimal("1.2345"), 100L, 200L, "claude-opus-5", "raw");
+                new BigDecimal("1.2345"), 100L, 200L, "claude-opus-5", "raw", "C:\\agent-work\\run-42");
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
 
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
@@ -183,7 +188,7 @@ class RunServiceTest {
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
                 .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
 
-        WorkerResult result = new WorkerResult(0, false, "완료", "sess-9", null, 0L, 0L, null, "raw");
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-9", null, 0L, 0L, null, "raw", null);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
 
         runService.execute(42L);
@@ -210,7 +215,7 @@ class RunServiceTest {
 
         // per-run cap in setUp() is 5 — 12.50 exceeds it.
         WorkerResult result = new WorkerResult(0, false, "완료", "sess-3",
-                new BigDecimal("12.50"), 500L, 900L, "claude-opus-5", "raw");
+                new BigDecimal("12.50"), 500L, 900L, "claude-opus-5", "raw", null);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
 
         runService.execute(42L);
@@ -236,7 +241,7 @@ class RunServiceTest {
                 .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
 
         WorkerResult result = new WorkerResult(0, false, "완료", "sess-4",
-                new BigDecimal("2.00"), 100L, 200L, "claude-opus-5", "raw");
+                new BigDecimal("2.00"), 100L, 200L, "claude-opus-5", "raw", null);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
 
         runService.execute(42L);
@@ -264,7 +269,7 @@ class RunServiceTest {
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
 
         WorkerResult result = new WorkerResult(0, false, "완료", "sess-2",
-                new BigDecimal("0.5"), 10L, 20L, "claude-opus-5", "raw");
+                new BigDecimal("0.5"), 10L, 20L, "claude-opus-5", "raw", null);
         // launch()가 반환하기 전에 워커가 MCP report_result로 스스로 DONE 처리했다고 가정 —
         // launch 스텁 안에서 run 상태를 미리 바꿔 재조회 시 DONE이 보이게 한다.
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenAnswer(inv -> {
@@ -277,6 +282,119 @@ class RunServiceTest {
         assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
         verify(almClient, never()).addComment(anyLong(), anyString(), anyString());
         verify(usageLedgerRepository, times(2)).save(any(UsageLedger.class));
+    }
+
+    // ---- execute: commit link parser integration (P2a T6b) ----
+
+    @Test
+    void execute_links_parsed_commits_to_their_resolved_issues_as_commit_web_links() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-5", null, 0L, 0L, null, "raw",
+                "C:\\agent-work\\run-42");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        when(commitLinkParser.parse(java.nio.file.Path.of("C:\\agent-work\\run-42"))).thenReturn(List.of(
+                new CommitLinkParser.CommitLink("AGP-100", "aaa111", "AGP-100: fix bug", "https://github.com/o/r/commit/aaa111"),
+                new CommitLinkParser.CommitLink("AGP-200", "bbb222", "AGP-200: add feature", "https://github.com/o/r/commit/bbb222")));
+
+        IssueResponse target100 = issue(101L, "AGP-100", "todo", 1);
+        IssueResponse target200 = issue(102L, "AGP-200", "todo", 1);
+        when(almClient.getByKey("AGP-100", BEARER)).thenReturn(target100);
+        when(almClient.getByKey("AGP-200", BEARER)).thenReturn(target200);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(almClient).addWebLink(101L, "https://github.com/o/r/commit/aaa111", "AGP-100: fix bug", "COMMIT", BEARER);
+        verify(almClient).addWebLink(102L, "https://github.com/o/r/commit/bbb222", "AGP-200: add feature", "COMMIT", BEARER);
+    }
+
+    @Test
+    void execute_skips_commit_link_when_issue_key_does_not_resolve_but_still_links_the_others_and_completes() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-6", null, 0L, 0L, null, "raw",
+                "C:\\agent-work\\run-42");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        when(commitLinkParser.parse(java.nio.file.Path.of("C:\\agent-work\\run-42"))).thenReturn(List.of(
+                new CommitLinkParser.CommitLink("NOPE-1", "ccc333", "NOPE-1: unknown project", "https://github.com/o/r/commit/ccc333"),
+                new CommitLinkParser.CommitLink("AGP-100", "ddd444", "AGP-100: known", "https://github.com/o/r/commit/ddd444")));
+
+        // alm-backend가 404를 던지면 DownstreamErrors가 ConflictException으로 감싼다(실측, 4xx 기본 매핑).
+        when(almClient.getByKey("NOPE-1", BEARER)).thenThrow(new ConflictException("이슈를 찾을 수 없습니다: NOPE-1"));
+        IssueResponse target100 = issue(101L, "AGP-100", "todo", 1);
+        when(almClient.getByKey("AGP-100", BEARER)).thenReturn(target100);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(almClient, never()).addWebLink(anyLong(), eq("https://github.com/o/r/commit/ccc333"), anyString(), anyString(), anyString());
+        verify(almClient).addWebLink(101L, "https://github.com/o/r/commit/ddd444", "AGP-100: known", "COMMIT", BEARER);
+    }
+
+    @Test
+    void execute_commit_parser_throwing_does_not_fail_the_run() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-7", null, 0L, 0L, null, "raw",
+                "C:\\agent-work\\run-42");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+        when(commitLinkParser.parse(any())).thenThrow(new RuntimeException("git binary missing"));
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+    }
+
+    @Test
+    void execute_never_parses_commits_when_workspace_path_is_absent() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-8", null, 0L, 0L, null, "raw", null);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(commitLinkParser, never()).parse(any());
     }
 
     // ---- execute: timeout ----

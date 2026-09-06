@@ -12,6 +12,7 @@ import com.platform.agentservice.budget.UsageLedgerRepository;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.run.dto.RunSummaryResponse;
+import com.platform.agentservice.worker.CommitLinkParser;
 import com.platform.agentservice.worker.WorkerJob;
 import com.platform.agentservice.worker.WorkerLauncher;
 import com.platform.agentservice.worker.WorkerProperties;
@@ -23,6 +24,7 @@ import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
 import java.math.BigDecimal;
+import java.nio.file.Path;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
@@ -42,6 +44,12 @@ import java.util.Set;
  * workspacePath="pending"}, {@code patId=null}로 먼저 RUNNING 전이를 커밋해 둔다(T4
  * 브리핑 확정 결정) — 실제 workspacePath는 어차피 로컬 파일시스템 경로일 뿐 이 서비스가
  * 이후 참조하지 않는다.
+ *
+ * <p><b>T6b 추가</b>: 위 전제가 완전히는 맞지 않게 됐다 — {@link #linkCommits}가 커밋
+ * 파서로 워크스페이스의 git 로그를 훑어 이슈에 COMMIT 웹링크를 남기려면 실제 경로가
+ * 필요하다. DB 컬럼({@code Run.workspacePath})은 여전히 갱신하지 않고(엔티티 변경 없음),
+ * {@link WorkerResult#workspacePath()}가 대신 {@link WorkerLauncher#launch}가 실제로 만든
+ * 경로를 실어 나른다 — {@link #applyOutcome}에서만 쓰고 버린다.
  */
 @Slf4j
 @Service
@@ -68,11 +76,13 @@ public class RunService {
     private final UsageLedgerRepository usageLedgerRepository;
     private final SchedulerProperties schedulerProperties;
     private final BudgetProperties budgetProperties;
+    private final CommitLinkParser commitLinkParser;
 
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
-                       SchedulerProperties schedulerProperties, BudgetProperties budgetProperties) {
+                       SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
+                       CommitLinkParser commitLinkParser) {
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -83,6 +93,7 @@ public class RunService {
         this.usageLedgerRepository = usageLedgerRepository;
         this.schedulerProperties = schedulerProperties;
         this.budgetProperties = budgetProperties;
+        this.commitLinkParser = commitLinkParser;
     }
 
     /** Dispatcher가 새 이슈를 픽업할 때 넘기는 최소 참조. */
@@ -208,6 +219,7 @@ public class RunService {
      */
     private void applyOutcome(long runId, WorkerResult result) {
         recordSessionAndLedger(runId, result);
+        linkCommits(runId, result);
         warnIfOverPerRunBudget(runId, result);
 
         Run run = runRepository.findById(runId).orElseThrow();
@@ -242,6 +254,70 @@ public class RunService {
             usageLedgerRepository.save(UsageLedger.of(runId, LedgerScope.PLATFORM, "platform",
                     result.costUsd(), result.inputTokens(), result.outputTokens(), result.model()));
         }
+    }
+
+    /**
+     * 워커 워크스페이스에 남은 로컬 커밋에서 이슈 키를 찾아 COMMIT 웹링크로 등록한다(P2a T6b).
+     * {@link #recordSessionAndLedger}와 같은 위치(양쪽 종결 경로 — 워커가 스스로
+     * {@code report_result}로 이미 종결한 경우와 여기서 종결하는 경우 — 가 합류하는 지점)에서
+     * run 상태와 무관하게 항상 시도한다: 커밋은 run 상태가 무엇이든 이미 워크스페이스에
+     * 남아 있고, 실제로 뭔가 커밋됐다는 사실은 최종 상태와 무관하기 때문이다(비용 기록과
+     * 같은 논리).
+     *
+     * <p>워크스페이스 경로가 없으면(클론조차 못 한 초기 실패 등) 조용히 건너뛴다.
+     * 이슈 키 하나하나는 독립적으로 최선노력(best-effort)이다 — 알 수 없는 키(alm-backend
+     * 404 — {@link AlmClient}가 {@code ConflictException}으로 감싼다)나 웹링크 등록 실패가
+     * 있어도 나머지 커밋 처리와 run 종결 흐름을 막지 않는다. {@code Audited.note} 감사 패턴은
+     * MCP 도구 호출({@link com.platform.agentservice.tools.ToolActor#current()}가 필요)
+     * 맥락에서만 쓸 수 있어 여기(백그라운드 워커 스레드, PAT principal 없음)서는 적용할 수
+     * 없다 — 기존 {@link #commentBestEffort}와 같은 방식으로 로그만 남기고 삼킨다(선택,
+     * T6b 브리핑).
+     */
+    private void linkCommits(long runId, WorkerResult result) {
+        String workspacePath = result.workspacePath();
+        if (workspacePath == null || workspacePath.isBlank()) {
+            return;
+        }
+        List<CommitLinkParser.CommitLink> links;
+        try {
+            links = commitLinkParser.parse(Path.of(workspacePath));
+        } catch (Exception e) {
+            log.warn("run={} 커밋 파싱 실패 — 건너뜁니다: {}", runId, e.getMessage());
+            return;
+        }
+        if (links.isEmpty()) {
+            return;
+        }
+
+        Run run = runRepository.findById(runId).orElse(null);
+        if (run == null) {
+            return;
+        }
+        Persona persona = personaRepository.findById(run.getPersonaId()).orElse(null);
+        if (persona == null) {
+            log.warn("run={} 페르소나를 찾을 수 없어 커밋 링크를 건너뜁니다: personaId={}", runId, run.getPersonaId());
+            return;
+        }
+        String bearer = tokenService.bearerFor(persona.getMemberId());
+
+        for (CommitLinkParser.CommitLink link : links) {
+            try {
+                IssueResponse issue = almClient.getByKey(link.issueKey(), bearer);
+                almClient.addWebLink(issue.id(), link.url(), truncateCommitTitle(link.subject()), "COMMIT", bearer);
+            } catch (Exception e) {
+                log.warn("run={} 커밋({}) 웹링크 등록 실패 — 건너뜁니다(이슈 키={}): {}",
+                        runId, link.sha(), link.issueKey(), e.getMessage());
+            }
+        }
+    }
+
+    private static final int COMMIT_TITLE_MAX_LENGTH = 80;
+
+    private String truncateCommitTitle(String subject) {
+        if (subject == null) {
+            return null;
+        }
+        return subject.length() <= COMMIT_TITLE_MAX_LENGTH ? subject : subject.substring(0, COMMIT_TITLE_MAX_LENGTH);
     }
 
     /**

@@ -10,6 +10,7 @@ import com.platform.agentservice.client.dto.CommentResponse;
 import com.platform.agentservice.client.dto.IssueCreateRequest;
 import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.client.dto.IssueUpdateRequest;
+import com.platform.agentservice.client.dto.WebLinkResponse;
 import com.platform.agentservice.pat.PatPrincipal;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
@@ -267,18 +268,32 @@ class IssueToolsTest {
         assertThat(result).contains("9");
     }
 
-    // ---- link_pr: 구조화 코멘트 ----
+    // ---- link_pr: 원격 링크(kind=PR) 등록, P2a T6b 승격 ----
 
     @Test
-    void link_pr_adds_structured_comment_with_url_and_note() {
+    void link_pr_registers_web_link_with_note_as_title_and_adds_no_comment() {
         IssueResponse fetched = issue(1L, "PROJ-1", "todo", null, 1);
         when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(fetched);
-        when(almClient.addComment(eq(1L), eq("🔗 PR 연결: https://example.com/pr/1\n리뷰 부탁드립니다"), eq(BEARER)))
-                .thenReturn(new CommentResponse(6L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+        when(almClient.addWebLink(1L, "https://example.com/pr/1", "리뷰 부탁드립니다", "PR", BEARER))
+                .thenReturn(new WebLinkResponse(6L, 1L, "https://example.com/pr/1", "리뷰 부탁드립니다", "PR", PERSONA_MEMBER_ID, null));
 
         String result = issueTools.linkPr("PROJ-1", "https://example.com/pr/1", "리뷰 부탁드립니다");
 
         assertThat(result).contains("6");
+        verify(almClient, never()).addComment(eq(1L), org.mockito.ArgumentMatchers.anyString(), eq(BEARER));
+    }
+
+    @Test
+    void link_pr_falls_back_to_PR_title_when_note_is_blank() {
+        IssueResponse fetched = issue(1L, "PROJ-1", "todo", null, 1);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(fetched);
+        when(almClient.addWebLink(1L, "https://example.com/pr/2", "PR", "PR", BEARER))
+                .thenReturn(new WebLinkResponse(7L, 1L, "https://example.com/pr/2", "PR", "PR", PERSONA_MEMBER_ID, null));
+
+        String result = issueTools.linkPr("PROJ-1", "https://example.com/pr/2", null);
+
+        assertThat(result).contains("7");
+        verify(almClient).addWebLink(1L, "https://example.com/pr/2", "PR", "PR", BEARER);
     }
 
     private static IssueResponse issue(long id, String key, String status, Long assigneeId, int version) {

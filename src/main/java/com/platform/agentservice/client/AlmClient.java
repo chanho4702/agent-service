@@ -8,6 +8,8 @@ import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.client.dto.IssueUpdateRequest;
 import com.platform.agentservice.client.dto.ProjectResponse;
 import com.platform.agentservice.client.dto.ProjectSettingsResponse;
+import com.platform.agentservice.client.dto.WebLinkRequest;
+import com.platform.agentservice.client.dto.WebLinkResponse;
 import com.platform.agentservice.client.dto.WorklogRequest;
 import com.platform.agentservice.client.dto.WorklogResponse;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -233,6 +235,26 @@ public class AlmClient {
                     .body(WorklogResponse.class);
         } catch (RestClientException e) {
             throw DownstreamErrors.map(e, "워크로그 기록");
+        }
+    }
+
+    /**
+     * {@code POST /api/alm/issues/{issueId}/web-links} — EDIT 권한 필요(P2a T6). 같은
+     * issue+url이면 alm-backend가 새로 만들지 않고 기존 것을 200으로 돌려준다(멱등 — 커밋
+     * 파서가 같은 run을 재실행해도 중복이 쌓이지 않는다). 201/200 어느 쪽이든 본문 shape은
+     * 같아서 이 클라이언트는 상태 코드를 구분하지 않고 그대로 역직렬화한다.
+     */
+    public WebLinkResponse addWebLink(long issueId, String url, String title, String kind, String bearer) {
+        try {
+            return almRestClient.post()
+                    .uri("/api/alm/issues/{issueId}/web-links", issueId)
+                    .header(HttpHeaders.AUTHORIZATION, bearer)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(new WebLinkRequest(url, title, kind))
+                    .retrieve()
+                    .body(WebLinkResponse.class);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "웹 링크 등록");
         }
     }
 }

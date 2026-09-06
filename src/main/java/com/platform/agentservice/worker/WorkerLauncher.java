@@ -55,7 +55,7 @@ public class WorkerLauncher {
         CommandExecutor.ExecResult cloneResult = commandExecutor.exec(
                 List.of("git", "clone", job.repoUrl(), "."), workspace, Map.of(), CLONE_TIMEOUT);
         if (cloneResult.timedOut() || cloneResult.exitCode() != 0) {
-            return WorkerResult.failure(cloneResult.exitCode(), cloneResult.timedOut(), rawTail(cloneResult));
+            return WorkerResult.failure(cloneResult.exitCode(), cloneResult.timedOut(), rawTail(cloneResult), workspace.toString());
         }
 
         harnessMaterializer.materialize(workspace);
@@ -65,7 +65,7 @@ public class WorkerLauncher {
             List<String> command = buildCommand(run, buildPrompt(run, job), issued.token());
             CommandExecutor.ExecResult execResult = commandExecutor.exec(
                     command, workspace, workerEnv(), Duration.ofMinutes(properties.timeoutMinutes()));
-            return toWorkerResult(execResult);
+            return toWorkerResult(execResult, workspace);
         } finally {
             runTokenService.revoke(issued.patId());
         }
@@ -207,17 +207,18 @@ public class WorkerLauncher {
      * 줄부터 거슬러 올라가며 {@code {...}} 형태의 줄을 찾는다(스펙 §10.5 — "shape may vary,
      * parse defensively"). 그래도 못 찾으면 실패로 처리한다.
      */
-    private WorkerResult toWorkerResult(CommandExecutor.ExecResult execResult) {
+    private WorkerResult toWorkerResult(CommandExecutor.ExecResult execResult, Path workspace) {
+        String workspacePath = workspace.toString();
         if (execResult.timedOut()) {
-            return WorkerResult.failure(execResult.exitCode(), true, rawTail(execResult));
+            return WorkerResult.failure(execResult.exitCode(), true, rawTail(execResult), workspacePath);
         }
         if (execResult.exitCode() != 0) {
-            return WorkerResult.failure(execResult.exitCode(), false, rawTail(execResult));
+            return WorkerResult.failure(execResult.exitCode(), false, rawTail(execResult), workspacePath);
         }
 
         JsonNode root = parseLastJsonObject(execResult.stdout());
         if (root == null) {
-            return WorkerResult.failure(execResult.exitCode(), false, rawTail(execResult));
+            return WorkerResult.failure(execResult.exitCode(), false, rawTail(execResult), workspacePath);
         }
 
         String resultText = textOrNull(root, "result");
@@ -252,7 +253,7 @@ public class WorkerLauncher {
         }
 
         return new WorkerResult(execResult.exitCode(), false, resultText, sessionId, costUsd,
-                inputTokens, outputTokens, model, rawTail(execResult));
+                inputTokens, outputTokens, model, rawTail(execResult), workspacePath);
     }
 
     private JsonNode parseLastJsonObject(String stdout) {

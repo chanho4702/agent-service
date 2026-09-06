@@ -10,6 +10,7 @@ import com.platform.agentservice.client.dto.IssueDetailsRequest;
 import com.platform.agentservice.client.dto.IssuePageResponse;
 import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.client.dto.IssueUpdateRequest;
+import com.platform.agentservice.client.dto.WebLinkResponse;
 import com.platform.agentservice.client.dto.WorklogRequest;
 import com.platform.agentservice.client.dto.WorklogResponse;
 import com.platform.agentservice.pat.PatPrincipal;
@@ -180,18 +181,24 @@ public class IssueTools {
         });
     }
 
-    @McpTool(name = "link_pr", description = "이슈에 PR 링크를 구조화 코멘트로 남긴다(P1 잠정 — 원격 링크 엔티티는 P2에서).")
+    /**
+     * P2a T6: PR 링크를 원격 링크 엔티티(alm-backend {@code issue_web_link}, kind=PR)로 남긴다.
+     * P1 잠정 구현(구조화 코멘트)에서 승격 — 코멘트는 더 이상 추가하지 않는다: 활동 스트림에는
+     * alm-backend가 웹링크 등록 시 {@code web_link_added} 활동을 이미 남기므로 중복이다(결정,
+     * P2a T6b 브리핑).
+     */
+    @McpTool(name = "link_pr", description = "이슈에 PR 링크를 원격 링크(kind=PR)로 등록한다.")
     public String linkPr(
             @McpToolParam(description = "이슈 키", required = true) String issueKey,
             @McpToolParam(description = "PR URL", required = true) String url,
-            @McpToolParam(description = "부가 설명(선택)", required = false) String note) {
+            @McpToolParam(description = "부가 설명(선택, 링크 제목으로 쓰인다)", required = false) String note) {
         PatPrincipal actor = ToolActor.current();
-        String body = "🔗 PR 연결: " + url + (note != null && !note.isBlank() ? "\n" + note : "");
+        String title = (note != null && !note.isBlank()) ? note : "PR";
         return audited.run("link_pr", issueKey + ": " + url, () -> {
             String bearer = tokenService.bearerFor(actor.personaMemberId());
             IssueResponse issue = almClient.getByKey(issueKey, bearer);
-            CommentResponse comment = almClient.addComment(issue.id(), body, bearer);
-            return "PR 링크 코멘트 등록 완료 (id=" + comment.id() + ")";
+            WebLinkResponse link = almClient.addWebLink(issue.id(), url, title, "PR", bearer);
+            return "PR 링크 등록 완료 (id=" + link.id() + ")";
         });
     }
 
