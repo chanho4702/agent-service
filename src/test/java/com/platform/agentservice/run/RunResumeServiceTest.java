@@ -66,6 +66,14 @@ class RunResumeServiceTest {
         return run;
     }
 
+    private Run failedRun(long id) {
+        Run run = Run.queued(RunType.TASK, ISSUE_KEY, 1L, PERSONA_ID, RunTrigger.SCHEDULER, "harness://default", null);
+        ReflectionTestUtils.setField(run, "id", id);
+        run.start("/work", 1L);
+        run.fail("boom");
+        return run;
+    }
+
     private void stubComment() {
         Persona persona = Persona.of(PERSONA_MEMBER_ID, "jiho", PersonaRole.BACKEND, "지호", "🔧", null);
         ReflectionTestUtils.setField(persona, "id", PERSONA_ID);
@@ -107,17 +115,55 @@ class RunResumeServiceTest {
         verify(almClient).addComment(eq(1L), contains("사람 확인 후 재개"), eq(BEARER));
     }
 
+    /**
+     * 최종 리뷰 I1: BLOCKED뿐 아니라 FAILED도 재개 대상으로 넓혔지만, 그 외 상태(RUNNING 등)는
+     * 여전히 409다 — RESUMABLE = {BLOCKED, FAILED}만 통과한다.
+     */
     @Test
-    void resume_non_blocked_run_throws_conflict() {
+    void resume_non_resumable_run_throws_conflict() {
         Run running = Run.queued(RunType.TASK, ISSUE_KEY, 1L, PERSONA_ID, RunTrigger.SCHEDULER, "harness://default", null);
         ReflectionTestUtils.setField(running, "id", 10L);
-        running.start("/work", 1L); // RUNNING, not BLOCKED
+        running.start("/work", 1L); // RUNNING — BLOCKED도 FAILED도 아니다
+
         when(runRepository.findById(10L)).thenReturn(Optional.of(running));
 
         assertThatThrownBy(() -> runResumeService.resume(10L)).isInstanceOf(ConflictException.class);
 
         verify(runRepository, never()).save(any());
         verify(runService, never()).execute(anyLong());
+    }
+
+    /**
+     * 최종 리뷰 I1: 워커가 스스로 report_result(FAILED)로 종결한 뒤 {@code
+     * RunService.handleRetryOrBlock}이 예외로 실패해 run이 FAILED에 멈춘 잔여 케이스를
+     * 흉내낸다 — 이 경로도 게이트 없이 사람이 재개할 수 있어야 한다(BLOCKED와 동일 패턴).
+     */
+    @Test
+    void resume_from_failed_run_creates_continuation_and_cancels_original() {
+        Run original = failedRun(20L);
+        when(runRepository.findById(20L)).thenReturn(Optional.of(original));
+        when(runRepository.save(any(Run.class))).thenAnswer(inv -> {
+            Run r = inv.getArgument(0);
+            if (r.getId() == null) {
+                ReflectionTestUtils.setField(r, "id", 21L);
+            }
+            return r;
+        });
+        stubComment();
+
+        runResumeService.resume(20L);
+
+        assertThat(original.getStatus()).isEqualTo(RunStatus.CANCELLED);
+        assertThat(original.getError()).contains("사람 확인 후 재개").contains("21");
+
+        ArgumentCaptor<Run> savedCaptor = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository).save(savedCaptor.capture());
+        Run continuationRun = savedCaptor.getValue();
+        assertThat(continuationRun.getStatus()).isEqualTo(RunStatus.QUEUED);
+        assertThat(continuationRun.getAttempt()).isEqualTo(2);
+
+        verify(runService).execute(21L);
+        verify(almClient).addComment(eq(1L), contains("사람 확인 후 재개"), eq(BEARER));
     }
 
     @Test

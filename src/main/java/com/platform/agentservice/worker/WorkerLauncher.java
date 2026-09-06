@@ -16,6 +16,7 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,11 +38,19 @@ import java.util.Map;
  * 재조립(re-quote)하는 과정에서 JSON 안의 큰따옴표가 통째로 사라지고 {@code /}가
  * {@code \}로 바뀌어 claude CLI가 그 손상된 문자열을 "상대 파일 경로"로 오인해 즉시
  * 죽는 결정적 버그가 있었다(task-7 E2E 실측, 3회 100% 동일 재현: "MCP config file not
- * found: C:\agent-work\run-N\{mcpServers:..."). 그래서 JSON을 워크스페이스 안 파일
- * ({@value #MCP_CONFIG_FILENAME})에 써 두고 그 절대경로만 인자로 넘긴다 — 경로 문자열에는
- * 따옴표·중괄호가 없어 이 손상 경로 자체가 성립하지 않는다. 이 파일에는 run 토큰(Bearer)이
- * 그대로 담기므로 내용을 절대 로그로 남기지 않고, {@code finally}에서 PAT 철회와 함께
- * 반드시 삭제한다.
+ * found: C:\agent-work\run-N\{mcpServers:..."). 그래서 JSON을 파일에 써 두고 그
+ * 절대경로만 인자로 넘긴다 — 경로 문자열에는 따옴표·중괄호가 없어 이 손상 경로 자체가
+ * 성립하지 않는다.
+ *
+ * <p><b>그 파일은 클론 디렉터리 밖에 둔다(최종 리뷰 I4)</b>: F1 최초 구현은 이 파일을
+ * 워크스페이스(=git 클론 루트) 안에 썼다 — 그런데 워커는 {@code Bash(git *)}를 허용
+ * 도구로 갖고 있고(하네스 수확 워크플로가 워커의 커밋을 체리픽한다), 워커가 실수로든
+ * 의도적으로든 {@code git add -A} 같은 걸 돌리면 run 토큰(Bearer)이 담긴 이 파일이 그대로
+ * 커밋에 실려 나갈 수 있었다 — 자격증명이 커밋 이력에 남는 것은 파일을 실행 후 지우는
+ * 것과 무관하게 사고다. 그래서 워크스페이스의 형제 디렉터리
+ * ({@code <workDir>/run-<id>-cfg/}, {@link #mcpConfigDirFor})에 쓴다 — git 클론 트리
+ * 바깥이라 어떤 git 명령으로도 그 안에 들어갈 수 없다. 내용은 절대 로그로 남기지 않고,
+ * {@code finally}에서 PAT 철회와 함께 그 디렉터리 전체를 반드시 삭제한다.
  */
 @Slf4j
 @Component
@@ -50,6 +59,8 @@ public class WorkerLauncher {
     private static final Duration CLONE_TIMEOUT = Duration.ofMinutes(5);
     private static final int RAW_TAIL_LIMIT = 2000;
     private static final String MCP_CONFIG_FILENAME = ".mcp-run.json";
+    /** git 클론 루트(workspace)의 형제 디렉터리 이름 접미사 — 예: {@code run-42} → {@code run-42-cfg}(I4). */
+    private static final String MCP_CONFIG_DIR_SUFFIX = "-cfg";
 
     private final WorkerProperties properties;
     private final HarnessMaterializer harnessMaterializer;
@@ -77,8 +88,10 @@ public class WorkerLauncher {
         harnessMaterializer.materialize(workspace);
 
         RunTokenService.IssuedRunToken issued = runTokenService.issueFor(run);
-        Path mcpConfigPath = workspace.resolve(MCP_CONFIG_FILENAME);
+        Path mcpConfigDir = mcpConfigDirFor(workspace);
+        Path mcpConfigPath = mcpConfigDir.resolve(MCP_CONFIG_FILENAME);
         try {
+            createDirectoriesUnchecked(mcpConfigDir);
             writeMcpConfigFile(mcpConfigPath, issued.token());
             List<String> command = buildCommand(run, buildPrompt(run, job), mcpConfigPath);
             CommandExecutor.ExecResult execResult = commandExecutor.exec(
@@ -86,8 +99,13 @@ public class WorkerLauncher {
             return toWorkerResult(execResult, workspace);
         } finally {
             runTokenService.revoke(issued.patId());
-            deleteQuietly(mcpConfigPath);
+            deleteRecursivelyQuietly(mcpConfigDir);
         }
+    }
+
+    /** 워크스페이스(git 클론 루트)의 형제 디렉터리 — 클론 트리 밖이라 어떤 git 명령도 여기 닿지 못한다(I4). */
+    private Path mcpConfigDirFor(Path workspace) {
+        return workspace.resolveSibling(workspace.getFileName() + MCP_CONFIG_DIR_SUFFIX);
     }
 
     private Path prepareWorkspaceDir(Run run) {
@@ -221,7 +239,15 @@ public class WorkerLauncher {
         }
     }
 
-    /** JSON을 워크스페이스 안 파일에 쓴다(F1) — 내용에 run 토큰이 담기므로 절대 로그로 남기지 않는다. */
+    private void createDirectoriesUnchecked(Path dir) {
+        try {
+            Files.createDirectories(dir);
+        } catch (IOException e) {
+            throw new UncheckedIOException("mcp-config 디렉터리 생성 실패: " + dir, e);
+        }
+    }
+
+    /** JSON을 파일에 쓴다(F1, I4로 위치를 클론 밖 형제 디렉터리로 옮김) — 내용에 run 토큰이 담기므로 절대 로그로 남기지 않는다. */
     private void writeMcpConfigFile(Path path, String token) {
         String json = buildMcpConfigJson(token);
         try {
@@ -231,12 +257,25 @@ public class WorkerLauncher {
         }
     }
 
-    /** 실행이 끝나면(성공·실패·타임아웃·예외 무관) 항상 지운다 — 토큰이 담긴 파일을 워크스페이스에 남기지 않는다. */
-    private void deleteQuietly(Path path) {
-        try {
-            Files.deleteIfExists(path);
+    /**
+     * 실행이 끝나면(성공·실패·타임아웃·예외 무관) 항상 지운다 — 디렉터리 자체(파일 포함)를
+     * 재귀적으로 지워서 토큰이 담긴 파일이 어디에도 남지 않게 한다(I4, 파일 하나만 지우던
+     * F1보다 넓은 범위).
+     */
+    private void deleteRecursivelyQuietly(Path dir) {
+        if (!Files.exists(dir)) {
+            return;
+        }
+        try (var paths = Files.walk(dir)) {
+            paths.sorted(Comparator.reverseOrder()).forEach(p -> {
+                try {
+                    Files.delete(p);
+                } catch (IOException e) {
+                    log.warn("mcp-config 경로 삭제 실패(자격증명이 남을 수 있음): {}", p);
+                }
+            });
         } catch (IOException e) {
-            log.warn("mcp-config 파일 삭제 실패(자격증명 파일이 워크스페이스에 남을 수 있음): {}", path);
+            log.warn("mcp-config 디렉터리 순회 실패(자격증명이 남을 수 있음): {}", dir);
         }
     }
 

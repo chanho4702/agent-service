@@ -160,8 +160,13 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
 3. `AGENT_INTERNAL_SECRET` — auth-server와 반드시 같은 값(비면 페르소나/run 토큰 발급이
    fail-closed로 전부 막힌다).
 4. 워커 인증: 같은 사용자 구독을 재사용하거나(검증됨) `CLAUDE_CODE_OAUTH_TOKEN` /
-   `ANTHROPIC_API_KEY`를 이 서비스의 프로세스 env로 둔다 — `WorkerLauncher.workerEnv()`가
-   부모 프로세스 env에서 이 둘만 골라 워커 프로세스로 전달한다(다른 자격증명은 흘리지 않음).
+   `ANTHROPIC_API_KEY`를 이 서비스의 프로세스 env로 둔다 — `WorkerLauncher.workerEnv()`는
+   이 둘을 부모 프로세스 env에서 명시적으로 골라 워커 프로세스에 전달하도록 **의도**하지만
+   (§10.5 env passthrough), 실제 프로세스 격리는 이뤄지지 않는다: `ProcessCommandExecutor`가
+   `ProcessBuilder.environment().putAll(extraEnv)`로 이 둘을 "덧씌우기"만 하고, 부모
+   프로세스(이 서비스, 신뢰된 호스트에서 돈다는 전제)의 env 전체를 그대로 상속한다 —
+   **다른 자격증명이 흘러가지 않는다는 뜻이 아니다**(최종 리뷰 I5, 이전 판 문서 정정).
+   env 커튼(진짜 격리)은 계획된 후속 작업이다(티켓 필요).
 
 자동화 정책: 라벨 `auto` + 상태 `todo`인 ALM 이슈만 픽업 대상이고, 한 틱에 하나만 새로
 픽업한다(단순화, 브리핑 지시). 동시성은 `SCHEDULER_MAX_GLOBAL`(기본 2, 전역 QUEUED+RUNNING)
@@ -180,6 +185,12 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
 `{"on": true|false}`)로 즉시 전체 차단·해제. **킬 스위치는 인메모리다 — 재기동하면 이 값과
 무관하게 항상 꺼진 상태(off)로 시작한다**, 알림 연동(경고 채널)은 P3.
 
+킬 스위치/예산 캡(`BudgetGuard.allow`)은 `RunService.execute` 진입점 자체에서 확인한다(최종
+리뷰 I3) — 새 이슈 픽업뿐 아니라 QUEUED continuation 드레인, 게이트 승인, BLOCKED/FAILED
+사람 재개까지 **전부** 이 지점을 거치므로 어느 경로로 실행이 트리거되든 예외 없이 차단된다.
+거부된 run은 실패 처리하지 않고 QUEUED로 그대로 둔다 — 스위치를 끄거나 캡이 회복되면 다음
+드레인 틱이 재시도 카운트 소모 없이 다시 집어간다.
+
 ### 5.3 게이트 승인 흐름
 
 워커가 `request_gate(runId, kind, request)`를 부르면 그 run이 `WAITING_APPROVAL`로 전환되고
@@ -190,12 +201,15 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
 두면 다음 디스패처 픽업의 "활성 run 중복" 가드와 동시성 집계에 계속 걸린다). 거절은 원 run을
 CANCELLED로 닫고 재개하지 않는다.
 
-### 5.4 BLOCKED 사람 재개
+### 5.4 BLOCKED·FAILED 사람 재개
 
 재시도 한도를 소진해 `BLOCKED`가 된 run은 게이트와는 별개 경로로 사람이 재개한다:
 `POST /api/agent/runs/{id}/resume`(ADMIN) — `Gate` 행 없이 continuation run(attempt+1)을 만들어
 재실행한다(§5.3 승인과 동일 패턴, 다만 사람이 먼저 승인을 요청받은 게 아니라 시스템이 스스로
-멈춘 것이므로 게이트 엔티티가 없다). 대상 run이 BLOCKED가 아니면 409.
+멈춘 것이므로 게이트 엔티티가 없다). `FAILED`도 재개 대상이다(최종 리뷰 I1) — 정상 경로에서는
+워커가 스스로 `report_result(FAILED)`로 종결해도 `RunService`가 곧바로 재시도/BLOCKED로
+옮기므로 FAILED에 오래 머물지 않지만, 그 처리 자체가 예외로 실패하는 잔여 케이스에서는 FAILED에
+멈출 수 있다 — 그때도 이 경로로 재개한다. 대상 run이 BLOCKED·FAILED 둘 다 아니면 409.
 
 ### 5.5 run 감독 REST
 
@@ -211,11 +225,14 @@ CANCELLED로 닫고 재개하지 않는다.
 - run마다 새 워크스페이스(`AGENT_WORK_DIR/run-{id}`)를 만들어 `git clone` 후, 하네스
   (`.claude/` 번들 + 루트 `CLAUDE.md`/`AGENTS.md`)를 그 워크스페이스에 실체화한다
   (`HarnessMaterializer`) — 워커가 플랫폼 협업 규약을 그대로 보고 작업하게 하기 위함.
-- mcp-config는 **인라인 JSON 인자가 아니라 워크스페이스 파일**(`.mcp-run.json`)로 넘긴다 —
-  Windows `ProcessBuilder`가 인자를 재조립(re-quote)할 때 JSON 안 따옴표가 사라지고 `/`가
-  `\`로 바뀌어 CLI가 손상된 문자열을 파일 경로로 오인해 즉시 죽는 버그를 피한다(F1, task-7
-  E2E 3회 100% 재현). 이 파일에는 run 토큰(Bearer)이 그대로 담기므로 절대 로그로 남기지 않고,
-  실행 후 `finally`에서 반드시 삭제 + PAT 철회한다.
+- mcp-config는 **인라인 JSON 인자가 아니라 파일**(`.mcp-run.json`)로 넘긴다 — Windows
+  `ProcessBuilder`가 인자를 재조립(re-quote)할 때 JSON 안 따옴표가 사라지고 `/`가 `\`로
+  바뀌어 CLI가 손상된 문자열을 파일 경로로 오인해 즉시 죽는 버그를 피한다(F1, task-7 E2E
+  3회 100% 재현). 그 파일은 **워크스페이스(git 클론 루트) 안이 아니라 형제 디렉터리**
+  (`AGENT_WORK_DIR/run-{id}-cfg/`)에 둔다(최종 리뷰 I4) — 워커가 `Bash(git *)`를 허용
+  도구로 갖고 있어 클론 트리 안에 있으면 워커의 커밋에 실려 나갈 위험이 있다(하네스 수확
+  워크플로가 워커 커밋을 체리픽한다). 이 파일에는 run 토큰(Bearer)이 그대로 담기므로 절대
+  로그로 남기지 않고, 실행 후 `finally`에서 그 디렉터리 전체를 재귀적으로 삭제 + PAT 철회한다.
 - 프롬프트는 이슈 본문·최근 코멘트를 `<이슈-내용>`/`<코멘트>` 경계로 감싸 "데이터"로 표시한
   뒤 규약 섹션을 둔다 — **사람 코멘트 = 지시**로 취급하되, 그 안에 규약과 충돌하는 문구가
   있으면 규약이 우선한다는 문장을 경계 직후에 못박는다(프롬프트 인젝션 방어, fix round 1 I2).

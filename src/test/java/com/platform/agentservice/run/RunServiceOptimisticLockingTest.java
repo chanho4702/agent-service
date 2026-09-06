@@ -95,10 +95,12 @@ class RunServiceOptimisticLockingTest {
                 "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
         SchedulerProperties schedulerProperties = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3);
         BudgetProperties budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
+        BudgetGuard budgetGuard = Mockito.mock(BudgetGuard.class);
+        when(budgetGuard.allow(anyLong())).thenReturn(true);
 
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser);
+                commitLinkParser, budgetGuard);
     }
 
     @AfterEach

@@ -64,9 +64,11 @@ class RunServiceTest {
     @Mock WorkerLauncher workerLauncher;
     @Mock UsageLedgerRepository usageLedgerRepository;
     @Mock CommitLinkParser commitLinkParser;
+    @Mock BudgetGuard budgetGuard;
 
     private RunService runService;
     private SchedulerProperties schedulerProperties;
+    private BudgetProperties budgetProperties;
 
     @BeforeEach
     void setUp() {
@@ -74,10 +76,10 @@ class RunServiceTest {
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
                 "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
-        BudgetProperties budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
+        budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser);
+                commitLinkParser, budgetGuard);
 
         Persona persona = Persona.of(PERSONA_MEMBER_ID, "jiho", PersonaRole.BACKEND, "지호", "🔧", null);
         ReflectionTestUtils.setField(persona, "id", PERSONA_ID);
@@ -85,6 +87,8 @@ class RunServiceTest {
         org.mockito.Mockito.lenient().when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
         // 기본은 워크스페이스 없음(=커밋 파서를 태우지 않음) — 커밋 링크 테스트만 명시적으로 스텁한다.
         org.mockito.Mockito.lenient().when(commitLinkParser.parse(any())).thenReturn(List.of());
+        // 기본은 킬 스위치/예산 캡 통과 — I3 전용 테스트만 false로 재스텁한다.
+        org.mockito.Mockito.lenient().when(budgetGuard.allow(anyLong())).thenReturn(true);
     }
 
     private Run queuedRun(long id) {
@@ -294,6 +298,87 @@ class RunServiceTest {
         assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
         verify(almClient, never()).addComment(anyLong(), anyString(), anyString());
         verify(usageLedgerRepository, times(2)).save(any(UsageLedger.class));
+    }
+
+    /**
+     * 최종 리뷰 I1: 워커가 launch() 반환 전에 MCP report_result(status=FAILED)로 스스로
+     * 종결했으면(자가-DONE과 같은 패턴, 여기선 자가-FAILED) 재조회 시 상태가 FAILED다.
+     * 예전에는 "RUNNING 아니면 물러난다" 가드에 걸려 여기서 그냥 반환해 재시도/BLOCKED
+     * 승격이 전혀 안 됐다 — 그 run은 FAILED에 영원히 멈췄다. 이제는 재시도 continuation이
+     * 생겨야 한다(attempt=1 < 한도 3).
+     */
+    @Test
+    void execute_self_reported_failed_status_is_no_longer_a_dead_end_and_creates_continuation() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, null, null, null, 0L, 0L, null, "raw", null);
+        // launch()가 반환하기 전에 워커가 MCP report_result(FAILED)로 스스로 종결했다고 가정.
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenAnswer(inv -> {
+            run.fail("워커가 스스로 실패로 보고함");
+            return result;
+        });
+
+        runService.execute(42L);
+
+        ArgumentCaptor<Run> savedCaptor = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(savedCaptor.capture());
+        boolean continuationSaved = savedCaptor.getAllValues().stream()
+                .anyMatch(r -> r != run && r.getStatus() == RunStatus.QUEUED && r.getAttempt() == 2);
+        assertThat(continuationSaved).isTrue();
+        verify(almClient).addComment(eq(1L), eq("🔁 재시도 2/3"), eq(BEARER));
+    }
+
+    // ---- execute: 최종 리뷰 I2 — applyOutcome 사전 단계 방어(원장 기록 실패가 run을 좌초시키면 안 됨) ----
+
+    @Test
+    void execute_ledger_write_failure_does_not_strand_run_in_running() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-x",
+                new BigDecimal("1.00"), 10L, 20L, "claude-opus-5", "raw", null);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+        when(usageLedgerRepository.save(any(UsageLedger.class))).thenThrow(new RuntimeException("DB 순간 장애"));
+
+        runService.execute(42L);
+
+        // I2: 원장 기록이 던져도 run이 RUNNING에 멈추지 않고 정상 종결돼야 한다.
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(almClient).addComment(eq(1L), org.mockito.ArgumentMatchers.contains("완료"), eq(BEARER));
+    }
+
+    // ---- execute: 최종 리뷰 I3 — 킬 스위치/예산 캡을 execute() 진입점에서 전면 확인 ----
+
+    @Test
+    void execute_denied_by_kill_switch_or_budget_cap_leaves_run_queued_without_launching() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        when(budgetGuard.allow(PROJECT_ID)).thenReturn(false);
+
+        runService.execute(42L);
+
+        // QUEUED 그대로 — 킬 스위치/캡이 풀리면 다음 드레인 틱이 재시도한다(재시도 카운트 소모 없음).
+        assertThat(run.getStatus()).isEqualTo(RunStatus.QUEUED);
+        verify(workerLauncher, never()).launch(any(), any());
+        verify(issueClaimSupport, never()).claim(anyString(), anyLong(), anyString(), anyString());
+        verify(runRepository, never()).save(any());
     }
 
     // ---- execute: commit link parser integration (P2a T6b) ----
@@ -575,7 +660,7 @@ class RunServiceTest {
         RunService serviceWithLowercasedRepos = new RunService(runRepository, almClient, issueClaimSupport,
                 tokenService, personaRepository, workerLauncher, lowercasedRepos, usageLedgerRepository,
                 schedulerProperties, new com.platform.agentservice.budget.BudgetProperties(
-                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser);
+                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser, budgetGuard);
 
         Run run = queuedRun(42L);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));

@@ -25,13 +25,18 @@ import java.util.Set;
 public class Run {
 
     /**
-     * 취소 가능 상태(fix round 2, P2a T7 재리뷰) — {@code BLOCKED}를 포함한다: 취소는
-     * "종단이 아닌 run을 닫는다"는 뜻이고, BLOCKED(재시도 한도 소진, 사람 확인 대기)도
-     * 종단이 아니다. {@link RunResumeService#resume}이 사람 확인 후 재개할 때
+     * 취소 가능 상태 — 취소는 "종단이 아닌 run을 닫는다"는 뜻이다.
+     * {@code BLOCKED}(fix round 2, P2a T7 재리뷰: 재시도 한도 소진, 사람 확인 대기)와
+     * {@code FAILED}(최종 리뷰 I1: 워커가 스스로 {@code report_result(FAILED)}로 종결한
+     * 직후 {@code RunService.handleRetryOrBlock}이 곧바로 QUEUED-continuation이나 BLOCKED로
+     * 옮기지만, 그 처리 자체가 예외로 실패하는 잔여 케이스에서는 FAILED에 멈출 수 있다 —
+     * 그때도 사람이 손 놓지 않도록 닫을 수 있어야 한다) 둘 다 종단이 아니다.
+     * {@link RunResumeService#resume}이 BLOCKED·FAILED 둘 다 사람 확인 후 재개할 때
      * continuation을 먼저 만들고 원 run을 {@link #cancelWithNote}로 닫는 데 쓴다
      * ({@link com.platform.agentservice.run.GateService#approve}와 동일 패턴).
      */
-    private static final Set<RunStatus> CANCELLABLE = EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED);
+    private static final Set<RunStatus> CANCELLABLE = EnumSet.of(
+            RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED, RunStatus.FAILED);
     private static final Set<RunStatus> BLOCKABLE = EnumSet.of(RunStatus.RUNNING, RunStatus.FAILED);
     private static final Set<RunStatus> CONTINUABLE = EnumSet.of(RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED, RunStatus.FAILED);
 
@@ -143,7 +148,7 @@ public class Run {
      * 별도로 둔다. 가드는 {@link #cancel()}과 동일하다.
      */
     public void cancelWithNote(String note) {
-        requireStatus(CANCELLABLE, "QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED 상태에서만 취소할 수 있습니다");
+        requireStatus(CANCELLABLE, "QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED·FAILED 상태에서만 취소할 수 있습니다");
         this.status = RunStatus.CANCELLED;
         this.error = note;
         this.endedAt = Instant.now();

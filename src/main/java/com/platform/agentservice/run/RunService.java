@@ -88,12 +88,13 @@ public class RunService {
     private final SchedulerProperties schedulerProperties;
     private final BudgetProperties budgetProperties;
     private final CommitLinkParser commitLinkParser;
+    private final BudgetGuard budgetGuard;
 
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
                        SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
-                       CommitLinkParser commitLinkParser) {
+                       CommitLinkParser commitLinkParser, BudgetGuard budgetGuard) {
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -105,6 +106,7 @@ public class RunService {
         this.schedulerProperties = schedulerProperties;
         this.budgetProperties = budgetProperties;
         this.commitLinkParser = commitLinkParser;
+        this.budgetGuard = budgetGuard;
     }
 
     /** Dispatcher가 새 이슈를 픽업할 때 넘기는 최소 참조. */
@@ -125,6 +127,17 @@ public class RunService {
      * QUEUED run 하나를 워커로 실행한다. 워커 준비(리포 매핑 해석·이슈 claim) 실패 시
      * RUNNING을 거쳐 곧바로 실패 처리한다 — {@link Run#fail}이 RUNNING에서만 허용되므로
      * 상태 규약을 지키려면 실패도 RUNNING을 통과해야 한다.
+     *
+     * <p><b>킬 스위치·예산 캡 전면화(최종 리뷰 I3)</b>: {@link BudgetGuard#allow}는 원래
+     * {@link Dispatcher#pickNewIssue}에서만 확인해 "새 이슈 픽업"만 막았다 — 그런데 QUEUED
+     * continuation의 드레인({@link Dispatcher#drainQueued}), 게이트 승인({@link
+     * GateService#approve}), BLOCKED/FAILED 사람 재개({@link RunResumeService#resume})는
+     * 전부 이 {@link #execute}를 직접 호출해서 킬 스위치를 그냥 지나쳐 버렸다(문서
+     * {@code CLAUDE.md} §5.2가 "즉시 전체 차단"이라고 약속한 것과 실제가 달랐다). 그래서
+     * 진입점 자체(여기)에서 한 번 더 확인한다 — 거부되면 QUEUED로 그대로 남겨 둔다(RUNNING
+     * 전이 자체를 하지 않는다). run을 실패 처리하지 않는 이유: 킬 스위치/예산 캡은 일시적
+     * 상태이고, 풀리면 다음 Dispatcher 드레인 틱이 이 QUEUED run을 다시 집어 처리하면
+     * 되기 때문이다(재시도 카운트 소모 없음).
      */
     @Async("workerExecutor")
     public void execute(long runId) {
@@ -135,6 +148,10 @@ public class RunService {
         }
         if (run.getStatus() != RunStatus.QUEUED) {
             log.debug("QUEUED 상태가 아니라 실행을 건너뜁니다: id={} status={}", runId, run.getStatus());
+            return;
+        }
+        if (!budgetGuard.allow(run.getProjectId())) {
+            log.info("킬 스위치/예산 캡으로 실행을 보류합니다 — QUEUED로 남겨 다음 드레인 틱이 재시도합니다: id={}", runId);
             return;
         }
 
@@ -228,30 +245,77 @@ public class RunService {
      * MCP {@code report_result}/{@code request_gate})로 종결됐어도 항상 남긴다 — 실제로
      * 토큰이 소모됐다는 사실은 최종 상태와 무관하다. 상태 전이는 run이 여전히 RUNNING일
      * 때만 이 메서드가 결정한다(이미 다른 상태라면 그쪽이 진실의 원천이므로 덮지 않는다).
+     *
+     * <p><b>self-FAILED 데드엔드 수정(최종 리뷰 I1)</b>: 워커가 launch() 반환 전에 MCP
+     * {@code report_result(status=FAILED)}를 스스로 불렀으면 재조회 시 상태가 FAILED다 —
+     * 예전에는 "RUNNING 아니면 물러난다" 가드에 걸려 여기서 그냥 반환했고, 그러면 재시도도
+     * BLOCKED 승격도 전혀 일어나지 않아 그 run은 FAILED에 영원히 멈췄다(재개 API도 원래
+     * BLOCKED만 받아서 막다른 골목이었다 — {@link RunResumeService}도 함께 넓혔다). FAILED는
+     * {@code Run}의 차단 가능·이어가기 가능 상태 집합 둘 다에 이미 포함돼 있으므로
+     * {@link #handleRetryOrBlock}을 그대로 태울 수 있다.
+     *
+     * <p><b>방어적 래핑(최종 리뷰 I2)</b>: {@link #recordSessionAndLedger}/{@link
+     * #warnIfOverPerRunBudget}는 (DB 순간 장애·낙관적 락 등으로) 던질 수 있는데, 이 메서드는
+     * {@code @Async} 진입점({@link #execute}) 안에서 호출되므로 여기서 던진 예외는 스프링
+     * 기본 비동기 예외 핸들러가 조용히 삼킨다 — run이 RUNNING에 발이 묶이고 원장도 못 쓴
+     * 채로 끝난다. {@link #linkCommits}처럼(이미 자체 try/catch) 각 단계를 개별적으로
+     * log-and-continue로 감싸고, 이 메서드 전체도 바깥 try/catch로 감싸 그래도 뭔가 새면
+     * {@link #finishFailed}로 대체 시도한다(그 폴백조차 실패하면 로그만 남기고 포기 —
+     * 더는 이 메서드가 할 수 있는 게 없다).
      */
     private void applyOutcome(long runId, WorkerResult result) {
-        recordSessionAndLedger(runId, result);
-        linkCommits(runId, result);
-        warnIfOverPerRunBudget(runId, result);
+        try {
+            safelyRecordSessionAndLedger(runId, result);
+            linkCommits(runId, result);
+            safelyWarnIfOverPerRunBudget(runId, result);
 
-        Run run = runRepository.findById(runId).orElseThrow();
-        if (run.getStatus() != RunStatus.RUNNING) {
-            log.debug("워커가 이미 스스로 종결했습니다(run={}, status={}) — 재전이하지 않습니다.", runId, run.getStatus());
-            return;
-        }
+            Run run = runRepository.findById(runId).orElseThrow();
+            if (run.getStatus() == RunStatus.FAILED) {
+                log.debug("워커가 스스로 report_result(FAILED)로 종결했습니다(run={}) — 재시도/차단 판단을 이어갑니다.", runId);
+                handleRetryOrBlock(run);
+                return;
+            }
+            if (run.getStatus() != RunStatus.RUNNING) {
+                log.debug("워커가 이미 스스로 종결했습니다(run={}, status={}) — 재전이하지 않습니다.", runId, run.getStatus());
+                return;
+            }
 
-        if (result.timedOut()) {
-            finishFailed(runId, "시간 초과");
-            return;
-        }
-        if (!result.succeeded()) {
-            finishFailed(runId, truncate(result.rawTail()));
-            return;
-        }
+            if (result.timedOut()) {
+                finishFailed(runId, "시간 초과");
+                return;
+            }
+            if (!result.succeeded()) {
+                finishFailed(runId, truncate(result.rawTail()));
+                return;
+            }
 
-        run.complete();
-        runRepository.save(run);
-        commentBestEffort(run, "✅ 워커 종료: " + truncate(result.resultText()));
+            run.complete();
+            runRepository.save(run);
+            commentBestEffort(run, "✅ 워커 종료: " + truncate(result.resultText()));
+        } catch (Exception e) {
+            log.warn("run={} 결과 반영 중 예기치 못한 오류 — 실패 처리로 대체 시도합니다: {}", runId, e.getMessage());
+            try {
+                finishFailed(runId, "결과 반영 오류: " + e.getMessage());
+            } catch (Exception fallbackFailure) {
+                log.error("run={} 실패 처리 폴백도 실패했습니다 — run이 멈춰 있을 수 있습니다: {}", runId, fallbackFailure.getMessage());
+            }
+        }
+    }
+
+    private void safelyRecordSessionAndLedger(long runId, WorkerResult result) {
+        try {
+            recordSessionAndLedger(runId, result);
+        } catch (Exception e) {
+            log.warn("run={} 세션/원장 기록 실패 — 건너뜁니다: {}", runId, e.getMessage());
+        }
+    }
+
+    private void safelyWarnIfOverPerRunBudget(long runId, WorkerResult result) {
+        try {
+            warnIfOverPerRunBudget(runId, result);
+        } catch (Exception e) {
+            log.warn("run={} 비용 상한 경고 처리 실패 — 건너뜁니다: {}", runId, e.getMessage());
+        }
     }
 
     private void recordSessionAndLedger(long runId, WorkerResult result) {

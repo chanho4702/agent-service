@@ -217,13 +217,17 @@ class RunTransitionTest {
     }
 
     @Test
-    void cancel_fromFailed_isIllegal() {
-        // fix round 2(P2a T7 재리뷰): BLOCKED는 취소 가능해졌지만 FAILED는 여전히 아니다 —
-        // FAILED에서 "닫는" 합법 경로는 재시도(continuation) 또는 block()뿐이다.
+    void cancel_movesFailedToCancelled() {
+        // 최종 리뷰 I1: 워커가 스스로 report_result(FAILED)로 종결한 뒤 RunService가 곧바로
+        // 재시도/BLOCKED로 옮기지만, 그 처리 자체가 예외로 실패하는 잔여 케이스에서는 FAILED에
+        // 멈출 수 있다 — 그때도 사람이 손 놓지 않도록 FAILED에서 취소할 수 있어야 한다
+        // (RunResumeService.resume이 FAILED도 재개 대상으로 받아들이면서 cancelWithNote로
+        // 원 run을 닫을 때도 이 경로를 탄다).
         Run r = queued();
         r.start("/work/AGP-4", 9L);
         r.fail("boom");
-        assertThatThrownBy(r::cancel).isInstanceOf(ConflictException.class);
+        r.cancel();
+        assertThat(r.getStatus()).isEqualTo(RunStatus.CANCELLED);
     }
 
     @Test

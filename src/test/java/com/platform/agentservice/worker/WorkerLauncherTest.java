@@ -185,14 +185,19 @@ class WorkerLauncherTest {
     }
 
     /**
-     * F1(P2a T7 fix round): {@code --mcp-config}는 이제 인라인 JSON이 아니라 워크스페이스
-     * 안 파일 경로다 — Windows ProcessBuilder 인자 손상 재발 방지(task-7 3회 재현). 인자
-     * 값 자체가 순수 경로 문자열(따옴표·중괄호 없음)인지, 그 경로의 파일이 CLI 호출
-     * 시점에는 올바른 JSON을 담고 있었는지(FakeCommandExecutor가 호출 순간 내용을 캡처),
-     * 실행이 끝난 뒤에는 삭제됐는지(토큰 잔존 방지)를 모두 확인한다.
+     * F1(P2a T7 fix round): {@code --mcp-config}는 이제 인라인 JSON이 아니라 파일 경로다 —
+     * Windows ProcessBuilder 인자 손상 재발 방지(task-7 3회 재현). 인자 값 자체가 순수
+     * 경로 문자열(따옴표·중괄호 없음)인지, 그 경로의 파일이 CLI 호출 시점에는 올바른
+     * JSON을 담고 있었는지(FakeCommandExecutor가 호출 순간 내용을 캡처), 실행이 끝난
+     * 뒤에는 디렉터리째 삭제됐는지(토큰 잔존 방지)를 모두 확인한다.
+     *
+     * <p><b>I4(최종 리뷰)</b>: 그 파일은 워크스페이스(git 클론 루트) 안이 아니라 형제
+     * 디렉터리 {@code run-<id>-cfg}에 있어야 한다 — 워커가 {@code Bash(git *)}로 클론
+     * 트리 안의 아무 파일이나 커밋할 수 있으므로, 자격증명 파일은 애초에 그 트리 밖에
+     * 둬야 한다. 워크스페이스 쪽에는 이 파일이 존재한 적조차 없어야 함을 함께 확인한다.
      */
     @Test
-    void mcp_config_is_written_to_a_file_and_deleted_after_run_completes() {
+    void mcp_config_is_written_to_a_sibling_dir_outside_the_clone_and_deleted_after_run_completes() {
         stubTokenIssuance();
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"ok\"}", "", false));
@@ -203,29 +208,38 @@ class WorkerLauncherTest {
         int idx = cmd.indexOf("--mcp-config");
         assertThat(idx).isGreaterThanOrEqualTo(0);
         String passedArg = cmd.get(idx + 1);
-        Path expectedPath = workDir.resolve("run-" + RUN_ID).resolve(".mcp-run.json");
+        Path workspace = workDir.resolve("run-" + RUN_ID);
+        Path expectedDir = workDir.resolve("run-" + RUN_ID + "-cfg");
+        Path expectedPath = expectedDir.resolve(".mcp-run.json");
         assertThat(passedArg).isEqualTo(expectedPath.toString());
         // 인라인 JSON이었다면 반드시 있었을 문자들이 인자 값에는 전혀 없어야 한다(재발 방지 가드).
         assertThat(passedArg).doesNotContain("{").doesNotContain("\"");
+        // 클론 트리(workspace) 밖의 형제 디렉터리여야 한다 — git 명령이 닿을 수 없는 위치.
+        assertThat(expectedDir.getParent()).isEqualTo(workspace.getParent());
+        assertThat(expectedDir).isNotEqualTo(workspace);
 
         String contentAtCallTime = commandExecutor.mcpConfigContentAtCall;
         assertThat(contentAtCallTime).contains("http://localhost/api/agent/mcp");
         assertThat(contentAtCallTime).contains("Bearer agp_secret-token");
         assertThat(contentAtCallTime).contains("agent-platform");
 
+        // 실행 후에는 파일뿐 아니라 디렉터리 자체도 남아 있으면 안 된다(재귀 삭제).
         assertThat(Files.exists(expectedPath)).isFalse();
+        assertThat(Files.exists(expectedDir)).isFalse();
+        // 워크스페이스(클론 루트) 쪽에는 이 파일이 존재한 적조차 없어야 한다.
+        assertThat(Files.exists(workspace.resolve(".mcp-run.json"))).isFalse();
     }
 
     @Test
-    void mcp_config_file_is_deleted_even_when_claude_exits_nonzero() {
+    void mcp_config_dir_is_deleted_even_when_claude_exits_nonzero() {
         stubTokenIssuance();
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
         commandExecutor.enqueue(new CommandExecutor.ExecResult(1, "not json at all", "boom", false));
 
         launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
 
-        Path expectedPath = workDir.resolve("run-" + RUN_ID).resolve(".mcp-run.json");
-        assertThat(Files.exists(expectedPath)).isFalse();
+        Path expectedDir = workDir.resolve("run-" + RUN_ID + "-cfg");
+        assertThat(Files.exists(expectedDir)).isFalse();
     }
 
     @Test
@@ -284,8 +298,8 @@ class WorkerLauncherTest {
                 .hasMessage("boom");
 
         verify(patService).revoke(9L);
-        // F1: 실행기가 던져도 mcp-config 파일(토큰 포함)이 워크스페이스에 남으면 안 된다.
-        assertThat(Files.exists(workDir.resolve("run-" + RUN_ID).resolve(".mcp-run.json"))).isFalse();
+        // F1/I4: 실행기가 던져도 mcp-config 디렉터리(토큰 포함)가 남으면 안 된다.
+        assertThat(Files.exists(workDir.resolve("run-" + RUN_ID + "-cfg"))).isFalse();
     }
 
     @Test
