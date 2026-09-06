@@ -16,7 +16,7 @@ public class PatToken {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     @Column(nullable = false, unique = true, length = 64) private String tokenHash;
-    @Column(nullable = false) private String label;
+    @Column(nullable = false, length = 120) private String label;  // V1 컬럼폭 — PatCreateRequest.label @Size와 짝
     @Column(nullable = false) private Long ownerMemberId;
     @Column(nullable = false) private Long personaId;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;

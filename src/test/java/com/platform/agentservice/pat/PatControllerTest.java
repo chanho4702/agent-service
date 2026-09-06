@@ -65,6 +65,34 @@ class PatControllerTest {
                 .andExpect(jsonPath("$.personaSlug").value("qa-bot"));
     }
 
+    /** M4 — label은 pat_token.label VARCHAR(120). 초과분은 DB까지 가지 않고 400으로 끊어야 한다. */
+    @Test
+    void label_over_column_width_returns_400_with_korean_error() throws Exception {
+        String body = """
+                {"label":"%s","personaSlug":"qa-bot"}
+                """.formatted("a".repeat(121));
+
+        mvc.perform(post("/api/agent/tokens").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("label은 120자 이하여야 합니다"));
+    }
+
+    /** 경계값 — 정확히 120자 label은 통과해야 한다. */
+    @Test
+    void label_at_exact_column_width_is_accepted() throws Exception {
+        given(patService.issue(any(), eq(1L)))
+                .willReturn(new PatCreatedResponse("agp_abcdef", 10L, "l", "qa-bot"));
+
+        String body = """
+                {"label":"%s","personaSlug":"qa-bot"}
+                """.formatted("a".repeat(120));
+
+        mvc.perform(post("/api/agent/tokens").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+    }
+
     @Test
     void non_admin_cannot_create_token() throws Exception {
         String body = """

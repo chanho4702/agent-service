@@ -75,6 +75,51 @@ class PersonaControllerTest {
                 .andExpect(jsonPath("$.name").value("QA Bot v2"));
     }
 
+    /** M4 — name은 persona.name VARCHAR(80). 초과분은 DB까지 가지 않고 400으로 끊어야 한다. */
+    @Test
+    void name_over_column_width_returns_400_with_korean_error() throws Exception {
+        String body = """
+                {"slug":"qa-bot","role":"REVIEWER","name":"%s"}
+                """.formatted("가".repeat(81));
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .header("Authorization", "AdminSession admin-token")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("name은 80자 이하여야 합니다"));
+    }
+
+    /** M4 — emoji는 persona.emoji VARCHAR(16). */
+    @Test
+    void emoji_over_column_width_returns_400() throws Exception {
+        String body = """
+                {"slug":"qa-bot","role":"REVIEWER","name":"QA Bot","emoji":"%s"}
+                """.formatted("x".repeat(17));
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .header("Authorization", "AdminSession admin-token")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("emoji는 16자 이하여야 합니다"));
+    }
+
+    /** 경계값 — 정확히 컬럼폭까지는 통과해야 한다(80자 name, 16자 emoji). */
+    @Test
+    void name_and_emoji_at_exact_column_width_are_accepted() throws Exception {
+        PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "n", "e", true);
+        given(personaService.bootstrap(any(), any()))
+                .willReturn(new PersonaService.BootstrapResult(response, true));
+
+        String body = """
+                {"slug":"qa-bot","role":"REVIEWER","name":"%s","emoji":"%s"}
+                """.formatted("가".repeat(80), "x".repeat(16));
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .header("Authorization", "AdminSession admin-token")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isCreated());
+    }
+
     @Test
     void non_admin_is_forbidden() throws Exception {
         String body = """
