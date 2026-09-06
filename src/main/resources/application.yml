@@ -62,6 +62,17 @@ platform:
     wiki-base-url: ${WIKI_BASE_URL:http://localhost:9110}
     org-base-url: ${ORG_BASE_URL:http://localhost:9130}
     internal-secret: ${AGENT_INTERNAL_SECRET:}   # 비면 페르소나 토큰 발급 불가(fail-closed)
+    worker:
+      # 워커 런처(P2a T3) — 이슈를 헤드리스 `claude -p` 프로세스로 실행한다. 전부 env로 오버라이드.
+      work-dir: ${AGENT_WORK_DIR:C:\agent-work}
+      harness-bundle-path: ${HARNESS_BUNDLE:C:\MSA_TEMPLATE\.claude}
+      harness-root-files: ${HARNESS_ROOT_FILES:C:\MSA_TEMPLATE\CLAUDE.md,C:\MSA_TEMPLATE\AGENTS.md}
+      claude-bin: ${CLAUDE_BIN:claude}
+      max-turns: ${WORKER_MAX_TURNS:80}
+      timeout-minutes: ${WORKER_TIMEOUT_MIN:40}
+      allowed-tools: 'Read,Edit,Write,Glob,Grep,Bash(git *),Bash(gradlew *),Bash(./gradlew *),Bash(npm *),Bash(pnpm *),Agent,mcp__agent-platform__*'
+      mcp-url: ${WORKER_MCP_URL:http://localhost/api/agent/mcp}
+      repos: {}   # 프로젝트키→git URL 매핑, env/yml로 주입 (예: AGP: https://github.com/chanho4702/agent-service.git)
 
 # Actuator — 내부망 전용. 게이트웨이 관리자 대시보드(/api/platform/health)가 20초 캐시로 프로브한다.
 # health·info 둘만 노출하고(SecurityConfig의 전용 체인에서 이 둘만 permitAll), 관리 포트는 따로
