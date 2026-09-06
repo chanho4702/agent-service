@@ -1,5 +1,6 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.budget.BudgetProperties;
 import com.platform.agentservice.budget.LedgerScope;
 import com.platform.agentservice.budget.UsageLedger;
 import com.platform.agentservice.budget.UsageLedgerRepository;
@@ -71,8 +72,9 @@ class RunServiceTest {
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
                 "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
+        BudgetProperties budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
-                workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties);
+                workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties);
 
         Persona persona = Persona.of(PERSONA_MEMBER_ID, "jiho", PersonaRole.BACKEND, "지호", "🔧", null);
         ReflectionTestUtils.setField(persona, "id", PERSONA_ID);
@@ -189,6 +191,60 @@ class RunServiceTest {
         assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
         // 재드레인이 launch를 다시 호출하지 않았다 — 최초 실행 한 번만 워커를 띄웠다.
         verify(workerLauncher, times(1)).launch(any(Run.class), any(WorkerJob.class));
+    }
+
+    // ---- execute: per-run budget cap exceeded -> warning comment, run still completes ----
+
+    @Test
+    void execute_cost_over_per_run_cap_adds_warning_comment_but_still_completes() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        // per-run cap in setUp() is 5 — 12.50 exceeds it.
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-3",
+                new BigDecimal("12.50"), 500L, 900L, "claude-opus-5", "raw");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(almClient).addComment(eq(1L),
+                eq("⚠️ run 비용 상한 초과: $12.50 > $5"), eq(BEARER));
+        verify(almClient).addComment(eq(1L),
+                org.mockito.ArgumentMatchers.contains("완료"), eq(BEARER));
+    }
+
+    @Test
+    void execute_cost_within_per_run_cap_adds_no_warning_comment() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-4",
+                new BigDecimal("2.00"), 100L, 200L, "claude-opus-5", "raw");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(almClient, times(1)).addComment(eq(1L), anyString(), eq(BEARER));
+        verify(almClient, never()).addComment(eq(1L),
+                org.mockito.ArgumentMatchers.contains("상한 초과"), eq(BEARER));
     }
 
     private UsageLedger argThatLedger(LedgerScope scope, String scopeId) {

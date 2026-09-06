@@ -81,6 +81,13 @@ platform:
       max-concurrent-per-project: ${SCHEDULER_MAX_PER_PROJECT:1}
       default-persona-slug: ${SCHEDULER_PERSONA:jiho}
       retry-max-attempts: ${SCHEDULER_RETRY_MAX_ATTEMPTS:3}
+    budget:
+      # 예산 캡(P2a T5) — BudgetService가 BudgetGuardConfig의 permissive 기본값을 대체한다.
+      # 월 캡은 캘린더 월(UTC) 누적, 플랫폼 전체와 프로젝트별에 같은 값을 쓴다(P2a 결정,
+      # 프로젝트별 개별 한도는 P2b). 킬 스위치(POST /api/agent/kill-switch)는 인메모리라
+      # 재기동 시 리셋된다 — 여기 값과 무관하게 항상 꺼진 상태로 시작한다.
+      monthly-usd-cap: ${BUDGET_MONTHLY_USD:100}
+      per-run-usd-cap: ${BUDGET_PER_RUN_USD:5}
 
 # Actuator — 내부망 전용. 게이트웨이 관리자 대시보드(/api/platform/health)가 20초 캐시로 프로브한다.
 # health·info 둘만 노출하고(SecurityConfig의 전용 체인에서 이 둘만 permitAll), 관리 포트는 따로

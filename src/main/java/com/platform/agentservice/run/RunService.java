@@ -5,6 +5,7 @@ import com.platform.agentservice.client.IssueClaimSupport;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.CommentResponse;
 import com.platform.agentservice.client.dto.IssueResponse;
+import com.platform.agentservice.budget.BudgetProperties;
 import com.platform.agentservice.budget.LedgerScope;
 import com.platform.agentservice.budget.UsageLedger;
 import com.platform.agentservice.budget.UsageLedgerRepository;
@@ -66,11 +67,12 @@ public class RunService {
     private final WorkerProperties workerProperties;
     private final UsageLedgerRepository usageLedgerRepository;
     private final SchedulerProperties schedulerProperties;
+    private final BudgetProperties budgetProperties;
 
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
-                       SchedulerProperties schedulerProperties) {
+                       SchedulerProperties schedulerProperties, BudgetProperties budgetProperties) {
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -80,6 +82,7 @@ public class RunService {
         this.workerProperties = workerProperties;
         this.usageLedgerRepository = usageLedgerRepository;
         this.schedulerProperties = schedulerProperties;
+        this.budgetProperties = budgetProperties;
     }
 
     /** Dispatcher가 새 이슈를 픽업할 때 넘기는 최소 참조. */
@@ -205,6 +208,7 @@ public class RunService {
      */
     private void applyOutcome(long runId, WorkerResult result) {
         recordSessionAndLedger(runId, result);
+        warnIfOverPerRunBudget(runId, result);
 
         Run run = runRepository.findById(runId).orElseThrow();
         if (run.getStatus() != RunStatus.RUNNING) {
@@ -238,6 +242,20 @@ public class RunService {
             usageLedgerRepository.save(UsageLedger.of(runId, LedgerScope.PLATFORM, "platform",
                     result.costUsd(), result.inputTokens(), result.outputTokens(), result.model()));
         }
+    }
+
+    /**
+     * run 한 건의 비용이 {@code platform.agent.budget.per-run-usd-cap}을 넘으면 경고 코멘트만
+     * 남긴다(P2a T5) — 이미 종료된 run이라 상태를 되돌리지 않는다. 다음 픽업은 월간 누적
+     * 캡({@code BudgetService.allow})이 자연스럽게 막는다.
+     */
+    private void warnIfOverPerRunBudget(long runId, WorkerResult result) {
+        BigDecimal cap = budgetProperties.perRunUsdCap();
+        if (result.costUsd() == null || cap == null || result.costUsd().compareTo(cap) <= 0) {
+            return;
+        }
+        Run run = runRepository.findById(runId).orElseThrow();
+        commentBestEffort(run, "⚠️ run 비용 상한 초과: $" + result.costUsd() + " > $" + cap);
     }
 
     /** RUNNING일 때만 FAILED로 옮기고 재시도/차단을 판단한다(이미 다른 상태면 손대지 않는다). */

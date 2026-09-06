@@ -127,8 +127,18 @@ public class Run {
     }
 
     public void cancel() {
+        cancelWithNote(null);
+    }
+
+    /**
+     * 취소 + 사유 기록(P2a T5) — 게이트 승인/거절로 원 run을 닫을 때 "왜 CANCELLED가
+     * 됐는지"(예: 후속 continuation run id)를 {@link #error}에 남기려고 {@link #cancel()}과
+     * 별도로 둔다. 가드는 {@link #cancel()}과 동일하다.
+     */
+    public void cancelWithNote(String note) {
         requireStatus(CANCELLABLE, "QUEUED·RUNNING·WAITING_APPROVAL 상태에서만 취소할 수 있습니다");
         this.status = RunStatus.CANCELLED;
+        this.error = note;
         this.endedAt = Instant.now();
     }
 
