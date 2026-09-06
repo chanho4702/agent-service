@@ -23,6 +23,11 @@ import org.springframework.stereotype.Service;
  * (0L) 센티널을 쓴다. 이 값은 {@code PatPrincipal.ownerMemberId()}를 거쳐 감사 로그의
  * actorMemberId로도 남으므로, run 토큰으로 실행된 도구 호출은 감사에서 "시스템이 대리
  * 발급"임을 구분할 수 있다.
+ *
+ * <p><b>캐비어트(fix round 1 라이더)</b>: 현재 {@code tool_call_audit} 조회 경로는
+ * actorMemberId=0을 "시스템 발급"이라는 사람이 읽을 문구로 별도 변환해 보여주지 않는다 —
+ * 그냥 숫자 0으로 노출된다. 감사 UI/API가 생기면 이 센티널을 특별 처리해 표기하는 게
+ * 좋다(지금은 범위 밖).
  */
 @Service
 @RequiredArgsConstructor

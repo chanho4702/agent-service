@@ -37,6 +37,19 @@ public class Audited {
         }
     }
 
+    /**
+     * {@link #run}이 감싼 주 동작(예: run 상태 전이)이 이미 성공적으로 커밋된 뒤,
+     * 부수적인 후속 단계(예: ALM 이슈 코멘트)가 실패했을 때 그 실패만 별도 감사 행으로
+     * 남긴다(P2a T2 fix round 1 — 커밋된 상태가 진실의 원천이고 알림은 best-effort라는
+     * 컨트롤러 판정). 주 동작의 audit 행({@code tool}, OK)과는 별개로 {@code tool+".comment"}
+     * 같은 하위 도구명으로 ERROR 행을 추가한다 — 도구 호출 자체는 성공(state 반영됨)했지만
+     * 사람 알림이 누락됐다는 간극을 감사에서 추적할 수 있다.
+     */
+    public void note(String tool, String summary, AuditStatus status) {
+        PatPrincipal actor = ToolActor.current();
+        auditService.record(actor.personaId(), actor.ownerMemberId(), tool, summary, status);
+    }
+
     private String errorMessage(Exception e) {
         if (e instanceof ServiceUnavailableException) {
             return "권한 서비스/다운스트림 일시 장애 — 권한 없음이 아님, 잠시 후 재시도하세요: " + e.getMessage();

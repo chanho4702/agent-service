@@ -1,5 +1,6 @@
 package com.platform.agentservice.tools;
 
+import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.IssueResponse;
@@ -19,6 +20,15 @@ import org.springframework.stereotype.Component;
  * 페르소나가 된다. 소유·상태 검증({@code run.personaId == 호출자.personaId}, 상태==RUNNING)은
  * {@link RunToolService}에 위임하고, 이 클래스는 ALM 이슈 코멘트 작성 + {@link Audited} 감사만
  * 담당한다(도구를 얇게 유지, T2 디스패치 지시).
+ *
+ * <p><b>코멘트는 best-effort(fix round 1 컨트롤러 판정)</b>: {@code request_gate}/
+ * {@code report_result}는 run 상태 전이(Gate 생성·WAITING_APPROVAL·DONE/FAILED/BLOCKED)가
+ * 커밋된 이후에만 ALM 코멘트를 시도한다 — 커밋된 상태가 진실의 원천이고, 코멘트는 사람에게 보내는
+ * 부가 알림일 뿐이다. 코멘트가 실패해도 도구는 실패로 보고하지 않는다(실패로 보고하면 워커가
+ * 재시도하다 이미 전이된 run에서 {@code ConflictException}을 맞아 상태가 어긋난다) — 대신 성공
+ * 텍스트에 경고 문구를 덧붙이고, {@link Audited#note}로 {@code <tool>.comment} 이름의 별도 ERROR
+ * 감사 행을 남겨 누락을 추적 가능하게 한다. {@code report_progress}는 상태 변경이 없으므로 코멘트
+ * 실패가 곧 도구 실패다 — 이 예외는 그대로 둔다.
  */
 @Component
 public class RunTools {
@@ -56,9 +66,10 @@ public class RunTools {
         return audited.run("request_gate", "run=" + runId + " kind=" + kind, () -> {
             GateKind gateKind = parseGateKind(kind);
             GateRequestResult result = runToolService.requestGate(runId, actor.personaId(), gateKind, request);
-            addComment(result.issueKey(), "⏸ 승인 대기(" + gateKind + "): " + request, actor);
+            String warning = commentBestEffort(
+                    "request_gate", result.issueKey(), "⏸ 승인 대기(" + gateKind + "): " + request, actor);
             return "게이트 등록됨(gate id=" + result.gateId() + ") — 작업 상태를 이슈·위키에 저장했으면 이제 종료하라. "
-                    + "승인 후 새 run이 기록을 읽고 이어받는다.";
+                    + "승인 후 새 run이 기록을 읽고 이어받는다." + warning;
         });
     }
 
@@ -71,8 +82,8 @@ public class RunTools {
         return audited.run("report_result", "run=" + runId + " status=" + status, () -> {
             String normalized = status == null ? "" : status.toUpperCase();
             RunResultOutcome outcome = applyOutcome(runId, actor.personaId(), normalized, summary);
-            addComment(outcome.issueKey(), commentFor(normalized, summary), actor);
-            return "run 종결 기록 완료: " + normalized;
+            String warning = commentBestEffort("report_result", outcome.issueKey(), commentFor(normalized, summary), actor);
+            return "run 종결 기록 완료: " + normalized + warning;
         });
     }
 
@@ -106,5 +117,21 @@ public class RunTools {
         String bearer = tokenService.bearerFor(actor.personaMemberId());
         IssueResponse issue = almClient.getByKey(issueKey, bearer);
         almClient.addComment(issue.id(), body, bearer);
+    }
+
+    /**
+     * {@code request_gate}/{@code report_result} 전용: run 상태 전이가 이미 커밋된 뒤
+     * 시도하는 ALM 코멘트다. 실패해도 도구 전체를 실패로 만들지 않는다(상태가 진실의 원천) —
+     * {@code <tool>.comment} 이름으로 별도 ERROR 감사 행만 남기고, 성공 텍스트에 덧붙일 경고
+     * 문구를 반환한다(성공 시 빈 문자열).
+     */
+    private String commentBestEffort(String tool, String issueKey, String body, PatPrincipal actor) {
+        try {
+            addComment(issueKey, body, actor);
+            return "";
+        } catch (Exception e) {
+            audited.note(tool + ".comment", issueKey + ": " + e.getMessage(), AuditStatus.ERROR);
+            return "\n(경고: 이슈 코멘트 기록 실패 — 상태는 저장됨, 사람 알림 누락 가능)";
+        }
     }
 }

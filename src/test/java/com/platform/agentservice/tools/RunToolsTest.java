@@ -157,6 +157,26 @@ class RunToolsTest {
         verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
     }
 
+    // ---- comment best-effort (fix round 1): state change is the source of truth, comment failure is non-fatal ----
+
+    @Test
+    void request_gate_comment_failure_still_reports_success_with_warning_and_keeps_state() {
+        Run run = runningRun(42L, PERSONA_ID);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        Gate savedGate = Gate.request(42L, com.platform.agentservice.run.GateKind.MERGE, "머지해도 될까요?");
+        ReflectionTestUtils.setField(savedGate, "id", 7L);
+        when(gateRepository.save(org.mockito.ArgumentMatchers.any(Gate.class))).thenReturn(savedGate);
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenThrow(new RuntimeException("alm-backend 다운"));
+
+        String result = runTools.requestGate(42L, "merge", "머지해도 될까요?");
+
+        // 상태 전이는 이미 커밋됐으므로 도구는 성공을 보고한다 — 코멘트 실패는 경고로만 덧붙인다.
+        assertThat(result).contains("게이트 등록됨(gate id=7)").contains("경고: 이슈 코멘트 기록 실패");
+        assertThat(run.getStatus()).isEqualTo(RunStatus.WAITING_APPROVAL);
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate.comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+    }
+
     @Test
     void request_gate_rejects_wrong_persona() {
         Run run = runningRun(42L, OTHER_PERSONA_ID);
@@ -206,6 +226,21 @@ class RunToolsTest {
         assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
         verify(almClient).addComment(1L, "✅ 완료: 작업 완료했습니다", BEARER);
         verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+    }
+
+    @Test
+    void report_result_comment_failure_still_reports_success_with_warning_and_keeps_state() {
+        Run run = runningRun(42L, PERSONA_ID);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenThrow(new RuntimeException("alm-backend 다운"));
+
+        String result = runTools.reportResult(42L, "DONE", "작업 완료했습니다");
+
+        // run 종결은 이미 커밋됐으므로 도구는 성공을 보고한다 — 코멘트 실패는 경고로만 덧붙인다.
+        assertThat(result).contains("DONE").contains("경고: 이슈 코멘트 기록 실패");
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result.comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
     }
 
     @Test
