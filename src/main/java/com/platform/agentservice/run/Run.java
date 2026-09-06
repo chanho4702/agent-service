@@ -24,7 +24,14 @@ import java.util.Set;
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class Run {
 
-    private static final Set<RunStatus> CANCELLABLE = EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL);
+    /**
+     * 취소 가능 상태(fix round 2, P2a T7 재리뷰) — {@code BLOCKED}를 포함한다: 취소는
+     * "종단이 아닌 run을 닫는다"는 뜻이고, BLOCKED(재시도 한도 소진, 사람 확인 대기)도
+     * 종단이 아니다. {@link RunResumeService#resume}이 사람 확인 후 재개할 때
+     * continuation을 먼저 만들고 원 run을 {@link #cancelWithNote}로 닫는 데 쓴다
+     * ({@link com.platform.agentservice.run.GateService#approve}와 동일 패턴).
+     */
+    private static final Set<RunStatus> CANCELLABLE = EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED);
     private static final Set<RunStatus> BLOCKABLE = EnumSet.of(RunStatus.RUNNING, RunStatus.FAILED);
     private static final Set<RunStatus> CONTINUABLE = EnumSet.of(RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED, RunStatus.FAILED);
 
@@ -136,7 +143,7 @@ public class Run {
      * 별도로 둔다. 가드는 {@link #cancel()}과 동일하다.
      */
     public void cancelWithNote(String note) {
-        requireStatus(CANCELLABLE, "QUEUED·RUNNING·WAITING_APPROVAL 상태에서만 취소할 수 있습니다");
+        requireStatus(CANCELLABLE, "QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED 상태에서만 취소할 수 있습니다");
         this.status = RunStatus.CANCELLED;
         this.error = note;
         this.endedAt = Instant.now();

@@ -36,6 +36,7 @@ class RunControllerTest {
 
     @Autowired WebApplicationContext context;
     @MockitoBean RunService runService;
+    @MockitoBean RunResumeService runResumeService;
 
     MockMvc mvc;
 
@@ -55,6 +56,20 @@ class RunControllerTest {
     @Test
     void non_admin_cancel_is_forbidden() throws Exception {
         mvc.perform(post("/api/agent/runs/42/cancel").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    void admin_resume_returns_204() throws Exception {
+        mvc.perform(post("/api/agent/runs/42/resume").with(authentication(TestAuth.admin(1L, "Admin"))))
+                .andExpect(status().isNoContent());
+
+        verify(runResumeService).resume(42L);
+    }
+
+    @Test
+    void non_admin_resume_is_forbidden() throws Exception {
+        mvc.perform(post("/api/agent/runs/42/resume").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isForbidden());
     }
 

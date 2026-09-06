@@ -95,6 +95,18 @@ class RunTransitionTest {
     }
 
     @Test
+    void cancel_movesBlockedToCancelled() {
+        // fix round 2(P2a T7 재리뷰): 사람 확인 후 재개(RunResumeService.resume)가 원 run을
+        // 이 경로로 닫는다 — BLOCKED는 종단이 아니므로 취소 가능해야 한다.
+        Run r = queued();
+        r.start("/work/AGP-4", 9L);
+        r.fail("boom");
+        r.block("3회 실패 — 사람 확인 필요");
+        r.cancel();
+        assertThat(r.getStatus()).isEqualTo(RunStatus.CANCELLED);
+    }
+
+    @Test
     void continuation_fromWaitingApproval_createsNewQueuedRunWithIncrementedAttempt() {
         Run r = queued();
         r.start("/work/AGP-4", 9L);
@@ -201,6 +213,16 @@ class RunTransitionTest {
         Run r = queued();
         r.start("/work/AGP-4", 9L);
         r.complete();
+        assertThatThrownBy(r::cancel).isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void cancel_fromFailed_isIllegal() {
+        // fix round 2(P2a T7 재리뷰): BLOCKED는 취소 가능해졌지만 FAILED는 여전히 아니다 —
+        // FAILED에서 "닫는" 합법 경로는 재시도(continuation) 또는 block()뿐이다.
+        Run r = queued();
+        r.start("/work/AGP-4", 9L);
+        r.fail("boom");
         assertThatThrownBy(r::cancel).isInstanceOf(ConflictException.class);
     }
 
