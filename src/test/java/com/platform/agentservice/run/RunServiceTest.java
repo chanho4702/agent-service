@@ -352,6 +352,76 @@ class RunServiceTest {
         verify(almClient).addWebLink(101L, "https://github.com/o/r/commit/ddd444", "AGP-100: known", "COMMIT", BEARER);
     }
 
+    // ---- execute: commit link fix round 1 (I1 — outer catch, I2 — null-url skip) ----
+
+    @Test
+    void execute_bearer_lookup_failure_during_commit_linking_does_not_fail_the_run() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-9b", null, 0L, 0L, null, "raw",
+                "C:\\agent-work\\run-42");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        when(commitLinkParser.parse(java.nio.file.Path.of("C:\\agent-work\\run-42"))).thenReturn(List.of(
+                new CommitLinkParser.CommitLink("AGP-100", "eee555", "AGP-100: x", "https://github.com/o/r/commit/eee555")));
+
+        // 1번째 호출(buildJob)은 정상, 2번째 호출(linkCommits 안)만 장애를 재현하고, 3번째
+        // 호출(종결 후 commentBestEffort)은 다시 정상으로 돌아온다 — resolution 단계
+        // (findById/findById/bearerFor)에서 던진 예외가 applyOutcome 밖으로 새지 않고 run이
+        // 정상 종결돼야 한다는 것만 검증한다(fix round 1, I1).
+        when(tokenService.bearerFor(PERSONA_MEMBER_ID))
+                .thenReturn(BEARER)
+                .thenThrow(new RuntimeException("token 서비스 장애"))
+                .thenReturn(BEARER);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(almClient, never()).addWebLink(anyLong(), anyString(), anyString(), anyString(), anyString());
+    }
+
+    @Test
+    void execute_skips_commit_link_with_unresolved_url_but_still_links_others() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-9c", null, 0L, 0L, null, "raw",
+                "C:\\agent-work\\run-42");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        // 첫 커밋은 원격 URL을 정규화하지 못해 url=null(예: 원격 없음) — HTTP 호출 없이 건너뛰어야 한다(I2).
+        when(commitLinkParser.parse(java.nio.file.Path.of("C:\\agent-work\\run-42"))).thenReturn(List.of(
+                new CommitLinkParser.CommitLink("AGP-300", "fff666", "AGP-300: no remote", null),
+                new CommitLinkParser.CommitLink("AGP-100", "ggg777", "AGP-100: has remote", "https://github.com/o/r/commit/ggg777")));
+
+        IssueResponse target100 = issue(101L, "AGP-100", "todo", 1);
+        when(almClient.getByKey("AGP-100", BEARER)).thenReturn(target100);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(almClient, never()).getByKey(eq("AGP-300"), anyString());
+        verify(almClient, never()).addWebLink(anyLong(), anyString(), eq("AGP-300: no remote"), anyString(), anyString());
+        verify(almClient).addWebLink(101L, "https://github.com/o/r/commit/ggg777", "AGP-100: has remote", "COMMIT", BEARER);
+    }
+
     @Test
     void execute_commit_parser_throwing_does_not_fail_the_run() {
         Run run = queuedRun(42L);

@@ -264,50 +264,54 @@ public class RunService {
      * 남아 있고, 실제로 뭔가 커밋됐다는 사실은 최종 상태와 무관하기 때문이다(비용 기록과
      * 같은 논리).
      *
-     * <p>워크스페이스 경로가 없으면(클론조차 못 한 초기 실패 등) 조용히 건너뛴다.
-     * 이슈 키 하나하나는 독립적으로 최선노력(best-effort)이다 — 알 수 없는 키(alm-backend
-     * 404 — {@link AlmClient}가 {@code ConflictException}으로 감싼다)나 웹링크 등록 실패가
-     * 있어도 나머지 커밋 처리와 run 종결 흐름을 막지 않는다. {@code Audited.note} 감사 패턴은
-     * MCP 도구 호출({@link com.platform.agentservice.tools.ToolActor#current()}가 필요)
-     * 맥락에서만 쓸 수 있어 여기(백그라운드 워커 스레드, PAT principal 없음)서는 적용할 수
-     * 없다 — 기존 {@link #commentBestEffort}와 같은 방식으로 로그만 남기고 삼킨다(선택,
-     * T6b 브리핑).
+     * <p>워크스페이스 경로가 없으면(클론조차 못 한 초기 실패 등) 조용히 건너뛴다. 그 밖의
+     * 전체 몸통(파싱·run/페르소나 조회·bearer 발급·등록 루프)은 바깥쪽 하나의 try/catch로
+     * 감싼다(fix round 1, I1) — 이 메서드 전체가 {@link #applyOutcome}에서 {@code
+     * commentBestEffort}와 동급의 best-effort 부가 단계이기 때문에, 어느 단계에서 예외가
+     * 나도(예: {@code tokenService.bearerFor}가 던지는 경우) run이 RUNNING에 발이 묶이는 일
+     * 없이 조용히 삼켜야 한다. 이슈 키 하나하나는 그 안에서 다시 독립적으로 최선노력이다 —
+     * 알 수 없는 키(alm-backend 404 — {@link AlmClient}가 {@code ConflictException}으로
+     * 감싼다)나 웹링크 등록 실패가 있어도 나머지 커밋 처리를 막지 않는다. URL을 정규화하지
+     * 못한 링크(예: 원격이 없거나 파싱 불가)는 HTTP 호출 자체를 걸지 않고 건너뛴다(fix round
+     * 1, I2 — alm-backend가 blank URL을 400으로 거부하는 걸 매번 유발할 필요가 없다).
+     * {@code Audited.note} 감사 패턴은 MCP 도구 호출({@link
+     * com.platform.agentservice.tools.ToolActor#current()}가 필요) 맥락에서만 쓸 수 있어
+     * 여기(백그라운드 워커 스레드, PAT principal 없음)서는 적용할 수 없다 — 기존
+     * {@link #commentBestEffort}와 같은 방식으로 로그만 남기고 삼킨다(선택, T6b 브리핑).
      */
     private void linkCommits(long runId, WorkerResult result) {
         String workspacePath = result.workspacePath();
         if (workspacePath == null || workspacePath.isBlank()) {
             return;
         }
-        List<CommitLinkParser.CommitLink> links;
         try {
-            links = commitLinkParser.parse(Path.of(workspacePath));
-        } catch (Exception e) {
-            log.warn("run={} 커밋 파싱 실패 — 건너뜁니다: {}", runId, e.getMessage());
-            return;
-        }
-        if (links.isEmpty()) {
-            return;
-        }
-
-        Run run = runRepository.findById(runId).orElse(null);
-        if (run == null) {
-            return;
-        }
-        Persona persona = personaRepository.findById(run.getPersonaId()).orElse(null);
-        if (persona == null) {
-            log.warn("run={} 페르소나를 찾을 수 없어 커밋 링크를 건너뜁니다: personaId={}", runId, run.getPersonaId());
-            return;
-        }
-        String bearer = tokenService.bearerFor(persona.getMemberId());
-
-        for (CommitLinkParser.CommitLink link : links) {
-            try {
-                IssueResponse issue = almClient.getByKey(link.issueKey(), bearer);
-                almClient.addWebLink(issue.id(), link.url(), truncateCommitTitle(link.subject()), "COMMIT", bearer);
-            } catch (Exception e) {
-                log.warn("run={} 커밋({}) 웹링크 등록 실패 — 건너뜁니다(이슈 키={}): {}",
-                        runId, link.sha(), link.issueKey(), e.getMessage());
+            List<CommitLinkParser.CommitLink> links = commitLinkParser.parse(Path.of(workspacePath));
+            if (links.isEmpty()) {
+                return;
             }
+
+            Run run = runRepository.findById(runId)
+                    .orElseThrow(() -> new NotFoundException("run을 찾을 수 없습니다: " + runId));
+            Persona persona = personaRepository.findById(run.getPersonaId())
+                    .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));
+            String bearer = tokenService.bearerFor(persona.getMemberId());
+
+            for (CommitLinkParser.CommitLink link : links) {
+                if (link.url() == null) {
+                    log.debug("run={} 커밋({}) 원격 URL을 정규화하지 못해 건너뜁니다(이슈 키={})",
+                            runId, link.sha(), link.issueKey());
+                    continue;
+                }
+                try {
+                    IssueResponse issue = almClient.getByKey(link.issueKey(), bearer);
+                    almClient.addWebLink(issue.id(), link.url(), truncateCommitTitle(link.subject()), "COMMIT", bearer);
+                } catch (Exception e) {
+                    log.warn("run={} 커밋({}) 웹링크 등록 실패 — 건너뜁니다(이슈 키={}): {}",
+                            runId, link.sha(), link.issueKey(), e.getMessage());
+                }
+            }
+        } catch (Exception e) {
+            log.warn("run={} 커밋 링크 처리 실패 — 건너뜁니다: {}", runId, e.getMessage());
         }
     }
 
