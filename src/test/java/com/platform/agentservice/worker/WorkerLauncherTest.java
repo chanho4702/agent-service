@@ -100,12 +100,14 @@ class WorkerLauncherTest {
         List<String> cmd = claudeCall.command();
         assertThat(cmd.get(0)).isEqualTo("claude");
         assertThat(cmd.get(1)).isEqualTo("-p");
-        assertThat(cmd).contains("--permission-mode", "dontAsk");
-        assertThat(cmd).contains("--permission-prompts", "none");
-        assertThat(cmd).contains("--allowedTools", "Read,Edit,Write,Bash(git *)");
+        // AssertJ의 contains(flag, value)는 멤버십만 검사한다(값과 플래그가 뒤바뀌어도 통과) —
+        // 플래그 바로 다음 위치의 값을 직접 확인한다(fix round 1 I1).
+        assertThat(cmd.get(cmd.indexOf("--permission-mode") + 1)).isEqualTo("dontAsk");
+        assertThat(cmd.get(cmd.indexOf("--permission-prompts") + 1)).isEqualTo("none");
+        assertThat(cmd.get(cmd.indexOf("--allowedTools") + 1)).isEqualTo("Read,Edit,Write,Bash(git *)");
         assertThat(cmd).contains("--strict-mcp-config");
-        assertThat(cmd).contains("--output-format", "json");
-        assertThat(cmd).contains("--max-turns", "80");
+        assertThat(cmd.get(cmd.indexOf("--output-format") + 1)).isEqualTo("json");
+        assertThat(cmd.get(cmd.indexOf("--max-turns") + 1)).isEqualTo("80");
         assertThat(cmd).doesNotContain("--model"); // model 미지정이면 플래그 자체가 없어야 함
 
         assertThat(result.exitCode()).isEqualTo(0);
@@ -164,6 +166,18 @@ class WorkerLauncherTest {
         assertThat(prompt).contains("report_result(runId=" + RUN_ID);
         assertThat(prompt).contains("request_gate(runId=" + RUN_ID);
         assertThat(prompt).contains("runId=" + RUN_ID);
+
+        // fix round 1 I2: 사용자 원문(이슈 내용/코멘트)은 명시적 경계로 감싸고, 규약이 그
+        // 데이터보다 우선한다는 문구가 경계 다음·규약 섹션 이전에 있어야 한다.
+        assertThat(prompt).contains("<이슈-내용>");
+        assertThat(prompt).contains("</이슈-내용>");
+        assertThat(prompt).contains("<코멘트>");
+        assertThat(prompt).contains("</코멘트>");
+        assertThat(prompt).contains("규약이 우선한다");
+        assertThat(prompt).containsSubsequence(
+                "<이슈-내용>", "이슈 제목", "</이슈-내용>",
+                "<코멘트>", "사람: 이 부분은 X로 바꿔주세요", "</코멘트>",
+                "규약이 우선한다", "## 작업 규약");
     }
 
     @Test
