@@ -65,10 +65,20 @@ public class Dispatcher {
         pickNewIssue();
     }
 
-    /** 이미 QUEUED인 run(최초 대기분 + 재시도 continuation)을 전부 실행시킨다. */
+    /**
+     * 이미 QUEUED인 run(최초 대기분 + 재시도 continuation)을 전부 실행시킨다. run 단위로
+     * try/catch한다(fix round 1, I2) — {@code execute()}가 {@code @Async} 스레드풀 포화로
+     * {@link org.springframework.core.task.TaskRejectedException}을 던지면(풀+큐가 가득 참)
+     * 그 한 run만 이번 틱에서 건너뛰고, 나머지 드레인과 뒤이은 {@link #pickNewIssue}는 계속
+     * 돈다 — 예외 하나가 틱 전체를 죽여 픽업까지 굶기면 안 된다.
+     */
     private void drainQueued() {
         for (Run run : runRepository.findByStatus(RunStatus.QUEUED)) {
-            runService.execute(run.getId());
+            try {
+                runService.execute(run.getId());
+            } catch (Exception e) {
+                log.warn("QUEUED run 드레인 제출 실패, 다음 run으로 계속합니다: id={} error={}", run.getId(), e.getMessage());
+            }
         }
     }
 

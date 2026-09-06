@@ -18,7 +18,8 @@ CREATE TABLE run (
     started_at     timestamptz,
     ended_at       timestamptz,
     created_at     timestamptz  NOT NULL DEFAULT now(),
-    updated_at     timestamptz  NOT NULL DEFAULT now()
+    updated_at     timestamptz  NOT NULL DEFAULT now(),
+    version        BIGINT       NOT NULL DEFAULT 0          -- 낙관적 락(P2a T4 fix round 1, I1) — 드레인 재선택 경합 방지
 );
 CREATE INDEX idx_run_status ON run (status);
 CREATE INDEX idx_run_issue ON run (issue_key);

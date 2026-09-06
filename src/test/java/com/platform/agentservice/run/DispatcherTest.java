@@ -173,6 +173,36 @@ class DispatcherTest {
         verify(runService, never()).createQueuedForIssue(any(), any(), any());
     }
 
+    // ---- fix round 1 (I2): a rejected drain submission must not abort the rest of the tick ----
+
+    @Test
+    void drain_submission_rejection_on_one_run_does_not_abort_remaining_drain_or_subsequent_pick() {
+        Run r1 = queuedRun(1L);
+        Run r2 = queuedRun(2L);
+        when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of(r1, r2));
+        org.mockito.Mockito.doThrow(new org.springframework.core.task.TaskRejectedException("실행기 포화"))
+                .when(runService).execute(1L);
+
+        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
+        when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
+        IssueResponse issue = issue(9L, "AGP-9", 9L);
+        when(almClient.search(any(), any(), any(), any(), any(), any(), eq(BEARER)))
+                .thenReturn(new IssuePageResponse(List.of(issue), 0, 20, 1));
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-9", RunService.ACTIVE_STATUSES)).thenReturn(false);
+        when(budgetGuard.allow(9L)).thenReturn(true);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 9L)).thenReturn(0L);
+        Run created = queuedRun(200L);
+        when(runService.createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq(null))).thenReturn(created);
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(runService).execute(1L);   // 시도는 했다(거부당함)
+        verify(runService).execute(2L);   // 드레인은 나머지 run으로 계속됐다
+        verify(runService).createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq(null));
+        verify(runService).execute(200L); // 드레인 실패와 무관하게 픽업도 정상 실행됐다
+    }
+
     // ---- per-project concurrency cap also blocks pick ----
 
     @Test

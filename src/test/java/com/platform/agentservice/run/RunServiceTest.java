@@ -160,6 +160,37 @@ class RunServiceTest {
         verify(almClient).addComment(eq(1L), org.mockito.ArgumentMatchers.contains("작업 완료했습니다"), eq(BEARER));
     }
 
+    // ---- execute: fix round 1 (I1) — RUNNING is committed before buildJob(), so a concurrent redrain is a no-op ----
+
+    @Test
+    void execute_commits_running_before_buildJob_so_concurrent_redrain_is_a_noop() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        // buildJob()의 첫 네트워크 호출(claim) 시점에 run이 이미 RUNNING이어야 한다 — 그 안에서
+        // 같은 runId로 재드레인(execute 재호출)을 재현해도 QUEUED가 아니라서 즉시 no-op이어야 한다.
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenAnswer(inv -> {
+            assertThat(run.getStatus()).isEqualTo(RunStatus.RUNNING);
+            runService.execute(42L); // 재드레인 재현 — 이 재귀 호출은 QUEUED가 아니므로 즉시 반환해야 한다
+            return claimed;
+        });
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-9", null, 0L, 0L, null, "raw");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        // 재드레인이 launch를 다시 호출하지 않았다 — 최초 실행 한 번만 워커를 띄웠다.
+        verify(workerLauncher, times(1)).launch(any(Run.class), any(WorkerJob.class));
+    }
+
     private UsageLedger argThatLedger(LedgerScope scope, String scopeId) {
         return org.mockito.ArgumentMatchers.argThat(u -> u != null && u.getScope() == scope && u.getScopeId().equals(scopeId));
     }

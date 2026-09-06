@@ -113,18 +113,20 @@ public class RunService {
             return;
         }
 
+        // fix round 1 (I1): QUEUED 확인 직후, buildJob()의 네트워크 호출(수십 초 걸릴 수 있다)보다
+        // 먼저 RUNNING을 커밋한다 — 그래야 다음 Dispatcher 드레인 틱이 같은 run을 곧바로
+        // "QUEUED 아님"으로 보고 재제출하지 않는다. @Version(Run.version)이 그 사이에도 남는
+        // 경합 창(findById~save)을 낙관적 락으로 막는 2차 방어망이다.
+        run.start(PENDING_WORKSPACE, null);
+        runRepository.save(run);
+
         WorkerJob job;
         try {
             job = buildJob(run);
         } catch (Exception e) {
-            run.start(PENDING_WORKSPACE, null);
-            runRepository.save(run);
             finishFailed(runId, describeFailure(e));
             return;
         }
-
-        run.start(PENDING_WORKSPACE, null);
-        runRepository.save(run);
 
         WorkerResult result;
         try {

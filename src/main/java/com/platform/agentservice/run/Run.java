@@ -49,6 +49,13 @@ public class Run {
     private Instant endedAt;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
     @UpdateTimestamp @Column(nullable = false) private Instant updatedAt;
+    /**
+     * 낙관적 락(P2a T4 fix round 1, I1) — Dispatcher의 드레인 틱과 execute()의 상태 전이가
+     * 같은 run 행을 동시에 갱신하려 하면 여기서 {@code OptimisticLockException}으로 걸린다.
+     * {@code execute()}가 QUEUED 확인 직후 최대한 빨리 RUNNING을 커밋하는 것이 1차 방어고,
+     * 이 컬럼은 그 사이에도 남는 경합 창을 막는 2차 방어망이다.
+     */
+    @Version @Column(nullable = false) private long version;
 
     public static Run queued(RunType type, String issueKey, long projectId, long personaId, RunTrigger trigger,
                               String harnessRef, String model) {
