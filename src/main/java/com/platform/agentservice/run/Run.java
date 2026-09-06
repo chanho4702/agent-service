@@ -1,0 +1,132 @@
+package com.platform.agentservice.run;
+
+import com.platform.common.error.ConflictException;
+import jakarta.persistence.*;
+import lombok.AccessLevel;
+import lombok.Getter;
+import lombok.NoArgsConstructor;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UpdateTimestamp;
+
+import java.time.Instant;
+import java.util.EnumSet;
+import java.util.Set;
+
+/**
+ * 에이전트 실행 한 건 — 스펙 D9·§10.5. QUEUED에서 시작해 RUNNING을 거쳐 종단(DONE/FAILED/CANCELLED)
+ * 또는 일시정지(WAITING_APPROVAL/BLOCKED)로 간다. 일시정지 상태를 다시 진행시키는 것은 같은 행을
+ * 되돌리는 게 아니라 {@link #continuation(Run)}으로 attempt를 올린 새 Run을 만드는 것이다(감사 추적 보존).
+ */
+@Entity
+@Table(name = "run")
+@Getter
+@NoArgsConstructor(access = AccessLevel.PROTECTED)
+public class Run {
+
+    private static final Set<RunStatus> CANCELLABLE = EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL);
+    private static final Set<RunStatus> BLOCKABLE = EnumSet.of(RunStatus.RUNNING, RunStatus.FAILED);
+    private static final Set<RunStatus> CONTINUABLE = EnumSet.of(RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED);
+
+    @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20) private RunType type;
+    @Column(nullable = false, length = 40) private String issueKey;
+    @Column(nullable = false) private Long projectId;
+    @Column(nullable = false) private Long personaId;
+    @Enumerated(EnumType.STRING) @Column(name = "trigger", nullable = false, length = 20) private RunTrigger trigger;
+    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20) private RunStatus status;
+    @Column(length = 200) private String harnessRef;
+    @Column(length = 400) private String workspacePath;
+    @Column(length = 80) private String sessionId;
+    private Long patId;
+    @Column(nullable = false) private int attempt = 1;
+    @Column(columnDefinition = "text") private String error;
+    private Instant startedAt;
+    private Instant endedAt;
+    @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
+    @UpdateTimestamp @Column(nullable = false) private Instant updatedAt;
+
+    public static Run queued(RunType type, String issueKey, long projectId, long personaId, RunTrigger trigger, String harnessRef) {
+        Run r = new Run();
+        r.type = type;
+        r.issueKey = issueKey;
+        r.projectId = projectId;
+        r.personaId = personaId;
+        r.trigger = trigger;
+        r.harnessRef = harnessRef;
+        r.status = RunStatus.QUEUED;
+        r.attempt = 1;
+        return r;
+    }
+
+    /**
+     * 게이트 승인/차단 해제 후 "재개"는 같은 행을 되돌리지 않고 새 Run을 만든다(스펙 D9) —
+     * WAITING_APPROVAL·BLOCKED에서만 이어갈 수 있다.
+     */
+    public static Run continuation(Run prior) {
+        if (!CONTINUABLE.contains(prior.status)) {
+            throw new ConflictException("WAITING_APPROVAL 또는 BLOCKED 상태에서만 이어갈 수 있습니다: " + prior.status);
+        }
+        Run r = new Run();
+        r.type = prior.type;
+        r.issueKey = prior.issueKey;
+        r.projectId = prior.projectId;
+        r.personaId = prior.personaId;
+        r.trigger = prior.trigger;
+        r.harnessRef = prior.harnessRef;
+        r.status = RunStatus.QUEUED;
+        r.attempt = prior.attempt + 1;
+        return r;
+    }
+
+    public void start(String workspacePath, Long patId) {
+        requireStatus(RunStatus.QUEUED, "QUEUED 상태에서만 시작할 수 있습니다");
+        this.status = RunStatus.RUNNING;
+        this.workspacePath = workspacePath;
+        this.patId = patId;
+        this.startedAt = Instant.now();
+    }
+
+    public void parkForApproval() {
+        requireStatus(RunStatus.RUNNING, "RUNNING 상태에서만 승인 대기로 전환할 수 있습니다");
+        this.status = RunStatus.WAITING_APPROVAL;
+    }
+
+    public void complete() {
+        requireStatus(RunStatus.RUNNING, "RUNNING 상태에서만 완료할 수 있습니다");
+        this.status = RunStatus.DONE;
+        this.endedAt = Instant.now();
+    }
+
+    public void fail(String error) {
+        requireStatus(RunStatus.RUNNING, "RUNNING 상태에서만 실패 처리할 수 있습니다");
+        this.status = RunStatus.FAILED;
+        this.error = error;
+        this.endedAt = Instant.now();
+    }
+
+    public void block(String error) {
+        requireStatus(BLOCKABLE, "RUNNING 또는 FAILED 상태에서만 차단할 수 있습니다");
+        this.status = RunStatus.BLOCKED;
+        this.error = error;
+    }
+
+    public void cancel() {
+        requireStatus(CANCELLABLE, "QUEUED·RUNNING·WAITING_APPROVAL 상태에서만 취소할 수 있습니다");
+        this.status = RunStatus.CANCELLED;
+        this.endedAt = Instant.now();
+    }
+
+    public void recordSession(String sessionId) {
+        this.sessionId = sessionId;
+    }
+
+    private void requireStatus(RunStatus expected, String message) {
+        if (this.status != expected) throw new ConflictException(message);
+    }
+
+    private void requireStatus(Set<RunStatus> allowed, String message) {
+        if (!allowed.contains(this.status)) throw new ConflictException(message);
+    }
+}
