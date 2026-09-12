@@ -4,7 +4,10 @@ plugins {
     id 'io.spring.dependency-management' version '1.1.7'
 }
 group = 'com.platform'
-version = '0.0.1-SNAPSHOT'
+// 이미지 버전 스탬프 — CI가 -PappVersion=<짧은sha>-<YYYYMMDD>로 주입한다.
+// /actuator/info의 build.version이 이 값이 되고, 관리자 대시보드 "버전" 열이 그걸 읽는다.
+// 이름을 appVersion으로 둔 이유: -Pversion은 Gradle 내장 project.version과 겹쳐 이 줄이 덮어써 버린다.
+version = providers.gradleProperty('appVersion').getOrElse('0.0.1-SNAPSHOT')
 java { toolchain { languageVersion = JavaLanguageVersion.of(24) } }
 tasks.withType(JavaCompile).configureEach { options.compilerArgs << '-parameters' }
 
