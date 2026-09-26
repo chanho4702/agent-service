@@ -42,7 +42,7 @@ public class ProcessCommandExecutor implements CommandExecutor {
     private static final Duration DRAIN_JOIN_TIMEOUT = Duration.ofSeconds(5);
 
     /**
-     * Windows에서 git·claude CLI가 도는 최소 세트(대문자 정규화, 매칭은 대소문자 무관 — Windows env
+     * git·claude CLI가 도는 최소 세트(Windows 키 + POSIX 키)(대문자 정규화, 매칭은 대소문자 무관 — Windows env
      * 키는 대소문자를 가리지 않지만 {@link System#getenv()} 맵 키는 원형 그대로라 {@code Path}·
      * {@code SystemRoot}처럼 섞여 온다). USERPROFILE·HOMEDRIVE/HOMEPATH는 claude가 구독 자격증명
      * ({@code ~/.claude})과 git 전역 설정을 찾는 위치다. 2026-09-26 이 세트로 실측 통과: {@code git clone},
@@ -51,6 +51,12 @@ public class ProcessCommandExecutor implements CommandExecutor {
      * JAVA_HOME은 실측상 없어도 돌았지만 넣는다 — 비밀이 아니고, gradle은 PATH보다 JAVA_HOME을 먼저
      * 보므로 빼면 워커의 {@code Bash(gradlew *)}가 PATH의 다른 JDK로 조용히 바뀐다(이 호스트 PATH 첫
      * java가 C:\java11).
+     *
+     * <p>POSIX 키(HOME/LANG/LC_* 등)도 포함한다(최종 리뷰 M1) — Linux 워커 호스트에서 HOME이 없으면
+     * git이 {@code ~/.gitconfig}(user.name/email·safe.directory·credential helper)를 못 읽어 워커
+     * 커밋이 "Please tell me who you are"로 실패하고, LANG/LC_ALL이 없으면 C 로케일이 되어 git이
+     * 한글 경로를 이스케이프한다. 전부 경로·로케일 값일 뿐 자격증명이 아니라 커튼 목적(비밀 차단)과
+     * 충돌하지 않는다. Windows에서는 이 키들이 없어 no-op이다.
      */
     static final Set<String> BASE_ALLOWED_KEYS = Set.of(
             "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "WINDIR",
@@ -58,7 +64,8 @@ public class ProcessCommandExecutor implements CommandExecutor {
             "APPDATA", "LOCALAPPDATA", "PROGRAMDATA",
             "USERNAME", "USERDOMAIN", "COMPUTERNAME",
             "NUMBER_OF_PROCESSORS", "PROCESSOR_ARCHITECTURE",
-            "JAVA_HOME");
+            "JAVA_HOME",
+            "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "USER", "LOGNAME", "SHELL");
 
     private final Set<String> allowedKeys;
     private final Map<String, String> parentEnv;

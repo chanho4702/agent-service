@@ -176,11 +176,15 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
    **env 화이트리스트 커튼(AGP-48)**: `ProcessCommandExecutor`는 자식 프로세스(워커 `claude -p`·
    `git clone`·커밋 수확 git — 모든 자식이 이 한 지점을 지난다)에 부모 env를 상속하지 않는다.
    `environment().clear()` 후 다음만 넣는다.
-   - OS 구동 최소 세트(`BASE_ALLOWED_KEYS`, 대소문자 무관 매칭): `PATH` `PATHEXT` `SYSTEMROOT`
-     `SYSTEMDRIVE` `COMSPEC` `WINDIR` `TEMP` `TMP` `USERPROFILE` `HOMEDRIVE` `HOMEPATH` `APPDATA`
-     `LOCALAPPDATA` `PROGRAMDATA` `USERNAME` `USERDOMAIN` `COMPUTERNAME` `NUMBER_OF_PROCESSORS`
-     `PROCESSOR_ARCHITECTURE` `JAVA_HOME`. 2026-09-26 이 세트로 `git clone`·`claude --version`·
-     헤드리스 `claude -p`(구독 인증)·워커 `Bash(git *)` 도구·`gradlew`가 도는 것을 실측했다.
+   - 구동 최소 세트(`BASE_ALLOWED_KEYS`, 대소문자 무관 매칭) — Windows 키: `PATH` `PATHEXT`
+     `SYSTEMROOT` `SYSTEMDRIVE` `COMSPEC` `WINDIR` `TEMP` `TMP` `USERPROFILE` `HOMEDRIVE` `HOMEPATH`
+     `APPDATA` `LOCALAPPDATA` `PROGRAMDATA` `USERNAME` `USERDOMAIN` `COMPUTERNAME`
+     `NUMBER_OF_PROCESSORS` `PROCESSOR_ARCHITECTURE` `JAVA_HOME` + POSIX 키(Linux 워커 호스트용,
+     최종 리뷰 M1): `HOME` `LANG` `LC_ALL` `LC_CTYPE` `TMPDIR` `USER` `LOGNAME` `SHELL` — HOME이
+     없으면 git이 `~/.gitconfig`(user.name/email 등)를 못 읽어 워커 커밋이 실패하고, LANG이 없으면
+     C 로케일로 한글 경로가 이스케이프된다. 전부 경로·로케일 값이라 비밀 차단 목적과 충돌 없음.
+     2026-09-26 Windows 세트로 `git clone`·`claude --version`·헤드리스 `claude -p`(구독 인증)·
+     워커 `Bash(git *)` 도구·`gradlew`가 도는 것을 실측했다(Linux 세트는 P2b 컨테이너화 때 실측 예정).
    - 인증 2종은 커튼 목록에 없다 — `WorkerLauncher.workerEnv()`가 **워커 호출에만** extraEnv로
      싣는다(`git clone`에는 안 간다). 이것이 인증 키가 워커에 닿는 유일한 경로다.
    - 이스케이프 해치 `WORKER_EXTRA_ENV_KEYS`(`platform.agent.worker.extra-env-keys`, 쉼표 목록,
