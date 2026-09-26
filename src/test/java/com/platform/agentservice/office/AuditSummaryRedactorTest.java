@@ -3,6 +3,7 @@ package com.platform.agentservice.office;
 import org.junit.jupiter.api.Test;
 
 import static com.platform.agentservice.office.AuditSummaryRedactor.BODY_REDACTED;
+import static com.platform.agentservice.office.AuditSummaryRedactor.LINK_REDACTED;
 import static com.platform.agentservice.office.AuditSummaryRedactor.QUERY_REDACTED;
 import static com.platform.agentservice.office.AuditSummaryRedactor.TITLE_REDACTED;
 import static com.platform.agentservice.office.AuditSummaryRedactor.redact;
@@ -24,6 +25,12 @@ class AuditSummaryRedactorTest {
     @Test
     void 진행_메시지는_run_id만_남긴다() {
         assertThat(redact("report_progress", "run=7 테스트 작성 중")).isEqualTo("run=7 " + BODY_REDACTED);
+    }
+
+    @Test
+    void PR_링크는_이슈키만_남긴다() {
+        assertThat(redact("link_pr", "AGP-1: https://git.internal.example/secret-org/secret-repo/pull/7"))
+                .isEqualTo("AGP-1 " + LINK_REDACTED);
     }
 
     @Test

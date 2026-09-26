@@ -13,6 +13,7 @@ final class AuditSummaryRedactor {
     static final String BODY_REDACTED = "(본문 생략)";
     static final String TITLE_REDACTED = "(제목 생략)";
     static final String QUERY_REDACTED = "(검색어 생략)";
+    static final String LINK_REDACTED = "(링크 생략)";
 
     /** summary 첫 토큰이 식별자인 도구 — "run={id} 메시지", "projectId={id} title=…", "spaceId={id} query=…" 등. */
     private static final Map<String, String> FIRST_TOKEN_TOOLS = Map.of(
@@ -33,6 +34,10 @@ final class AuditSummaryRedactor {
         if ("add_comment".equals(tool) || tool.endsWith(".comment")) {
             // "{issueKey}: {코멘트 본문 | 오류 메시지}" — 오류 메시지도 다운스트림 응답 본문을 실을 수 있다.
             return prefixBefore(summary, ": ") + " " + BODY_REDACTED;
+        }
+        if ("link_pr".equals(tool)) {
+            // "{issueKey}: {PR URL}" — 온프렘 비공개 리포면 URL의 조직·리포명 자체가 노출 대상이다.
+            return prefixBefore(summary, ": ") + " " + LINK_REDACTED;
         }
         String label = FIRST_TOKEN_TOOLS.get(tool);
         if (label != null) {

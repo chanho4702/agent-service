@@ -439,7 +439,7 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
   제목·검색어도 권한 우회 표면이다 — 도구명+식별자만 남긴다. `add_comment`·`*.comment`(코멘트 실패 노트)는 이슈키 +
   `(본문 생략)`, `report_progress`는 `run=N` + `(본문 생략)`, `create_issue`/`create_page`/`update_page`는
   `projectId=`/`spaceId=`/`pageId=` + `(제목 생략)`, `search_issues`/`find_pages`는 `projectId=`/`spaceId=` +
-  `(검색어 생략)`. 원본 감사 행은 그대로 보존(노출 시점에만 거름). 토큰류는 원래 어떤 도구 summary에도 싣지 않는다.
+  `(검색어 생략)`, `link_pr`은 이슈키 + `(링크 생략)`(온프렘 비공개 리포명 노출 방지). 원본 감사 행은 그대로 보존(노출 시점에만 거름). 토큰류는 원래 어떤 도구 summary에도 싣지 않는다.
 - **게이트 요청문은 가리지 않는다(의도)**: `pendingGates[].requestSummary`는 기존 `GET /api/agent/gates`가 인증 사용자
   누구나에게 전문을 주는 것과 같은 노출 수준이라 가림을 거치지 않는다.
 - 인덱스(V5): `tool_call_audit(created_at)`(말풍선 5분 창), `run(persona_id, id DESC)`(개인 오피스),
