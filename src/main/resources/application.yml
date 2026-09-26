@@ -80,6 +80,13 @@ platform:
       # 주입할 땐 --args="--platform.agent.worker.repos.AGP=..."(프로그램 인자, 대소문자 보존)
       # 나 이 YAML처럼 직접 쓰는 쪽을 우선한다.
       repos: {}
+      # env 커튼(AGP-48) — 워커·git clone 자식은 부모 env를 상속하지 않고 OS 구동 최소 세트
+      # (ProcessCommandExecutor.BASE_ALLOWED_KEYS)만 받는다. 온프렘에서 프록시(HTTP_PROXY·HTTPS_PROXY·NO_PROXY)나
+      # 사내 CA(NODE_EXTRA_CA_CERTS·GIT_SSL_CAINFO), Git Bash 위치 고정(CLAUDE_CODE_GIT_BASH_PATH) 같은 키가 더 필요하면
+      # 여기 이름만 추가한다(값은 부모 env에서, 대소문자 무관).
+      # 자격증명 키를 넣으면 워커(외부 입력으로 프롬프트가 구성되는 LLM)에 그대로 노출된다는 점을 알고 넣을 것.
+      # env: WORKER_EXTRA_ENV_KEYS=HTTP_PROXY,HTTPS_PROXY,NO_PROXY
+      extra-env-keys: ${WORKER_EXTRA_ENV_KEYS:}
     scheduler:
       # 디스패처(P2a T4) — 무인 자동화 루프. 기본 OFF(킬스위치), 반드시 명시적으로 켠다.
       enabled: ${SCHEDULER_ENABLED:false}

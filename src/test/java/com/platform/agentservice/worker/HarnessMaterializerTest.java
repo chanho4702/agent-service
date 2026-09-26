@@ -46,7 +46,7 @@ class HarnessMaterializerTest {
     private HarnessMaterializer materializerWith(Path bundle, List<String> rootFiles) {
         WorkerProperties props = new WorkerProperties(
                 workspace.toString(), bundle.toString(), rootFiles,
-                "claude", 80, 40, "Read,Edit", "http://localhost/api/agent/mcp", Map.of());
+                "claude", 80, 40, "Read,Edit", "http://localhost/api/agent/mcp", Map.of(), List.of());
         return new HarnessMaterializer(props);
     }
 

@@ -66,7 +66,7 @@ class WorkerLauncherTest {
                 40,
                 "Read,Edit,Write,Bash(git *)",
                 "http://localhost/api/agent/mcp",
-                Map.of());
+                Map.of(), List.of());
         HarnessMaterializer materializer = new HarnessMaterializer(properties);
         RunTokenService runTokenService = new RunTokenService(patService, personaRepository);
         launcher = new WorkerLauncher(properties, materializer, commandExecutor, runTokenService,
@@ -100,8 +100,11 @@ class WorkerLauncherTest {
         assertThat(commandExecutor.calls).hasSize(2);
         FakeCommandExecutor.Call cloneCall = commandExecutor.calls.get(0);
         assertThat(cloneCall.command()).containsExactly("git", "clone", "https://example.com/repo.git", ".");
+        // AGP-48: 커튼 뒤에서 인증 키가 닿는 경로는 워커 호출의 extraEnv뿐 — clone에는 싣지 않는다.
+        assertThat(cloneCall.extraEnv()).isEmpty();
 
         FakeCommandExecutor.Call claudeCall = commandExecutor.calls.get(1);
+        assertThat(WorkerLauncher.WORKER_AUTH_ENV_KEYS).containsAll(claudeCall.extraEnv().keySet());
         List<String> cmd = claudeCall.command();
         assertThat(cmd.get(0)).isEqualTo("claude");
         assertThat(cmd.get(1)).isEqualTo("-p");

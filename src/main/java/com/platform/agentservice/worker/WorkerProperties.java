@@ -30,8 +30,14 @@ public record WorkerProperties(
         int timeoutMinutes,
         String allowedTools,
         String mcpUrl,
-        Map<String, String> repos
+        Map<String, String> repos,
+        List<String> extraEnvKeys
 ) {
+
+    public WorkerProperties {
+        // 미설정이면 바인딩이 null을 넘긴다 — 커튼은 "추가 없음"으로 해석해야 한다.
+        extraEnvKeys = extraEnvKeys == null ? List.of() : List.copyOf(extraEnvKeys);
+    }
 
     /** {@link #repos()}를 프로젝트 키로 대소문자 무관하게 조회한다(F3) — 없으면 {@code null}. */
     public String repoFor(String projectKey) {

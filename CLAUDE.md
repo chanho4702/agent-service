@@ -163,14 +163,29 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
    안전한 쪽은 프로그램 인자다.
 3. `AGENT_INTERNAL_SECRET` — auth-server와 반드시 같은 값(비면 페르소나/run 토큰 발급이
    fail-closed로 전부 막힌다).
-4. 워커 인증: 같은 사용자 구독을 재사용하거나(검증됨) `CLAUDE_CODE_OAUTH_TOKEN` /
-   `ANTHROPIC_API_KEY`를 이 서비스의 프로세스 env로 둔다 — `WorkerLauncher.workerEnv()`는
-   이 둘을 부모 프로세스 env에서 명시적으로 골라 워커 프로세스에 전달하도록 **의도**하지만
-   (§10.5 env passthrough), 실제 프로세스 격리는 이뤄지지 않는다: `ProcessCommandExecutor`가
-   `ProcessBuilder.environment().putAll(extraEnv)`로 이 둘을 "덧씌우기"만 하고, 부모
-   프로세스(이 서비스, 신뢰된 호스트에서 돈다는 전제)의 env 전체를 그대로 상속한다 —
-   **다른 자격증명이 흘러가지 않는다는 뜻이 아니다**(최종 리뷰 I5, 이전 판 문서 정정).
-   env 커튼(진짜 격리)은 계획된 후속 작업이다(티켓 필요).
+4. 워커 인증: 같은 사용자 구독을 재사용하거나(검증됨 — `%USERPROFILE%\.claude` 자격증명 파일)
+   `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`를 이 서비스의 프로세스 env로 둔다.
+   **env 화이트리스트 커튼(AGP-48)**: `ProcessCommandExecutor`는 자식 프로세스(워커 `claude -p`·
+   `git clone`·커밋 수확 git — 모든 자식이 이 한 지점을 지난다)에 부모 env를 상속하지 않는다.
+   `environment().clear()` 후 다음만 넣는다.
+   - OS 구동 최소 세트(`BASE_ALLOWED_KEYS`, 대소문자 무관 매칭): `PATH` `PATHEXT` `SYSTEMROOT`
+     `SYSTEMDRIVE` `COMSPEC` `WINDIR` `TEMP` `TMP` `USERPROFILE` `HOMEDRIVE` `HOMEPATH` `APPDATA`
+     `LOCALAPPDATA` `PROGRAMDATA` `USERNAME` `USERDOMAIN` `COMPUTERNAME` `NUMBER_OF_PROCESSORS`
+     `PROCESSOR_ARCHITECTURE` `JAVA_HOME`. 2026-09-26 이 세트로 `git clone`·`claude --version`·
+     헤드리스 `claude -p`(구독 인증)·워커 `Bash(git *)` 도구·`gradlew`가 도는 것을 실측했다.
+   - 인증 2종은 커튼 목록에 없다 — `WorkerLauncher.workerEnv()`가 **워커 호출에만** extraEnv로
+     싣는다(`git clone`에는 안 간다). 이것이 인증 키가 워커에 닿는 유일한 경로다.
+   - 이스케이프 해치 `WORKER_EXTRA_ENV_KEYS`(`platform.agent.worker.extra-env-keys`, 쉼표 목록,
+     기본 빈): 온프렘 변형용 — 프록시(`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`), 사내 CA
+     (`NODE_EXTRA_CA_CERTS`/`GIT_SSL_CAINFO`), Git Bash 위치(`CLAUDE_CODE_GIT_BASH_PATH`) 등.
+     이름만 적고 값은 부모 env에서 가져온다. 자격증명 키를 넣으면 워커에 노출된다.
+   - 호출부가 명시한 extraEnv는 커튼 뒤에 덧씌운다(명시값이 이긴다).
+   - git 자격증명이 env로 오는 구성(예: `GH_TOKEN`으로 사내 리포 clone)은 커튼 뒤에서 clone이
+     깨진다. 현 구성은 공개 리포 + 로컬 git credential manager(자격증명이 env가 아님)라 무해하다 —
+     바꿔야 하면 해치로 명시적으로 연다.
+   - **한계**: 이것은 env 누출 방어일 뿐 **프로세스 격리가 아니다** — 워커는 같은 사용자 계정으로
+     돌아 파일시스템(`%USERPROFILE%` 아래 다른 자격증명 파일 포함)과 네트워크를 그대로 공유한다.
+     컨테이너 격리는 P2b 몫이다.
 
 자동화 정책: 라벨 `auto` + 상태 `todo`인 ALM 이슈만 픽업 대상이고, 한 틱에 하나만 새로
 픽업한다(단순화, 브리핑 지시). 검색 첫 페이지가 활성 run 보유·예산 거부·프로젝트 한도 초과 이슈로 가득 차도

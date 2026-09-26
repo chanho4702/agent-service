@@ -163,14 +163,17 @@ public class WorkerLauncher {
     }
 
     /**
-     * 부모 프로세스 환경을 명시적으로 골라 넘긴다(실제로는 {@link ProcessCommandExecutor}가
-     * 부모 환경 전체를 상속하지만, 어떤 자격증명이 워커로 흘러가야 하는지를 코드로 명문화해
-     * 둔다 — 스펙 §10.5 env passthrough).
+     * 워커 인증 키 passthrough(스펙 §10.5) — {@link ProcessCommandExecutor}의 env 커튼(AGP-48)은
+     * 부모 env를 상속하지 않으므로 이 extraEnv가 인증 키가 워커에 닿는 유일한 경로다. 커튼의 기본
+     * 허용 목록에 넣지 않고 여기 두는 건 git clone·커밋 수확 git 같은 다른 자식에는 이 키가 필요 없어서다.
      */
+    static final List<String> WORKER_AUTH_ENV_KEYS = List.of("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY");
+
     private Map<String, String> workerEnv() {
         Map<String, String> env = new HashMap<>();
-        putIfPresent(env, "CLAUDE_CODE_OAUTH_TOKEN");
-        putIfPresent(env, "ANTHROPIC_API_KEY");
+        for (String key : WORKER_AUTH_ENV_KEYS) {
+            putIfPresent(env, key);
+        }
         return env;
     }
 

@@ -84,7 +84,7 @@ class RunServiceTest {
         schedulerProperties = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3);
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of());
         budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
@@ -157,7 +157,7 @@ class RunServiceTest {
     private RunService serviceWith(SchedulerProperties props) {
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of());
         return new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, props, budgetProperties,
                 commitLinkParser, budgetGuard, reviewService, selfProvider);
@@ -932,7 +932,7 @@ class RunServiceTest {
     void execute_resolves_repo_mapping_even_when_map_key_is_lowercased_by_env_binding() {
         WorkerProperties lowercasedRepos = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("agp", "https://example.com/agp.git"));
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("agp", "https://example.com/agp.git"), List.of());
         RunService serviceWithLowercasedRepos = new RunService(runRepository, almClient, issueClaimSupport,
                 tokenService, personaRepository, workerLauncher, lowercasedRepos, usageLedgerRepository,
                 schedulerProperties, new com.platform.agentservice.budget.BudgetProperties(
