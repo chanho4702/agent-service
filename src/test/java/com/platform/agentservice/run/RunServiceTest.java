@@ -18,6 +18,7 @@ import com.platform.agentservice.worker.WorkerLauncher;
 import com.platform.agentservice.worker.WorkerProperties;
 import com.platform.agentservice.worker.WorkerResult;
 import com.platform.common.error.ConflictException;
+import com.platform.common.error.NotFoundException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -118,6 +119,212 @@ class RunServiceTest {
                 .isInstanceOf(ConflictException.class);
 
         verify(runRepository, never()).save(any());
+    }
+
+    // ---- createUserRun (P2c T2, AGP-42) ----
+
+    private static final long OTHER_PERSONA_ID = 6L;
+    private static final long OTHER_PERSONA_MEMBER_ID = 43L;
+    private static final String OTHER_BEARER = "Bearer other-token";
+
+    private Persona persona(long id, long memberId, String slug) {
+        Persona p = Persona.of(memberId, slug, PersonaRole.BACKEND, slug, null, null);
+        ReflectionTestUtils.setField(p, "id", id);
+        return p;
+    }
+
+    private RunService serviceWith(SchedulerProperties props) {
+        WorkerProperties workerProperties = new WorkerProperties(
+                "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
+        return new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
+                workerLauncher, workerProperties, usageLedgerRepository, props, budgetProperties,
+                commitLinkParser, budgetGuard);
+    }
+
+    @Test
+    void createUserRun_uses_default_persona_when_slug_omitted_and_saves_user_run_with_instruction() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        stubSaveReturnsArgument();
+
+        Run run = runService.createUserRun(ISSUE_KEY, "로그인 버그부터", null, null);
+
+        assertThat(run.getTrigger()).isEqualTo(RunTrigger.USER);
+        assertThat(run.getType()).isEqualTo(RunType.TASK);
+        assertThat(run.getStatus()).isEqualTo(RunStatus.QUEUED);
+        assertThat(run.getIssueKey()).isEqualTo(ISSUE_KEY);
+        assertThat(run.getProjectId()).isEqualTo(PROJECT_ID);
+        assertThat(run.getPersonaId()).isEqualTo(PERSONA_ID);
+        assertThat(run.getInstruction()).isEqualTo("로그인 버그부터");
+        assertThat(run.getModel()).isNull();
+        // 실행 제출은 호출자(컨트롤러) 몫 — 같은 빈 안에서 @Async execute를 부르면 동기 실행된다.
+        verify(workerLauncher, never()).launch(any(), any());
+    }
+
+    @Test
+    void createUserRun_uses_explicit_persona_slug_and_its_bearer() {
+        when(personaRepository.findBySlug("mina"))
+                .thenReturn(Optional.of(persona(OTHER_PERSONA_ID, OTHER_PERSONA_MEMBER_ID, "mina")));
+        when(tokenService.bearerFor(OTHER_PERSONA_MEMBER_ID)).thenReturn(OTHER_BEARER);
+        when(almClient.getByKey(ISSUE_KEY, OTHER_BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        stubSaveReturnsArgument();
+
+        Run run = runService.createUserRun(ISSUE_KEY, null, null, "mina");
+
+        assertThat(run.getPersonaId()).isEqualTo(OTHER_PERSONA_ID);
+        verify(personaRepository, never()).findBySlug("jiho");
+    }
+
+    @Test
+    void createUserRun_unknown_persona_slug_is_404_without_touching_alm() {
+        when(personaRepository.findBySlug("ghost")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, "ghost"))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("ghost");
+
+        verify(almClient, never()).getByKey(anyString(), anyString());
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
+    void createUserRun_missing_default_persona_is_404_not_silently_skipped() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.empty());
+
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, null))
+                .isInstanceOf(NotFoundException.class)
+                .hasMessageContaining("jiho");
+
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
+    void createUserRun_unset_default_persona_slug_is_404() {
+        RunService service = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, null, 3));
+
+        assertThatThrownBy(() -> service.createUserRun(ISSUE_KEY, null, null, "  "))
+                .isInstanceOf(NotFoundException.class);
+
+        verify(personaRepository, never()).findBySlug(any());
+    }
+
+    @Test
+    void createUserRun_rejects_with_409_when_issue_already_has_active_run() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        when(runRepository.existsByIssueKeyAndStatusIn(ISSUE_KEY, RunService.ACTIVE_STATUSES)).thenReturn(true);
+
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, "지시", null, null))
+                .isInstanceOf(ConflictException.class);
+
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
+    void createUserRun_propagates_alm_lookup_failure_and_saves_nothing() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey("AGP-404", BEARER)).thenThrow(new ConflictException("이슈를 찾을 수 없습니다"));
+
+        assertThatThrownBy(() -> runService.createUserRun("AGP-404", null, null, null))
+                .isInstanceOf(ConflictException.class)
+                .hasMessageContaining("이슈를 찾을 수 없습니다");
+
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
+    void createUserRun_uses_canonical_issue_key_from_alm() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey("AGP-9", BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        stubSaveReturnsArgument();
+
+        Run run = runService.createUserRun("  AGP-9 ", null, null, null);
+
+        assertThat(run.getIssueKey()).isEqualTo(ISSUE_KEY);
+        verify(runRepository).existsByIssueKeyAndStatusIn(ISSUE_KEY, RunService.ACTIVE_STATUSES);
+    }
+
+    @Test
+    void createUserRun_request_model_wins_over_project_and_global_policy() {
+        RunService service = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-global", Map.of("AGP", "claude-project")));
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        stubSaveReturnsArgument();
+
+        Run run = service.createUserRun(ISSUE_KEY, null, "claude-user", null);
+
+        assertThat(run.getModel()).isEqualTo("claude-user");
+    }
+
+    @Test
+    void createUserRun_falls_back_to_project_model_then_global_model() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        stubSaveReturnsArgument();
+
+        RunService projectMapped = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-global", Map.of("agp", "claude-project")));
+        assertThat(projectMapped.createUserRun(ISSUE_KEY, null, "  ", null).getModel()).isEqualTo("claude-project");
+
+        RunService globalOnly = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-global", Map.of("OTHER", "claude-other")));
+        assertThat(globalOnly.createUserRun(ISSUE_KEY, null, null, null).getModel()).isEqualTo("claude-global");
+    }
+
+    @Test
+    void createUserRun_blank_instruction_is_stored_as_null() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        stubSaveReturnsArgument();
+
+        assertThat(runService.createUserRun(ISSUE_KEY, "   ", null, null).getInstruction()).isNull();
+    }
+
+    @Test
+    void execute_passes_user_run_instruction_to_worker_job() {
+        Run run = Run.queuedUser(ISSUE_KEY, PROJECT_ID, PERSONA_ID, "harness://default", null, "테스트부터 써");
+        ReflectionTestUtils.setField(run, "id", 50L);
+        when(runRepository.findById(50L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(
+                new WorkerResult(0, false, "ok", null, null, 0L, 0L, null, "raw", null));
+
+        runService.execute(50L);
+
+        ArgumentCaptor<WorkerJob> jobCaptor = ArgumentCaptor.forClass(WorkerJob.class);
+        verify(workerLauncher).launch(any(Run.class), jobCaptor.capture());
+        assertThat(jobCaptor.getValue().instruction()).isEqualTo("테스트부터 써");
+    }
+
+    @Test
+    void execute_scheduler_run_has_no_instruction_in_worker_job() {
+        Run run = queuedRun(51L);
+        when(runRepository.findById(51L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(
+                new WorkerResult(0, false, "ok", null, null, 0L, 0L, null, "raw", null));
+
+        runService.execute(51L);
+
+        ArgumentCaptor<WorkerJob> jobCaptor = ArgumentCaptor.forClass(WorkerJob.class);
+        verify(workerLauncher).launch(any(Run.class), jobCaptor.capture());
+        assertThat(jobCaptor.getValue().instruction()).isNull();
     }
 
     // ---- F2b (fix round, task-7): BLOCKED must count as an active/"in progress" status ----

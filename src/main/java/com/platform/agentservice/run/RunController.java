@@ -1,12 +1,17 @@
 package com.platform.agentservice.run;
 
 import com.platform.agentservice.run.dto.RunSummaryResponse;
+import com.platform.agentservice.run.dto.UserRunCreateRequest;
+import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.ResponseStatus;
@@ -25,6 +30,7 @@ import java.util.List;
  * 확인할 방법만 있고 다시 굴릴 방법이 없는 막다른 골목이었다. {@link RunResumeService#resume}
  * 이 오케스트레이션을 담당한다.
  */
+@Slf4j
 @RestController
 @RequestMapping("/api/agent/runs")
 @RequiredArgsConstructor
@@ -32,6 +38,26 @@ public class RunController {
 
     private final RunService runService;
     private final RunResumeService runResumeService;
+
+    /**
+     * USER run 생성(AGP-42) — 예산을 소모하는 행위라 cancel/resume과 같이 관리자만(D-P2c-6).
+     * 실행 제출을 여기서 하는 이유는 {@link RunService#createUserRun} 참고({@code @Async} 자기 호출 회피).
+     * 스레드풀 포화로 제출이 거부돼도 run은 이미 QUEUED로 커밋됐으므로 201을 돌려준다 — 다음 드레인 틱이 집어간다.
+     */
+    @PostMapping
+    @PreAuthorize("hasRole('ADMIN')")
+    @ResponseStatus(HttpStatus.CREATED)
+    public RunSummaryResponse create(@Valid @RequestBody UserRunCreateRequest request) {
+        Run run = runService.createUserRun(request.issueKey(), request.instruction(), request.model(),
+                request.personaSlug());
+        try {
+            runService.execute(run.getId());
+        } catch (TaskRejectedException e) {
+            log.warn("USER run 실행 제출이 거부돼 QUEUED로 남깁니다 — 다음 드레인 틱이 재시도합니다: id={} error={}",
+                    run.getId(), e.getMessage());
+        }
+        return RunSummaryResponse.of(run);
+    }
 
     @PostMapping("/{id}/cancel")
     @PreAuthorize("hasRole('ADMIN')")

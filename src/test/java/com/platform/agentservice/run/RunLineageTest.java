@@ -52,6 +52,20 @@ class RunLineageTest {
         assertThat(r.getParentRunId()).isNull();
     }
 
+    @Test
+    void retry_continuation_of_a_user_run_keeps_the_instruction() {
+        Run r = Run.queuedUser("AGP-4", 1L, 2L, "harness://default", null, "로그인 버그부터 고쳐");
+        ReflectionTestUtils.setField(r, "id", 10L);
+        r.start("pending", 9L);
+        r.fail("boom");
+
+        Run next = Run.continuation(r);
+
+        assertThat(next.getTrigger()).isEqualTo(RunTrigger.USER);
+        assertThat(next.getInstruction()).isEqualTo("로그인 버그부터 고쳐");
+        assertThat(next.getAttempt()).isEqualTo(2);
+    }
+
     // ---- queuedReview ----
 
     @Test

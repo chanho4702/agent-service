@@ -10,6 +10,14 @@ import java.util.List;
  *
  * <p>{@code recentComments}는 사람이 이슈에 남긴 최근 코멘트 원문 목록이다 — 사람 코멘트는
  * 곧 지시이므로(스펙 §10.4-1) 워커 프롬프트에 반드시 포함된다.
+ *
+ * <p>{@code instruction}은 USER run의 사람 직접 지시문이다(AGP-42, D-P2c-6). 자동화 run에는 없다({@code null}).
  */
-public record WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments) {
+public record WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments,
+                        String instruction) {
+
+    /** 지시문이 없는 자동화 run용. */
+    public WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments) {
+        this(repoUrl, issueTitle, issueBody, recentComments, null);
+    }
 }

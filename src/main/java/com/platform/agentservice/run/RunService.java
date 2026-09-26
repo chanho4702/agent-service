@@ -117,12 +117,52 @@ public class RunService {
 
     /** 같은 이슈에 이미 활성(QUEUED/RUNNING/WAITING_APPROVAL) run이 있으면 409로 거부한다. */
     public Run createQueuedForIssue(IssueRef issue, RunTrigger trigger, String model) {
-        if (runRepository.existsByIssueKeyAndStatusIn(issue.issueKey(), ACTIVE_STATUSES)) {
-            throw new ConflictException("이미 진행 중인 run이 있습니다: " + issue.issueKey());
-        }
+        requireNoActiveRun(issue.issueKey());
         Run run = Run.queued(RunType.TASK, issue.issueKey(), issue.projectId(), issue.personaId(),
                 trigger, DEFAULT_HARNESS_REF, model);
         return runRepository.save(run);
+    }
+
+    /**
+     * {@code POST /api/agent/runs}(AGP-42, D-P2c-6) — 사람이 직접 요청한 USER run을 QUEUED로 만든다.
+     *
+     * <p>페르소나는 {@link Dispatcher}와 같은 규칙(지정 슬러그 또는 기본 슬러그)으로 해석하되, 못 찾으면
+     * 스케줄러처럼 조용히 건너뛰지 않고 404로 알린다 — 사람이 직접 부른 API라 원인을 돌려줘야 한다.
+     * 이슈는 페르소나 bearer로 ALM에서 확인한다: 페르소나가 볼 수 없는 이슈는 워커도 claim하지 못하므로
+     * 큐에 넣기 전에 거부하는 게 맞다. run의 issueKey는 ALM이 돌려준 정본 키를 쓴다.
+     *
+     * <p>실행 제출은 호출자 몫이다 — {@link #execute}는 {@code @Async}인데 같은 빈 안에서 부르면 프록시를
+     * 거치지 않아 요청 스레드에서 워커가 끝날 때까지 블로킹된다({@link Dispatcher}와 같은 생성→실행 순서).
+     */
+    public Run createUserRun(String issueKey, String instruction, String model, String personaSlug) {
+        Persona persona = resolveUserRunPersona(personaSlug);
+        String bearer = tokenService.bearerFor(persona.getMemberId());
+        IssueResponse issue = almClient.getByKey(issueKey.trim(), bearer);
+
+        requireNoActiveRun(issue.key());
+        String resolvedModel = isBlank(model) ? schedulerProperties.modelFor(projectKeyOf(issue.key())) : model.trim();
+        Run run = Run.queuedUser(issue.key(), issue.projectId(), persona.getId(), DEFAULT_HARNESS_REF,
+                resolvedModel, isBlank(instruction) ? null : instruction);
+        return runRepository.save(run);
+    }
+
+    private Persona resolveUserRunPersona(String personaSlug) {
+        String slug = isBlank(personaSlug) ? schedulerProperties.defaultPersonaSlug() : personaSlug.trim();
+        if (isBlank(slug)) {
+            throw new NotFoundException("기본 페르소나가 설정되지 않았습니다 — personaSlug를 지정하세요");
+        }
+        return personaRepository.findBySlug(slug)
+                .orElseThrow(() -> new NotFoundException("페르소나를 찾을 수 없습니다: " + slug));
+    }
+
+    private void requireNoActiveRun(String issueKey) {
+        if (runRepository.existsByIssueKeyAndStatusIn(issueKey, ACTIVE_STATUSES)) {
+            throw new ConflictException("이미 진행 중인 run이 있습니다: " + issueKey);
+        }
+    }
+
+    private static boolean isBlank(String value) {
+        return value == null || value.isBlank();
     }
 
     /**
@@ -220,7 +260,7 @@ public class RunService {
                 .map(CommentResponse::body)
                 .toList();
 
-        return new WorkerJob(repoUrl, claimed.title(), claimed.description(), recentComments);
+        return new WorkerJob(repoUrl, claimed.title(), claimed.description(), recentComments, run.getInstruction());
     }
 
     /** F3(fix round, task-7): 대소문자 무관 조회 — env var 주입 시 Spring relaxed binding이 맵 키를 소문자로 접기 때문. */

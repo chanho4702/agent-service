@@ -57,7 +57,7 @@ public class Run {
     @Column(length = 60) private String model;
     @Column(nullable = false) private int attempt = 1;
     @Column(columnDefinition = "text") private String error;
-    /** USER 트리거 run의 사람 지시문 — 반려-fix continuation까지 승계된다(지시 맥락을 잃지 않게). */
+    /** USER 트리거 run의 사람 지시문 — 재시도 continuation·반려-fix continuation까지 승계된다(지시 맥락을 잃지 않게). */
     @Column(columnDefinition = "text") private String instruction;
     /** REVIEW run → 검증 대상 TASK run, 반려-fix continuation → 반려한 REVIEW run. 재시도 continuation에는 비워 둔다. */
     private Long parentRunId;
@@ -105,6 +105,8 @@ public class Run {
         r.trigger = prior.trigger;
         r.harnessRef = prior.harnessRef;
         r.model = prior.model;
+        // 재시도·게이트 승인·사람 재개도 같은 USER 요청의 연장이라 지시문을 잃으면 안 된다.
+        r.instruction = prior.instruction;
         r.status = RunStatus.QUEUED;
         r.attempt = prior.attempt + 1;
         return r;

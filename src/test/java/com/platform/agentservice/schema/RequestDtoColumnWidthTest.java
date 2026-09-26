@@ -4,6 +4,8 @@ import com.platform.agentservice.pat.PatToken;
 import com.platform.agentservice.pat.dto.PatCreateRequest;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
+import com.platform.agentservice.run.Run;
+import com.platform.agentservice.run.dto.UserRunCreateRequest;
 import jakarta.persistence.Column;
 import jakarta.validation.constraints.Pattern;
 import jakarta.validation.constraints.Size;
@@ -19,7 +21,8 @@ import static org.assertj.core.api.Assertions.assertThat;
 /**
  * M4(AGP-24) — 요청 DTO의 {@code @Size(max)}와 엔티티 {@code @Column(length)}가 어긋나지 않게 묶어 둔다.
  *
- * <p>진실 소스는 Flyway V1의 컬럼폭(persona.slug 40 · name 80 · emoji 16 · pat_token.label 120)이다.
+ * <p>진실 소스는 Flyway의 컬럼폭(persona.slug 40 · name 80 · emoji 16 · pat_token.label 120 · run.issue_key 40 ·
+ * run.model 60)이다.
  * 엔티티 {@code length}는 그 폭을 코드에 옮겨 적은 것이고, DTO {@code @Size}는 그 폭을 요청 경계에서
  * 미리 끊어 500(DataIntegrityViolation) 대신 400으로 돌려주기 위한 것이다 — 셋 중 하나만 바꾸면 이 테스트가 깨진다.
  * (Flyway 스키마 자체와 엔티티의 정합은 {@link FlywaySchemaValidationTest}가 본다.)
@@ -33,7 +36,9 @@ class RequestDtoColumnWidthTest {
         return Stream.of(
                 Arguments.of(PersonaCreateRequest.class, "name", Persona.class, "name", 80),
                 Arguments.of(PersonaCreateRequest.class, "emoji", Persona.class, "emoji", 16),
-                Arguments.of(PatCreateRequest.class, "label", PatToken.class, "label", 120));
+                Arguments.of(PatCreateRequest.class, "label", PatToken.class, "label", 120),
+                Arguments.of(UserRunCreateRequest.class, "issueKey", Run.class, "issueKey", 40),
+                Arguments.of(UserRunCreateRequest.class, "model", Run.class, "model", 60));
     }
 
     @ParameterizedTest(name = "{0}.{1} @Size(max) == {2}.{3} @Column(length) == {4}")
