@@ -118,6 +118,10 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
    남기고, `add_comment`로 이슈에 보고서를 링크한다 — **보고서 없는 완료는 금지**.
 4. PR은 `link_pr`로 이슈에 연결한다.
 5. 완료 시 순서: 작업 보고서 링크 코멘트 → `update_issue_status(done 계열)`.
+   단, agent-service가 띄운 워커 run(스케줄러·USER run)에서 리뷰 상시화가 켜져 있으면
+   (`REVIEW_ENABLED` 기본 true) 작업 워커는 done 전환을 하지 않는다 — `report_result(DONE)`까지만
+   하고, done 전환은 검증 run을 통과시킨 리뷰어 페르소나의 몫이다(§5.8). 사람이 PAT로 직접 도구를
+   호출하는 경우는 이 규약 그대로다.
 6. 모든 기록은 호출에 쓰인 PAT의 페르소나 명의로 남는다(작성자=페르소나 memberId) —
    `tool_call_audit` 테이블에 도구·상태·persona_id가 매 호출마다 적재된다.
 
@@ -176,6 +180,16 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
 완전히 제외한다(`RunService.ACTIVE_STATUSES`에 BLOCKED 포함 — 없으면 같은 이슈를 attempt=1부터
 무한 재픽업하는 회귀가 난다, task-7 E2E 실측).
 
+**모델 정책(P2c)** — run의 `--model`은 다음 순서로 정해진다(`SchedulerProperties.modelFor`):
+USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.project-models.<KEY>`(대소문자
+무관 조회) > 전역 기본 `SCHEDULER_DEFAULT_MODEL`(`scheduler.default-model`) > 비움(`--model`
+생략, 워커 기본 모델). 스케줄러 픽업 run은 요청 단계가 없으므로 맵부터 본다. 프로젝트별 맵은
+위 `repos`와 같은 relaxed binding 함정(env var로 넣으면 키가 소문자로 접힘)이 있어 조회가 대소문자
+무관이긴 하지만, 주입은 프로그램 인자(`--platform.agent.scheduler.project-models.AGP=...`)를
+권장한다. REVIEW run은 `REVIEW_MODEL`(`review.model`) > 프로젝트 맵 > 전역 기본 순이며 부모 TASK
+(USER가 지정한 모델 포함)의 모델을 이어받지 않는다. 반려-fix run은 원 TASK run의 모델을 그대로
+승계한다. 재시도·게이트 승인·재개 continuation도 직전 run의 모델을 승계한다.
+
 ### 5.2 예산·킬 스위치
 
 `BUDGET_MONTHLY_USD`(기본 100, 캘린더 월 UTC 누적 — 플랫폼 전체·프로젝트별에 P2a는 같은 값)
@@ -217,28 +231,67 @@ CANCELLED로 닫고 재개하지 않는다.
 `POST /api/agent/runs/{id}/cancel`(ADMIN — DB 상태만 CANCELLED로 옮긴다. 실행 중인 워커 OS
 프로세스를 강제로 죽이지는 않는다, Windows 프로세스 트리 관리는 P2a 범위 밖).
 
+**USER run 생성(P2c, AGP-42)** — `POST /api/agent/runs`(ADMIN — 예산을 소모하는 행위라
+cancel/resume과 같은 권한). 라벨 `auto`·상태 `todo` 조건과 무관하게 사람이 이슈 하나를 지정해
+run을 띄운다.
+
+```json
+{"issueKey": "AGP-42", "instruction": "선택, 4000자 이하", "model": "선택, 60자 이하", "personaSlug": "선택"}
+```
+
+- 응답: 201 + `RunSummaryResponse`(id·issueKey·status=QUEUED·personaId·attempt·model·시각 —
+  목록 API와 같은 최소 필드, type/trigger는 응답에 없다). 저장되는 run은 TASK·trigger=USER다.
+- 페르소나: 지정 슬러그 > `SCHEDULER_PERSONA`(기본 슬러그). 못 찾으면 404 — 스케줄러처럼 조용히
+  건너뛰지 않는다.
+- 이슈는 그 페르소나 bearer로 ALM에서 확인하고 run에는 ALM이 돌려준 정본 키를 쓴다. 없는 이슈는
+  현재 409(기존 `DownstreamErrors` 매핑 그대로 — 404로 세분화는 AGP-25).
+- 같은 이슈에 활성 run(QUEUED/RUNNING/WAITING_APPROVAL/BLOCKED)이 있으면 409.
+- `instruction`은 앞뒤 공백을 자른 뒤 저장되고, 워커 프롬프트에 `<사용자-지시>` 경계 섹션으로
+  실린다(§5.6). 재시도·게이트 승인·재개·반려-fix continuation까지 승계된다.
+- 실행 제출은 컨트롤러가 `RunService.execute`(`@Async`) 프록시로 한다. 워커 스레드풀이 포화돼
+  제출이 거부돼도 run은 이미 QUEUED로 커밋됐으므로 201을 돌려준다 — 다음 드레인 틱이 집어간다
+  (스케줄러가 꺼져 있으면 드레인도 없으므로 QUEUED에 머문다).
+- 킬 스위치·예산 캡은 §5.2대로 `execute` 진입점에서 걸린다.
+
 ### 5.6 워커 계약 요약
 
 - 헤드리스 `claude -p`를 **비-bare로** 실행한다: `--permission-mode dontAsk
   --permission-prompts none --allowedTools <허용목록> --strict-mcp-config --mcp-config <파일>
   --output-format json --max-turns N [--model M]`.
-- run마다 새 워크스페이스(`AGENT_WORK_DIR/run-{id}`)를 만들어 `git clone` 후, 하네스
-  (`.claude/` 번들 + 루트 `CLAUDE.md`/`AGENTS.md`)를 그 워크스페이스에 실체화한다
-  (`HarnessMaterializer`) — 워커가 플랫폼 협업 규약을 그대로 보고 작업하게 하기 위함.
+- 일반 TASK run(재시도 포함)은 run마다 새 워크스페이스(`AGENT_WORK_DIR/run-{id}`)를 만들어
+  `git clone` 후, 하네스(`.claude/` 번들 + 루트 `CLAUDE.md`/`AGENTS.md`)를 그 워크스페이스에
+  실체화한다(`HarnessMaterializer`) — 워커가 플랫폼 협업 규약을 그대로 보고 작업하게 하기 위함.
+- **예외 — 계보 run(P2c)**: REVIEW run, 반려-fix run, 그리고 이 둘의 재시도는 원 TASK run의
+  워크스페이스를 **승계**한다(`Run.isWorkspaceLineage()` — REVIEW 전부 + `parentRunId`가 있는
+  TASK). 워커 커밋은 푸시되지 않고 그 워크스페이스에만 있으므로(`CommitLinkParser`가
+  `origin/main..HEAD`를 본다) 새로 clone하면 검증·수정 대상이 사라진다. 그래서 clone·하네스
+  실체화를 생략하고, 이를 위해 `run.workspace_path`에 실제 경로를 영속화한다(P2a까지는 "pending"
+  고정이었다). 승계 워크스페이스가 비었거나("pending") 디렉터리가 사라졌으면 **clone으로 대신하지
+  않고 실패**시킨다 — 새 clone 위에서는 diff가 비어 리뷰어가 빈 변경을 통과시킬 수 있기 때문이다
+  (재시도 → 한도 소진 시 BLOCKED로 사람에게 넘어간다).
 - mcp-config는 **인라인 JSON 인자가 아니라 파일**(`.mcp-run.json`)로 넘긴다 — Windows
   `ProcessBuilder`가 인자를 재조립(re-quote)할 때 JSON 안 따옴표가 사라지고 `/`가 `\`로
   바뀌어 CLI가 손상된 문자열을 파일 경로로 오인해 즉시 죽는 버그를 피한다(F1, task-7 E2E
   3회 100% 재현). 그 파일은 **워크스페이스(git 클론 루트) 안이 아니라 형제 디렉터리**
-  (`AGENT_WORK_DIR/run-{id}-cfg/`)에 둔다(최종 리뷰 I4) — 워커가 `Bash(git *)`를 허용
+  (`AGENT_WORK_DIR/run-{id}-cfg/`, 계보 run도 워크스페이스 이름이 아니라 **자기** run id 기준 —
+  같은 워크스페이스를 잇는 run끼리 한쪽의 `finally` 삭제가 다른 쪽 토큰 파일을 지우지 않게)에
+  둔다(최종 리뷰 I4) — 워커가 `Bash(git *)`를 허용
   도구로 갖고 있어 클론 트리 안에 있으면 워커의 커밋에 실려 나갈 위험이 있다(하네스 수확
   워크플로가 워커 커밋을 체리픽한다). 이 파일에는 run 토큰(Bearer)이 그대로 담기므로 절대
   로그로 남기지 않고, 실행 후 `finally`에서 그 디렉터리 전체를 재귀적으로 삭제 + PAT 철회한다.
 - 프롬프트는 이슈 본문·최근 코멘트를 `<이슈-내용>`/`<코멘트>` 경계로 감싸 "데이터"로 표시한
   뒤 규약 섹션을 둔다 — **사람 코멘트 = 지시**로 취급하되, 그 안에 규약과 충돌하는 문구가
   있으면 규약이 우선한다는 문장을 경계 직후에 못박는다(프롬프트 인젝션 방어, fix round 1 I2).
+  USER run의 지시문도 같은 방어를 받는다(P2c): 코멘트 다음에 `<사용자-지시>` 경계로 싸고, 규약
+  우선 문장이 이 블록까지 포괄한다. 지시문이 없으면 프롬프트는 P2a와 바이트 단위로 같다(골든 테스트).
 - 프롬프트에 종결 3종 도구 호출을 runId와 함께 명시한다 — 워커는 `report_progress`로 수시
   진행 보고, 완료/실패/차단 시 반드시 `report_result(status=DONE|FAILED|BLOCKED)`를 호출해야
   하고, 사람 승인이 필요하면 `request_gate`를 부른다.
+- TASK 프롬프트의 done 규약(P2c): 리뷰 상시화가 켜져 있으면(`REVIEW_ENABLED`, 기본 true) "이슈를
+  done 계열로 바꾸지 마라, 완료는 `report_result(DONE)`까지"를 명시한다 — done 전환은 리뷰어만
+  한다(§5.8). 꺼져 있으면 P2a 규약(워커가 직접 done) 그대로다. 반려-fix run 프롬프트에는 "이전
+  run의 커밋 위에 코멘트의 리뷰 지적을 반영해 이어서 커밋하라"가 추가된다. REVIEW run은 작업 규약
+  대신 리뷰 규약 섹션을 받는다(§5.8).
 - 종결 시 `CommitLinkParser`가 `origin/main..HEAD` 범위의 로컬 커밋 메시지에서 이슈 키
   (정규식 `[A-Z][A-Z0-9_]{1,11}-\d+`)를 찾아 COMMIT 종류 웹링크로 이슈에 연결한다(순수 git
   파싱, best-effort — 실패해도 run 처리를 막지 않는다). PR 연결은 별도 도구 `link_pr`(P1,
@@ -249,3 +302,77 @@ CANCELLED로 닫고 재개하지 않는다.
 2026-09-06: 무인 루프 전체 왕복(디스패처 픽업 → 워커 실행 → `report_result` → 커밋/PR 수확)을
 실제로 완주 — run 16건이 13분·$3.93으로 `DONE`, 산출물이 `main`에 병합(`b3a7f68`). 상세는
 각 태스크 보고서(`.superpowers/sdd/2026-09-06-agent-service-p2a/task-*-report.md`)를 참고.
+
+### 5.8 리뷰 상시화 루프 (P2c, 2026-09-26, AGP-44 — "검증 없는 확정 없음")
+
+P2a까지는 워커가 `report_result(DONE)` 후 스스로 이슈를 done으로 바꿨다 — 아무도 검증하지 않은
+확정이었다. P2c는 TASK run이 DONE이 되면 **다른 페르소나(리뷰어)의 REVIEW run**이 뒤따르고,
+done 전환은 리뷰 통과 시 리뷰어만 하도록 바꿨다. 구현은 `ReviewService` + `RunService.applyOutcome`
++ `WorkerLauncher`(REVIEW 프롬프트·워크스페이스 승계).
+
+**운영 경고 — 배포 전에 반드시 읽을 것.** `REVIEW_ENABLED` 기본값이 **true**다. 이 상태에서
+`REVIEW_PERSONA`를 설정하지 않고 배포하면 리뷰를 띄울 수 없으므로 **모든 무인 TASK가 미확정으로
+멈춘다**(run은 DONE, 이슈는 inprogress + 경고 코멘트). 배포 전에:
+
+1. §1(MCP 접속 가이드)의 페르소나 생성 절차로 **`role=REVIEWER`** 페르소나를 만든다(대상 프로젝트
+   EDITOR 이상 grant — 코멘트·상태 전환·위키 보고서를 써야 한다). 작업 페르소나(`SCHEDULER_PERSONA`
+   등)와 다른 슬러그여야 한다.
+2. `REVIEW_PERSONA=<그 슬러그>`를 설정한다. `REVIEW_MODEL`은 선택(비우면 §5.1 모델 정책).
+3. 리뷰를 끄려면 `REVIEW_ENABLED=false` — P2a 동작(작업 워커가 직접 done) 복원이며, 명시적으로
+   고를 때만 쓴다.
+
+**흐름**
+
+1. **훅 위치**: TASK run이 DONE으로 종결되면 `applyOutcome`(워커의 `report_result` 자기 종결 경로와
+   프로세스 정상 종료 경로의 합류점)에서 `ReviewService.onRunDone`을 부른다. `report_result` 도구
+   시점에 걸지 않는 이유: 그때는 워커 프로세스가 아직 살아 있어 같은 워크스페이스를 두 프로세스가
+   쓰게 되고, 워크스페이스 실경로도 프로세스 종료 후에야 기록돼("pending") 리뷰가 항상 fail-closed로
+   떨어진다.
+2. **REVIEW run 생성**: 리뷰어 페르소나 명의 REVIEW run(attempt=1, trigger는 부모 것, `parentRunId`=
+   원 TASK)을 만들어 즉시 제출하고, 이슈에 "검증 run 시작" 코멘트를 남긴다. 원 TASK 워크스페이스를
+   재사용한다(§5.6 계보 run). REVIEW run은 **이슈를 claim하지 않는다** — 담당자는 작업자로 남는다.
+   스케줄러 run뿐 아니라 USER run(§5.5)의 TASK DONE에도 똑같이 걸린다.
+3. **리뷰어 프롬프트**: `git diff origin/main..HEAD`(작업자의 로컬 커밋)를 검토하고, 코드를 고치거나
+   커밋하지 말고 판정만 하라는 리뷰 규약을 받는다. 판정 채널은 `report_result` status 하나다.
+   - **통과**: 리뷰어가 `add_comment`(승인 사유) → `update_issue_status(done)` → `report_result(DONE)`.
+     REVIEW의 DONE은 새 REVIEW를 낳지 않는다(무한루프 가드 — `onRunDone`은 TASK만 처리하고,
+     `Run.queuedReview`도 DONE TASK만 부모로 받는다).
+   - **반려**: 리뷰어가 `add_comment`(파일·위치·고칠 내용) → `report_result(FAILED)`. 이슈 상태는
+     건드리지 않는다. REVIEW의 FAILED는 인프라 실패가 아니라 판정이므로 재시도하지 않고
+     `onReviewRejected`로 넘긴다.
+   - **판정 없이 정상 종료**(`report_result` 없이 프로세스만 성공)는 통과가 아니라 **실패**로 본다 —
+     일반 재시도 경로를 타고, 재시도도 같은 워크스페이스를 승계한다. 시간 초과·비정상 종료 같은
+     REVIEW의 인프라 실패도 같은 재시도 경로다.
+   - 리뷰어가 `report_result(BLOCKED)`를 부르면 REVIEW run은 BLOCKED로 사람 재개를 기다린다.
+4. **반려-fix**: 원 페르소나 명의 TASK run을 만든다(`Run.fixContinuation` — 워크스페이스·모델·
+   지시문 승계, `parentRunId`=반려한 REVIEW run). attempt는 **원 TASK의 카운터를 이어** +1이라
+   `SCHEDULER_RETRY_MAX_ATTEMPTS`가 반려 루프에도 그대로 걸린다. 리뷰 지적 코멘트는 기존 최근
+   코멘트(10건) 경로로 fix 프롬프트에 들어간다. fix run이 다시 DONE이 되면 그 DONE에 대해 새 REVIEW가
+   뜬다(fix도 TASK이므로).
+5. **한도 초과·이어갈 수 없음**: 다음 attempt가 한도를 넘거나, 원 TASK run을 찾을 수 없거나, 원
+   워크스페이스 경로가 없으면 반려한 REVIEW run을 **BLOCKED로 승격**하고 이슈에 사유 코멘트를
+   남긴다(이슈는 inprogress). 사람이 확인 후 `POST /api/agent/runs/{id}/resume`(§5.4)으로
+   재개한다 — 이때 만들어지는 continuation은 REVIEW의 연장이라 **fix가 아니라 같은 워크스페이스에서
+   리뷰를 다시 돌린다**(사람이 워크스페이스를 직접 손본 뒤 재검증하는 용도).
+
+**fail-closed(리뷰를 띄울 수 없는 경우)** — 아래는 REVIEW run을 만들지 않고, TASK run은 DONE으로
+두되 이슈를 inprogress에 남긴 채 "⚠️ 검증 run을 만들 수 없음 — 사람이 확인하세요" 코멘트를 단다:
+`REVIEW_PERSONA` 미설정, 슬러그의 페르소나 미존재·비활성, 리뷰어가 작업자와 같은 페르소나(자기
+승인은 검증이 아니다), 원 TASK의 워크스페이스 경로가 비었거나 "pending". REVIEW run이 만들어진
+뒤 실행 시점에 승계 워크스페이스 디렉터리가 사라졌으면 fresh clone으로 폴백하지 않고 실패시킨다
+(§5.6 — 빈 diff 통과 방지). 후처리 자체가 예외로 새면 로그만 남기고 삼킨다(TASK는 DONE, 이슈는
+미확정 — 사람 눈에 띄는 쪽으로 실패한다).
+
+**한계(알고 쓸 것)**
+
+- 리뷰어의 "코드 수정·커밋 금지"는 **프롬프트 수준 규약일 뿐**이다 — REVIEW run의 워커도 TASK와
+  같은 `allowedTools`(`Edit`/`Write`/`Bash(git *)` 포함)로 실행되므로 도구 권한으로 막혀 있지 않다.
+  마찬가지로 TASK 워커의 "done 전환 금지"도 프롬프트 규약이며, `update_issue_status` 도구 자체는
+  TASK run 토큰으로도 호출 가능하다.
+- 리뷰 판정은 리뷰어가 스스로 부르는 도구 호출(코멘트·상태 전환·`report_result`)의 조합이다 — 서버는
+  `report_result` status만 보고 흐름을 분기하며, 통과 시 리뷰어가 실제로 done 전환을 했는지는
+  검사하지 않는다.
+- 워크스페이스는 로컬 디스크에만 있다(푸시 없음). `AGENT_WORK_DIR`를 비우거나 다른 호스트로 옮기면
+  진행 중인 계보(REVIEW·반려-fix)는 실패 → BLOCKED로 끝난다.
+- 실제 무인 루프에서의 리뷰 왕복 E2E는 이 문서 작성 시점(T3 커밋 `0c2837a`) 기준 단위 테스트
+  (`ReviewServiceTest`·`RunServiceTest`·`WorkerLauncherTest`·`RunLineageTest`)로만 검증됐다 — 도그푸딩 실측 결과는 이후 추가한다.
