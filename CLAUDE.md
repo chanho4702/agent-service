@@ -124,11 +124,19 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
    호출하는 경우는 이 규약 그대로다.
 6. 모든 기록은 호출에 쓰인 PAT의 페르소나 명의로 남는다(작성자=페르소나 memberId) —
    `tool_call_audit` 테이블에 도구·상태·persona_id가 매 호출마다 적재된다.
+7. 이슈 제목·설명·우선순위를 고칠 때는 `update_issue`(AGP-37)를 쓴다 — DB 직접 수정 금지.
+   넘긴 필드만 바뀌고(null·생략=그대로, 셋 다 없으면 오류) 나머지는 현재 값으로 되쓴다.
+   이슈를 수정하는 도구(`claim_issue`/`update_issue_status`/`update_issue`)와 디스패처 자동 claim은
+   모두 `IssueClaimSupport.update`(GET → `IssueUpdateRequest.preserving(현재)` 위에 변경분만 덮기 →
+   PUT, 409면 재조회·재머지 1회 재시도)를 거친다 — alm PUT이 full-replace라 필드 매핑을 도구마다 따로
+   두면 담당자(`assigneeId` null=해제)가 조용히 지워진다. `details`는 항상 null(확장 필드 보존),
+   `mentionedUserIds`도 null(되쓰기마다 멘션 알림 재발송 방지).
 
-전체 도구 21종(P1 18종 + P2a run 보고 3종, 아래 §5 참고): `whoami`, `list_projects`,
-`get_project_context`, `search_issues`, `get_issue`, `create_issue`, `claim_issue`, `add_comment`,
-`log_work`, `link_pr`, `update_issue_status`, `list_spaces`, `find_pages`, `get_page`, `create_page`,
-`update_page`, `append_to_page`, `ping`, `report_progress`, `request_gate`, `report_result`.
+전체 도구 22종(P1 18종 + P2a run 보고 3종 + AGP-37 `update_issue`, 아래 §5 참고): `whoami`,
+`list_projects`, `get_project_context`, `search_issues`, `get_issue`, `create_issue`, `claim_issue`,
+`update_issue`, `add_comment`, `log_work`, `link_pr`, `update_issue_status`, `list_spaces`, `find_pages`,
+`get_page`, `create_page`, `update_page`, `append_to_page`, `ping`, `report_progress`, `request_gate`,
+`report_result`.
 
 ### 4. 검증 이력
 

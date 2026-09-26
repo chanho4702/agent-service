@@ -5,6 +5,7 @@ import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.platform.agentservice.audit.AuditService;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.client.AlmClient;
+import com.platform.agentservice.client.IssueClaimSupport;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.CommentResponse;
 import com.platform.agentservice.client.dto.IssueCreateRequest;
@@ -58,7 +59,9 @@ class IssueToolsTest {
     void setUp() {
         Audited audited = new Audited(auditService);
         ObjectMapper objectMapper = new ObjectMapper().registerModule(new JavaTimeModule());
-        issueTools = new IssueTools(almClient, tokenService, personaRepository, audited, objectMapper);
+        // 헬퍼는 실제 인스턴스 — GET→머지→PUT이 목 almClient까지 그대로 내려가야 요청 본문을 단언할 수 있다.
+        issueTools = new IssueTools(almClient, new IssueClaimSupport(almClient), tokenService,
+                personaRepository, audited, objectMapper);
 
         PatPrincipal principal = new PatPrincipal(OWNER_MEMBER_ID, PERSONA_ID, PERSONA_MEMBER_ID);
         SecurityContextHolder.getContext().setAuthentication(
@@ -141,6 +144,136 @@ class IssueToolsTest {
         // 최초 시도 + 재시도 1회 = 정확히 2번
         verify(almClient, times(2)).update(eq(1L), org.mockito.ArgumentMatchers.any(), eq(BEARER));
         verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+    }
+
+    // ---- update_issue_status: 재시도는 최신 담당자를 보존 ----
+
+    @Test
+    void update_issue_status_retry_keeps_assignee_from_fresh_fetch_not_stale_one() {
+        IssueResponse stale = issue(1L, "PROJ-1", "inprogress", 7L, 2);
+        IssueResponse fresh = issue(1L, "PROJ-1", "inprogress", 8L, 3);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(stale, fresh);
+        when(almClient.update(eq(1L), eq(IssueUpdateRequest.preserving(stale).withStatus("done")), eq(BEARER)))
+                .thenThrow(new AlmClient.VersionConflictException("버전 충돌"));
+        IssueUpdateRequest retry = IssueUpdateRequest.preserving(fresh).withStatus("done");
+        when(almClient.update(1L, retry, BEARER)).thenReturn(issue(1L, "PROJ-1", "done", 8L, 4));
+
+        String result = issueTools.updateIssueStatus("PROJ-1", "done");
+
+        assertThat(result).contains("done");
+        assertThat(retry.assigneeId()).isEqualTo(8L);
+        verify(almClient).update(1L, retry, BEARER);
+    }
+
+    // ---- update_issue (AGP-37): 부분 수정, 나머지 필드 보존 ----
+
+    @Test
+    void update_issue_title_only_preserves_every_other_field() {
+        IssueResponse current = richIssue(2);
+        when(almClient.getByKey("AGP-2", BEARER)).thenReturn(current);
+        when(almClient.update(eq(11L), org.mockito.ArgumentMatchers.any(), eq(BEARER))).thenReturn(richIssue(3));
+
+        String result = issueTools.updateIssue("AGP-2", "고친 제목", null, null);
+
+        assertThat(result).isEqualTo("이슈 AGP-2 수정 완료: title");
+        org.mockito.ArgumentCaptor<IssueUpdateRequest> sent = org.mockito.ArgumentCaptor.forClass(IssueUpdateRequest.class);
+        verify(almClient).update(eq(11L), sent.capture(), eq(BEARER));
+        IssueUpdateRequest req = sent.getValue();
+        assertThat(req.title()).isEqualTo("고친 제목");
+        assertThat(req.description()).isEqualTo("<p>원래 설명</p>");
+        assertThat(req.type()).isEqualTo("story");
+        assertThat(req.status()).isEqualTo("inprogress");
+        assertThat(req.priority()).isEqualTo("medium");
+        // null이면 담당자 해제 — 현재 담당자가 그대로 실려야 한다.
+        assertThat(req.assigneeId()).isEqualTo(PERSONA_MEMBER_ID);
+        // details=null이 alm-backend에서 라벨·스프린트·마감일 등 확장 필드 보존을 뜻한다(빈 details는 전부 지운다).
+        assertThat(req.details()).isNull();
+        assertThat(req.expectedVersion()).isEqualTo(2);
+        // 멘션은 알림 트리거 — 되쓰기에서 다시 보내면 안 된다.
+        assertThat(req.mentionedUserIds()).isNull();
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), eq("AGP-2 fields=title"), eq(AuditStatus.OK));
+    }
+
+    @Test
+    void update_issue_applies_all_three_fields_and_wraps_plain_description() {
+        IssueResponse current = richIssue(5);
+        when(almClient.getByKey("AGP-2", BEARER)).thenReturn(current);
+        IssueUpdateRequest expected = new IssueUpdateRequest(
+                "새 제목", "<p>새 설명</p>", "story", "inprogress", "highest", PERSONA_MEMBER_ID, null, 5, null);
+        when(almClient.update(11L, expected, BEARER)).thenReturn(richIssue(6));
+
+        String result = issueTools.updateIssue("AGP-2", "새 제목", "새 설명", "highest");
+
+        assertThat(result).isEqualTo("이슈 AGP-2 수정 완료: title, description, priority");
+        verify(almClient).update(11L, expected, BEARER);
+    }
+
+    @Test
+    void update_issue_with_no_fields_errors_without_calling_alm() {
+        String result = issueTools.updateIssue("AGP-2", null, null, null);
+
+        assertThat(result).startsWith("오류:").contains("변경할 필드가 없습니다");
+        verify(almClient, never()).getByKey(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+        verify(almClient, never()).update(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString());
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+    }
+
+    @Test
+    void update_issue_retries_once_on_409_and_remerges_onto_fresh_values() {
+        IssueResponse v2 = richIssue(2);
+        // 그 사이 다른 사람이 담당자와 상태를 바꿨다 — 재시도는 이를 덮어쓰면 안 된다.
+        IssueResponse v3 = new IssueResponse(11L, "AGP-2", 9L, "원래 제목", "<p>원래 설명</p>", "story", "review",
+                "medium", 99L, 1L, 3L, 4L, LocalDate.of(2026, 10, 1), new BigDecimal("3"), null, 6L,
+                List.of("auto"), List.of(7L), 0L, 3, null, null, null);
+        when(almClient.getByKey("AGP-2", BEARER)).thenReturn(v2, v3);
+        IssueUpdateRequest first = IssueUpdateRequest.preserving(v2).withTitle("고친 제목");
+        IssueUpdateRequest second = new IssueUpdateRequest(
+                "고친 제목", "<p>원래 설명</p>", "story", "review", "medium", 99L, null, 3, null);
+        when(almClient.update(11L, first, BEARER)).thenThrow(new AlmClient.VersionConflictException("버전 충돌"));
+        when(almClient.update(11L, second, BEARER)).thenReturn(richIssue(4));
+
+        String result = issueTools.updateIssue("AGP-2", "고친 제목", null, null);
+
+        assertThat(result).isEqualTo("이슈 AGP-2 수정 완료: title");
+        verify(almClient, times(2)).getByKey("AGP-2", BEARER);
+        verify(almClient).update(11L, second, BEARER);
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+    }
+
+    @Test
+    void update_issue_surfaces_second_409_without_third_attempt() {
+        when(almClient.getByKey("AGP-2", BEARER)).thenReturn(richIssue(2), richIssue(3));
+        when(almClient.update(eq(11L), org.mockito.ArgumentMatchers.any(), eq(BEARER)))
+                .thenThrow(new AlmClient.VersionConflictException("다른 사용자가 먼저 이슈를 수정했습니다"));
+
+        String result = issueTools.updateIssue("AGP-2", "고친 제목", null, null);
+
+        assertThat(result).isEqualTo("오류: 다른 사용자가 먼저 이슈를 수정했습니다");
+        verify(almClient, times(2)).update(eq(11L), org.mockito.ArgumentMatchers.any(), eq(BEARER));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+    }
+
+    @Test
+    void update_issue_on_missing_issue_surfaces_error_and_never_puts() {
+        when(almClient.getByKey("AGP-404", BEARER)).thenThrow(new com.platform.common.error.NotFoundException("이슈를 찾을 수 없습니다: AGP-404"));
+
+        String result = issueTools.updateIssue("AGP-404", "제목", null, null);
+
+        assertThat(result).isEqualTo("오류: 이슈를 찾을 수 없습니다: AGP-404");
+        verify(almClient, never()).update(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString());
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+    }
+
+    @Test
+    void update_issue_surfaces_server_priority_rejection_as_plain_text() {
+        when(almClient.getByKey("AGP-2", BEARER)).thenReturn(richIssue(2));
+        when(almClient.update(eq(11L), org.mockito.ArgumentMatchers.any(), eq(BEARER)))
+                .thenThrow(new com.platform.common.error.ConflictException("알 수 없는 우선순위입니다: urgent"));
+
+        String result = issueTools.updateIssue("AGP-2", null, null, "urgent");
+
+        assertThat(result).isEqualTo("오류: 알 수 없는 우선순위입니다: urgent");
+        verify(almClient, times(1)).update(eq(11L), org.mockito.ArgumentMatchers.any(), eq(BEARER));
     }
 
     // ---- create_issue: description <p> 래핑 ----
@@ -294,6 +427,13 @@ class IssueToolsTest {
 
         assertThat(result).contains("7");
         verify(almClient).addWebLink(1L, "https://example.com/pr/2", "PR", "PR", BEARER);
+    }
+
+    /** 확장 필드까지 전부 채운 이슈 — 부분 수정이 무엇도 지우지 않는지 보려면 빈 값이 없어야 한다. */
+    private static IssueResponse richIssue(int version) {
+        return new IssueResponse(11L, "AGP-2", 9L, "원래 제목", "<p>원래 설명</p>", "story", "inprogress", "medium",
+                PERSONA_MEMBER_ID, 1L, 3L, 4L, LocalDate.of(2026, 10, 1), new BigDecimal("3"), null, 6L,
+                List.of("auto", "backend"), List.of(7L), 0L, version, null, null, null);
     }
 
     private static IssueResponse issue(long id, String key, String status, Long assigneeId, int version) {

@@ -3,6 +3,7 @@ package com.platform.agentservice.tools;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.agentservice.client.AlmClient;
+import com.platform.agentservice.client.IssueClaimSupport;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.CommentResponse;
 import com.platform.agentservice.client.dto.IssueCreateRequest;
@@ -23,12 +24,13 @@ import org.springframework.stereotype.Component;
 
 import java.math.BigDecimal;
 import java.time.LocalDate;
+import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * ALM 이슈 도구 8종(S10). 전부 페르소나 서비스 토큰({@link TokenService#bearerFor})으로
+ * ALM 이슈 도구 9종(S10, AGP-37 update_issue 추가). 전부 페르소나 서비스 토큰({@link TokenService#bearerFor})으로
  * alm-backend를 호출하고, {@link Audited}로 감사 로그를 남긴다. 각 메서드는 가장 먼저
  * {@link ToolActor#current()}로 호출자를 확인한다 — bearer 토큰을 만들려면 어차피
  * {@code actor.personaMemberId()}가 필요하고, {@link Audited#run}도 내부적으로 다시
@@ -36,9 +38,10 @@ import java.util.Map;
  *
  * <p><b>full-replace 주의(S10)</b>: alm-backend {@code PUT /api/alm/issues/{id}}는
  * title/type/status/priority/expectedVersion을 {@code @NotBlank}/{@code @NotNull}로
- * 강제하고, {@code assigneeId}는 null이면 담당자를 해제한다. {@code claim_issue}/
- * {@code update_issue_status}는 그래서 GET으로 가져온 현재 값을 그대로 채워 넣고
- * 바꿀 필드만 덮어쓴다. {@code details}는 항상 null로 보낸다 — alm-backend가 details가
+ * 강제하고, {@code assigneeId}는 null이면 담당자를 해제한다. 이슈를 수정하는 도구
+ * ({@code claim_issue}/{@code update_issue_status}/{@code update_issue})는 그래서 전부
+ * {@link IssueClaimSupport#update}를 거쳐 현재 값을 채운 요청 위에 바꿀 필드만 덮어쓴다
+ * (409 재시도 포함). {@code details}는 항상 null로 보낸다 — alm-backend가 details가
  * null이면 parentId/sprintId/dueDate/estimateHours/resolution/fixVersionId/labels/
  * componentIds를 기존 값 그대로 보존하기 때문에(실측, IssueService.update), 매번 다시
  * 채워 넣을 필요가 없다.
@@ -47,14 +50,16 @@ import java.util.Map;
 public class IssueTools {
 
     private final AlmClient almClient;
+    private final IssueClaimSupport issueClaimSupport;
     private final TokenService tokenService;
     private final PersonaRepository personaRepository;
     private final Audited audited;
     private final ObjectMapper objectMapper;
 
-    public IssueTools(AlmClient almClient, TokenService tokenService, PersonaRepository personaRepository,
-                       Audited audited, ObjectMapper objectMapper) {
+    public IssueTools(AlmClient almClient, IssueClaimSupport issueClaimSupport, TokenService tokenService,
+                       PersonaRepository personaRepository, Audited audited, ObjectMapper objectMapper) {
         this.almClient = almClient;
+        this.issueClaimSupport = issueClaimSupport;
         this.tokenService = tokenService;
         this.personaRepository = personaRepository;
         this.audited = audited;
@@ -132,8 +137,7 @@ public class IssueTools {
         PatPrincipal actor = ToolActor.current();
         return audited.run("claim_issue", "claim " + issueKey, () -> {
             String bearer = tokenService.bearerFor(actor.personaMemberId());
-            IssueResponse issue = almClient.getByKey(issueKey, bearer);
-            IssueResponse updated = updateWithRetry(issue, actor.personaMemberId(), "inprogress", bearer);
+            IssueResponse updated = issueClaimSupport.claim(issueKey, actor.personaMemberId(), "inprogress", bearer);
             return "이슈 " + updated.key() + " 담당자 지정 완료 (상태: " + updated.status() + ")";
         });
     }
@@ -145,9 +149,42 @@ public class IssueTools {
         PatPrincipal actor = ToolActor.current();
         return audited.run("update_issue_status", issueKey + " -> " + status, () -> {
             String bearer = tokenService.bearerFor(actor.personaMemberId());
-            IssueResponse issue = almClient.getByKey(issueKey, bearer);
-            IssueResponse updated = updateWithRetry(issue, issue.assigneeId(), status, bearer);
+            IssueResponse updated = issueClaimSupport.update(issueKey, req -> req.withStatus(status), bearer);
             return "이슈 " + updated.key() + " 상태 변경 완료: " + updated.status();
+        });
+    }
+
+    /**
+     * AGP-37: 이슈 제목·설명·우선순위 부분 수정. 넘긴 필드만 바꾸고 나머지(타입·상태·담당자와
+     * details 확장 필드 전부)는 현재 값 그대로 되쓴다 — full-replace PUT이라 빠진 필드는 곧 유실이다.
+     * 우선순위 스킴 검증은 alm-backend가 한다(400 메시지가 그대로 오류 텍스트로 전파).
+     */
+    @McpTool(name = "update_issue", description = "이슈의 제목·설명·우선순위를 수정한다(넘긴 필드만 바뀌고 나머지는 그대로).")
+    public String updateIssue(
+            @McpToolParam(description = "이슈 키", required = true) String issueKey,
+            @McpToolParam(description = "새 제목(생략 시 그대로)", required = false) String title,
+            @McpToolParam(description = "새 설명(생략 시 그대로). 일반 텍스트면 문단 단위로 <p>로 감싼다", required = false) String description,
+            @McpToolParam(description = "새 우선순위 id(생략 시 그대로, 프로젝트 스킴 기준)", required = false) String priority) {
+        PatPrincipal actor = ToolActor.current();
+        List<String> changed = new ArrayList<>();
+        if (title != null) changed.add("title");
+        if (description != null) changed.add("description");
+        if (priority != null) changed.add("priority");
+        String fields = String.join(", ", changed);
+        return audited.run("update_issue", issueKey + " fields=" + fields, () -> {
+            if (changed.isEmpty()) {
+                throw new IllegalArgumentException("변경할 필드가 없습니다(title/description/priority 중 하나 이상 필요)");
+            }
+            String bearer = tokenService.bearerFor(actor.personaMemberId());
+            String html = toTipTapHtml(description);
+            IssueResponse updated = issueClaimSupport.update(issueKey, req -> {
+                IssueUpdateRequest merged = req;
+                if (title != null) merged = merged.withTitle(title);
+                if (html != null) merged = merged.withDescription(html);
+                if (priority != null) merged = merged.withPriority(priority);
+                return merged;
+            }, bearer);
+            return "이슈 " + updated.key() + " 수정 완료: " + fields;
         });
     }
 
@@ -200,30 +237,6 @@ public class IssueTools {
             WebLinkResponse link = almClient.addWebLink(issue.id(), url, title, "PR", bearer);
             return "PR 링크 등록 완료 (id=" + link.id() + ")";
         });
-    }
-
-    /** 409(낙관적 락 충돌)면 재조회 후 딱 1회만 다시 시도한다. 그 외 예외(400 스킴 위반 등)는 그대로 전파한다. */
-    private IssueResponse updateWithRetry(IssueResponse issue, Long assigneeId, String status, String bearer) {
-        try {
-            return almClient.update(issue.id(), toUpdateRequest(issue, assigneeId, status), bearer);
-        } catch (AlmClient.VersionConflictException e) {
-            IssueResponse fresh = almClient.getByKey(issue.key(), bearer);
-            return almClient.update(fresh.id(), toUpdateRequest(fresh, assigneeId, status), bearer);
-        }
-    }
-
-    /** details를 null로 보내 V2 확장 필드(parentId/sprintId/dueDate/estimateHours/resolution/fixVersionId/labels/componentIds)를 그대로 보존한다(S10). */
-    private IssueUpdateRequest toUpdateRequest(IssueResponse issue, Long assigneeId, String status) {
-        return new IssueUpdateRequest(
-                issue.title(),
-                issue.description(),
-                issue.type(),
-                status,
-                issue.priority(),
-                assigneeId,
-                null,
-                issue.version(),
-                null);
     }
 
     private Long resolveAssigneeId(String assigneeSlug) {
