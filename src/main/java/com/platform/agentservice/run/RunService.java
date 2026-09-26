@@ -231,7 +231,7 @@ public class RunService {
         return repoUrl;
     }
 
-    private static String projectKeyOf(String issueKey) {
+    static String projectKeyOf(String issueKey) {
         int dash = issueKey.indexOf('-');
         return dash > 0 ? issueKey.substring(0, dash) : issueKey;
     }
@@ -320,8 +320,16 @@ public class RunService {
 
     private void recordSessionAndLedger(long runId, WorkerResult result) {
         Run run = runRepository.findById(runId).orElseThrow();
+        boolean changed = false;
         if (result.sessionId() != null && !result.sessionId().isBlank()) {
             run.recordSession(result.sessionId());
+            changed = true;
+        }
+        if (result.workspacePath() != null && !result.workspacePath().isBlank()) {
+            run.recordWorkspace(result.workspacePath());
+            changed = true;
+        }
+        if (changed) {
             runRepository.save(run);
         }
         if (result.costUsd() != null && result.costUsd().compareTo(BigDecimal.ZERO) > 0) {

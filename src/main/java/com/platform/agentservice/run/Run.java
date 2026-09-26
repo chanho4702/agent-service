@@ -57,6 +57,10 @@ public class Run {
     @Column(length = 60) private String model;
     @Column(nullable = false) private int attempt = 1;
     @Column(columnDefinition = "text") private String error;
+    /** USER 트리거 run의 사람 지시문 — 반려-fix continuation까지 승계된다(지시 맥락을 잃지 않게). */
+    @Column(columnDefinition = "text") private String instruction;
+    /** REVIEW run → 검증 대상 TASK run, 반려-fix continuation → 반려한 REVIEW run. 재시도 continuation에는 비워 둔다. */
+    private Long parentRunId;
     private Instant startedAt;
     private Instant endedAt;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
@@ -106,10 +110,75 @@ public class Run {
         return r;
     }
 
+    /** 사람이 지시문을 붙여 직접 요청한 TASK run(AGP-42) — 트리거는 항상 USER다. */
+    public static Run queuedUser(String issueKey, long projectId, long personaId, String harnessRef,
+                                 String model, String instruction) {
+        Run r = queued(RunType.TASK, issueKey, projectId, personaId, RunTrigger.USER, harnessRef, model);
+        r.instruction = instruction;
+        return r;
+    }
+
+    /**
+     * 완료된 TASK run을 검증하는 REVIEW run(AGP-44). 워커 커밋은 푸시되지 않고 원 워크스페이스에만
+     * 남으므로 리뷰어도 같은 워크스페이스를 봐야 한다(D-P2c-1) — workspacePath를 승계한다. REVIEW에서
+     * REVIEW를 만들 수 없게 막는 것이 무한루프의 1차 가드다(D-P2c-4).
+     */
+    public static Run queuedReview(Run parent, long reviewerPersonaId, String model) {
+        if (parent.type != RunType.TASK || parent.status != RunStatus.DONE) {
+            throw new ConflictException("DONE 상태의 TASK run만 리뷰할 수 있습니다: " + parent.type + "/" + parent.status);
+        }
+        Run r = new Run();
+        r.type = RunType.REVIEW;
+        r.issueKey = parent.issueKey;
+        r.projectId = parent.projectId;
+        r.personaId = reviewerPersonaId;
+        r.trigger = parent.trigger;
+        r.harnessRef = parent.harnessRef;
+        r.model = model;
+        r.workspacePath = parent.workspacePath;
+        r.parentRunId = parent.id;
+        r.status = RunStatus.QUEUED;
+        r.attempt = 1;
+        return r;
+    }
+
+    /**
+     * 리뷰 반려 후 원 페르소나가 같은 워크스페이스에서 지적을 고치는 TASK run(D-P2c-2). attempt는
+     * {@link #continuation}과 같은 규칙(+1)이라 재시도 한도가 반려 루프에도 그대로 걸린다. 단
+     * {@link #continuation}과 달리 워크스페이스를 승계한다 — 재시도는 새로 clone해야 하지만
+     * 반려-fix는 앞선 커밋 위에서 이어가야 하기 때문이다.
+     */
+    public static Run fixContinuation(Run taskRun, long reviewRunId) {
+        if (taskRun.type != RunType.TASK || taskRun.status != RunStatus.DONE) {
+            throw new ConflictException("DONE 상태의 TASK run만 반려-fix로 이어갈 수 있습니다: "
+                    + taskRun.type + "/" + taskRun.status);
+        }
+        Run r = new Run();
+        r.type = RunType.TASK;
+        r.issueKey = taskRun.issueKey;
+        r.projectId = taskRun.projectId;
+        r.personaId = taskRun.personaId;
+        r.trigger = taskRun.trigger;
+        r.harnessRef = taskRun.harnessRef;
+        r.model = taskRun.model;
+        r.instruction = taskRun.instruction;
+        r.workspacePath = taskRun.workspacePath;
+        r.parentRunId = reviewRunId;
+        r.status = RunStatus.QUEUED;
+        r.attempt = taskRun.attempt + 1;
+        return r;
+    }
+
+    /**
+     * 승계된 실제 워크스페이스 경로(REVIEW·반려-fix)가 있으면 시작 시 넘어온 자리표시값으로 덮지
+     * 않는다 — 덮으면 워크스페이스 재사용(D-P2c-1)의 근거가 사라진다.
+     */
     public void start(String workspacePath, Long patId) {
         requireStatus(RunStatus.QUEUED, "QUEUED 상태에서만 시작할 수 있습니다");
         this.status = RunStatus.RUNNING;
-        this.workspacePath = workspacePath;
+        if (this.workspacePath == null) {
+            this.workspacePath = workspacePath;
+        }
         this.patId = patId;
         this.startedAt = Instant.now();
     }
@@ -156,6 +225,11 @@ public class Run {
 
     public void recordSession(String sessionId) {
         this.sessionId = sessionId;
+    }
+
+    /** 워커가 실제로 쓴 워크스페이스 경로 — 후속 REVIEW·반려-fix run이 이 값을 승계해 재사용한다(D-P2c-1). */
+    public void recordWorkspace(String workspacePath) {
+        this.workspacePath = workspacePath;
     }
 
     private void requireStatus(RunStatus expected, String message) {

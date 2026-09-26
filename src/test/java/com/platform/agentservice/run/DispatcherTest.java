@@ -129,6 +129,59 @@ class DispatcherTest {
         verify(runService).execute(100L);
     }
 
+    // ---- P2c (AGP-43): pickup passes the resolved model policy instead of null ----
+
+    @Test
+    void pickup_passes_model_resolved_from_project_key_of_the_issue() {
+        when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
+        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
+        when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
+
+        IssueResponse issue = issue(1L, "AGP-1", 9L);
+        when(almClient.search(any(), any(), any(), any(), any(), any(), eq(BEARER)))
+                .thenReturn(new IssuePageResponse(List.of(issue), 0, 20, 1));
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-1", RunService.ACTIVE_STATUSES)).thenReturn(false);
+        when(budgetGuard.allow(9L)).thenReturn(true);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 9L)).thenReturn(0L);
+
+        Run created = queuedRun(102L);
+        when(runService.createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq("claude-opus-5-5"))).thenReturn(created);
+
+        // env var 주입처럼 소문자로 접힌 키 — 이슈 키 "AGP-1"의 프로젝트 키 "AGP"로 찾아야 한다.
+        SchedulerProperties withPolicy = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-sonnet-5", java.util.Map.of("agp", "claude-opus-5-5"));
+        dispatcher(withPolicy).tick();
+
+        verify(runService).createQueuedForIssue(
+                eq(new RunService.IssueRef("AGP-1", 9L, PERSONA_ID)), eq(RunTrigger.SCHEDULER), eq("claude-opus-5-5"));
+        verify(runService).execute(102L);
+    }
+
+    @Test
+    void pickup_falls_back_to_global_default_model_when_project_has_no_entry() {
+        when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
+        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
+        when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
+
+        IssueResponse issue = issue(1L, "AGP-1", 9L);
+        when(almClient.search(any(), any(), any(), any(), any(), any(), eq(BEARER)))
+                .thenReturn(new IssuePageResponse(List.of(issue), 0, 20, 1));
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-1", RunService.ACTIVE_STATUSES)).thenReturn(false);
+        when(budgetGuard.allow(9L)).thenReturn(true);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 9L)).thenReturn(0L);
+
+        Run created = queuedRun(103L);
+        when(runService.createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq("claude-sonnet-5"))).thenReturn(created);
+
+        SchedulerProperties withPolicy = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-sonnet-5", java.util.Map.of("OTHER", "claude-opus-5-5"));
+        dispatcher(withPolicy).tick();
+
+        verify(runService).createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq("claude-sonnet-5"));
+    }
+
     // ---- skips issue with active run, moves to next ----
 
     @Test

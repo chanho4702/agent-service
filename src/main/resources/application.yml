@@ -88,6 +88,9 @@ platform:
       max-concurrent-per-project: ${SCHEDULER_MAX_PER_PROJECT:1}
       default-persona-slug: ${SCHEDULER_PERSONA:jiho}
       retry-max-attempts: ${SCHEDULER_RETRY_MAX_ATTEMPTS:3}
+      # 자동화 run 모델 정책(P2c) — 프로젝트별 맵 > 이 전역 기본 > 비움(워커 기본 모델).
+      # 프로젝트별은 project-models.<프로젝트키> 또는 env PLATFORM_AGENT_SCHEDULER_PROJECT_MODELS_<KEY>(키 대소문자 무관).
+      default-model: ${SCHEDULER_DEFAULT_MODEL:}
     budget:
       # 예산 캡(P2a T5) — BudgetService가 BudgetGuardConfig의 permissive 기본값을 대체한다.
       # 월 캡은 캘린더 월(UTC) 누적, 플랫폼 전체와 프로젝트별에 같은 값을 쓴다(P2a 결정,

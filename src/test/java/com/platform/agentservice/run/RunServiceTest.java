@@ -183,6 +183,53 @@ class RunServiceTest {
         verify(almClient).addComment(eq(1L), org.mockito.ArgumentMatchers.contains("작업 완료했습니다"), eq(BEARER));
     }
 
+    // ---- P2c (D-P2c-1): the real workspace path replaces the "pending" placeholder ----
+
+    @Test
+    void execute_records_real_workspace_path_from_worker_result() {
+        Run run = queuedRun(43L);
+        when(runRepository.findById(43L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        // 세션 id가 없어도 워크스페이스는 기록돼야 한다 — 둘은 독립이다.
+        WorkerResult result = new WorkerResult(0, false, "완료", null, null, 0L, 0L, null, "raw",
+                "C:\\agent-work\\run-43");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        runService.execute(43L);
+
+        assertThat(run.getWorkspacePath()).isEqualTo("C:\\agent-work\\run-43");
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+    }
+
+    @Test
+    void execute_keeps_placeholder_when_worker_reports_no_workspace() {
+        Run run = queuedRun(44L);
+        when(runRepository.findById(44L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        WorkerResult result = new WorkerResult(0, false, "완료", "sess-44", null, 0L, 0L, null, "raw", " ");
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
+
+        runService.execute(44L);
+
+        assertThat(run.getWorkspacePath()).isEqualTo("pending");
+    }
+
     // ---- execute: fix round 1 (I1) — RUNNING is committed before buildJob(), so a concurrent redrain is a no-op ----
 
     @Test

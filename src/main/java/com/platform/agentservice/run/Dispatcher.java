@@ -112,7 +112,7 @@ public class Dispatcher {
             try {
                 Run run = runService.createQueuedForIssue(
                         new RunService.IssueRef(issue.key(), issue.projectId(), persona.getId()),
-                        RunTrigger.SCHEDULER, null);
+                        RunTrigger.SCHEDULER, properties.modelFor(RunService.projectKeyOf(issue.key())));
                 runService.execute(run.getId());
             } catch (Exception e) {
                 log.warn("이슈 픽업 실패, 다음 틱에 재시도합니다: issueKey={} error={}", issue.key(), e.getMessage());
