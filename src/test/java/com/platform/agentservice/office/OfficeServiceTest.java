@@ -1,0 +1,323 @@
+package com.platform.agentservice.office;
+
+import com.platform.agentservice.audit.AuditStatus;
+import com.platform.agentservice.audit.ToolCallAudit;
+import com.platform.agentservice.audit.ToolCallAuditRepository;
+import com.platform.agentservice.budget.BudgetService;
+import com.platform.agentservice.budget.LedgerScope;
+import com.platform.agentservice.budget.UsageLedger;
+import com.platform.agentservice.budget.UsageLedgerRepository;
+import com.platform.agentservice.office.dto.OfficeResponse;
+import com.platform.agentservice.office.dto.PersonaActivityResponse;
+import com.platform.agentservice.persona.Persona;
+import com.platform.agentservice.persona.PersonaRepository;
+import com.platform.agentservice.persona.PersonaRole;
+import com.platform.agentservice.run.Gate;
+import com.platform.agentservice.run.GateKind;
+import com.platform.agentservice.run.GateRepository;
+import com.platform.agentservice.run.Run;
+import com.platform.agentservice.run.RunRepository;
+import com.platform.agentservice.run.RunStatus;
+import com.platform.agentservice.run.RunTrigger;
+import com.platform.agentservice.run.RunType;
+import com.platform.common.error.NotFoundException;
+import jakarta.persistence.EntityManager;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+import org.springframework.test.context.ActiveProfiles;
+
+import java.math.BigDecimal;
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDate;
+import java.time.ZoneOffset;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.mock;
+
+/**
+ * {@link OfficeService} 집계 — 실제 JPQL(원장×run 조인, max(id) 서브쿼리)이 H2에서 도는지까지 본다.
+ * 시각은 고정 Clock + 네이티브 UPDATE로 created_at/updated_at을 옮겨 5분 창·오늘 경계를 결정적으로 만든다.
+ */
+@DataJpaTest
+@ActiveProfiles("test")
+class OfficeServiceTest {
+
+    @Autowired PersonaRepository personas;
+    @Autowired RunRepository runs;
+    @Autowired GateRepository gates;
+    @Autowired ToolCallAuditRepository audits;
+    @Autowired UsageLedgerRepository ledger;
+    @Autowired EntityManager em;
+
+    BudgetService budgetService = mock(BudgetService.class);
+    Instant now;
+    OfficeService service;
+
+    @BeforeEach
+    void setUp() {
+        // 자정 근처에 돌아도 "오늘" 경계가 흔들리지 않게 한국 정오로 고정한다(행 시각은 전부 이 값 기준으로 옮긴다).
+        now = LocalDate.now(OfficeService.OFFICE_ZONE).atTime(12, 0).atZone(OfficeService.OFFICE_ZONE).toInstant();
+        service = new OfficeService(personas, runs, gates, audits, ledger, budgetService, Clock.fixed(now, ZoneOffset.UTC));
+        given(budgetService.snapshot()).willReturn(
+                new BudgetService.BudgetSnapshot(new BigDecimal("100"), new BigDecimal("12.5"), false));
+    }
+
+    private Persona persona(long memberId, String slug, PersonaRole role) {
+        return personas.save(Persona.of(memberId, slug, role, slug + "이름", "🤖", null));
+    }
+
+    private Run run(Persona p, long projectId, String issueKey, RunStatus target) {
+        Run r = runs.save(Run.queued(RunType.TASK, issueKey, projectId, p.getId(), RunTrigger.SCHEDULER,
+                "harness://default", "claude-sonnet-5"));
+        switch (target) {
+            case QUEUED -> { }
+            case RUNNING -> r.start("pending", null);
+            case WAITING_APPROVAL -> { r.start("pending", null); r.parkForApproval(); }
+            case BLOCKED -> { r.start("pending", null); r.block("한도 소진"); }
+            case DONE -> { r.start("pending", null); r.complete(); }
+            case FAILED -> { r.start("pending", null); r.fail("실패"); }
+            case CANCELLED -> r.cancel();
+        }
+        return runs.saveAndFlush(r);
+    }
+
+    private ToolCallAudit audit(Persona p, String tool, String summary, Instant at) {
+        ToolCallAudit a = audits.saveAndFlush(ToolCallAudit.of(p.getId(), 1L, tool, summary, AuditStatus.OK));
+        setTime("tool_call_audit", "created_at", a.getId(), at);
+        return a;
+    }
+
+    private void cost(Run r, String usd, Instant at) {
+        // 실제 적재와 똑같이 한 run의 비용을 PROJECT·PLATFORM 두 스코프로 넣는다 — 합계가 두 배가 되면 안 된다.
+        UsageLedger project = ledger.saveAndFlush(UsageLedger.of(r.getId(), LedgerScope.PROJECT,
+                String.valueOf(r.getProjectId()), new BigDecimal(usd), 10, 10, "m"));
+        UsageLedger platform = ledger.saveAndFlush(UsageLedger.of(r.getId(), LedgerScope.PLATFORM, "platform",
+                new BigDecimal(usd), 10, 10, "m"));
+        setTime("usage_ledger", "created_at", project.getId(), at);
+        setTime("usage_ledger", "created_at", platform.getId(), at);
+    }
+
+    private void setTime(String table, String column, long id, Instant at) {
+        em.flush();
+        em.createNativeQuery("update " + table + " set " + column + " = ?1 where id = ?2")
+                .setParameter(1, at).setParameter(2, id).executeUpdate();
+        em.clear();
+    }
+
+    private Instant todayStartKst() {
+        return LocalDate.ofInstant(now, OfficeService.OFFICE_ZONE).atStartOfDay(OfficeService.OFFICE_ZONE).toInstant();
+    }
+
+    @Test
+    void 빈_상태면_빈_목록과_0을_돌려준다() {
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.personas()).isEmpty();
+        assertThat(res.recentRuns()).isEmpty();
+        assertThat(res.pendingGateCount()).isZero();
+        assertThat(res.pendingGates()).isEmpty();
+        assertThat(res.budget().monthlyCapUsd()).isEqualByComparingTo("100");
+        assertThat(res.budget().platformMonthToDateUsd()).isEqualByComparingTo("12.5");
+        assertThat(res.budget().killSwitch()).isFalse();
+        assertThat(res.generatedAt()).isEqualTo(now);
+    }
+
+    @Test
+    void run이_없는_페르소나는_유휴로_나온다() {
+        persona(1L, "jiho", PersonaRole.BACKEND);
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.personas()).singleElement().satisfies(p -> {
+            assertThat(p.slug()).isEqualTo("jiho");
+            assertThat(p.role()).isEqualTo(PersonaRole.BACKEND);
+            assertThat(p.active()).isTrue();
+            assertThat(p.currentRun()).isNull();
+            assertThat(p.lastActivity()).isNull();
+            assertThat(p.todayCostUsd()).isEqualByComparingTo("0");
+        });
+    }
+
+    @Test
+    void 활성_run은_페르소나별_최신_1건만_붙고_종결_run은_무시된다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Persona mina = persona(2L, "mina", PersonaRole.FRONTEND);
+        run(jiho, 1L, "AGP-1", RunStatus.WAITING_APPROVAL);
+        Run newest = run(jiho, 1L, "AGP-2", RunStatus.RUNNING);
+        run(jiho, 1L, "AGP-3", RunStatus.DONE);
+        run(mina, 1L, "AGP-4", RunStatus.CANCELLED);
+
+        OfficeResponse res = service.office(null);
+
+        OfficeResponse.OfficePersona j = res.personas().get(0);
+        assertThat(j.currentRun().id()).isEqualTo(newest.getId());
+        assertThat(j.currentRun().status()).isEqualTo(RunStatus.RUNNING);
+        assertThat(j.currentRun().issueKey()).isEqualTo("AGP-2");
+        assertThat(j.currentRun().type()).isEqualTo(RunType.TASK);
+        assertThat(j.currentRun().attempt()).isEqualTo(1);
+        assertThat(j.currentRun().model()).isEqualTo("claude-sonnet-5");
+        assertThat(j.currentRun().startedAt()).isNotNull();
+        assertThat(res.personas().get(1).currentRun()).isNull();
+    }
+
+    @Test
+    void BLOCKED는_현재_run이면서_최근_종결_목록에도_나온다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Run blocked = run(jiho, 1L, "AGP-1", RunStatus.BLOCKED);
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.personas().get(0).currentRun().status()).isEqualTo(RunStatus.BLOCKED);
+        assertThat(res.recentRuns()).extracting(r -> r.id()).containsExactly(blocked.getId());
+    }
+
+    @Test
+    void 최근_종결은_updatedAt_최신순_10건이고_활성_run은_빠진다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        run(jiho, 1L, "AGP-0", RunStatus.RUNNING);
+        Run[] done = new Run[12];
+        for (int i = 0; i < 12; i++) {
+            done[i] = run(jiho, 1L, "AGP-" + (i + 1), i % 2 == 0 ? RunStatus.DONE : RunStatus.FAILED);
+            setTime("run", "updated_at", done[i].getId(), now.minus(Duration.ofMinutes(100 - i)));
+        }
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.recentRuns()).hasSize(10);
+        assertThat(res.recentRuns().get(0).id()).isEqualTo(done[11].getId());
+        assertThat(res.recentRuns().get(9).id()).isEqualTo(done[2].getId());
+        assertThat(res.recentRuns()).allSatisfy(r -> assertThat(r.status()).isIn(RunStatus.DONE, RunStatus.FAILED));
+        assertThat(res.recentRuns().get(0).type()).isEqualTo(RunType.TASK);
+        assertThat(res.recentRuns().get(0).trigger()).isEqualTo(RunTrigger.SCHEDULER);
+    }
+
+    @Test
+    void 말풍선은_5분_이내_최신_감사만이고_본문은_가린다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Persona mina = persona(2L, "mina", PersonaRole.FRONTEND);
+        audit(jiho, "get_issue", "AGP-1", now.minus(Duration.ofMinutes(3)));
+        audit(jiho, "add_comment", "AGP-1: 비밀스러운 코멘트 본문", now.minus(Duration.ofMinutes(1)));
+        audit(mina, "create_page", "spaceId=1 title=설계", now.minus(Duration.ofMinutes(6)));
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.personas().get(0).lastActivity()).satisfies(a -> {
+            assertThat(a.tool()).isEqualTo("add_comment");
+            assertThat(a.summary()).isEqualTo("AGP-1 " + AuditSummaryRedactor.REDACTED);
+            assertThat(a.status()).isEqualTo(AuditStatus.OK);
+        });
+        assertThat(res.personas().get(1).lastActivity()).isNull();
+    }
+
+    @Test
+    void 오늘_비용은_PLATFORM_스코프만_페르소나별로_합산하고_어제는_뺀다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Persona mina = persona(2L, "mina", PersonaRole.FRONTEND);
+        Run r1 = run(jiho, 1L, "AGP-1", RunStatus.DONE);
+        Run r2 = run(jiho, 2L, "OPS-1", RunStatus.DONE);
+        Run r3 = run(mina, 1L, "AGP-2", RunStatus.DONE);
+        cost(r1, "1.2500", todayStartKst().plusSeconds(60));
+        cost(r2, "0.5000", now);
+        cost(r1, "9.0000", todayStartKst().minusSeconds(60));
+        cost(r3, "2.0000", now);
+
+        OfficeResponse all = service.office(null);
+        assertThat(all.personas().get(0).todayCostUsd()).isEqualByComparingTo("1.75");
+        assertThat(all.personas().get(1).todayCostUsd()).isEqualByComparingTo("2");
+
+        OfficeResponse agp = service.office(1L);
+        assertThat(agp.personas().get(0).todayCostUsd()).isEqualByComparingTo("1.25");
+    }
+
+    @Test
+    void projectId를_주면_run_축이_그_프로젝트로_좁혀진다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        run(jiho, 2L, "OPS-1", RunStatus.RUNNING);
+        run(jiho, 2L, "OPS-2", RunStatus.DONE);
+        Run agpDone = run(jiho, 1L, "AGP-1", RunStatus.DONE);
+        Run opsWaiting = run(jiho, 2L, "OPS-3", RunStatus.WAITING_APPROVAL);
+        gates.saveAndFlush(Gate.request(opsWaiting.getId(), GateKind.MERGE, "머지 승인"));
+
+        OfficeResponse res = service.office(1L);
+
+        assertThat(res.personas().get(0).currentRun()).isNull();
+        assertThat(res.recentRuns()).extracting(r -> r.id()).containsExactly(agpDone.getId());
+        assertThat(res.pendingGateCount()).isZero();
+        assertThat(res.pendingGates()).isEmpty();
+    }
+
+    @Test
+    void 미결_게이트는_개수_전체와_최신_5건_요약을_준다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Gate last = null;
+        for (int i = 0; i < 7; i++) {
+            Run r = run(jiho, 1L, "AGP-" + i, RunStatus.WAITING_APPROVAL);
+            last = gates.saveAndFlush(Gate.request(r.getId(), GateKind.PLAN, "가".repeat(300)));
+            setTime("gate", "requested_at", last.getId(), now.minus(Duration.ofMinutes(10 - i)));
+        }
+        Run decidedRun = run(jiho, 1L, "AGP-99", RunStatus.WAITING_APPROVAL);
+        Gate decided = Gate.request(decidedRun.getId(), GateKind.MERGE, "결정됨");
+        decided.approve(1L);
+        gates.saveAndFlush(decided);
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.pendingGateCount()).isEqualTo(7);
+        assertThat(res.pendingGates()).hasSize(5);
+        OfficeResponse.PendingGate top = res.pendingGates().get(0);
+        assertThat(top.id()).isEqualTo(last.getId());
+        assertThat(top.issueKey()).isEqualTo("AGP-6");
+        assertThat(top.personaId()).isEqualTo(jiho.getId());
+        assertThat(top.kind()).isEqualTo(GateKind.PLAN);
+        assertThat(top.requestSummary()).hasSize(OfficeService.GATE_SUMMARY_MAX + 1).endsWith("…");
+    }
+
+    @Test
+    void 개인_활동은_최근_run_20건과_오늘_감사_50건과_오늘_비용을_준다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Persona mina = persona(2L, "mina", PersonaRole.FRONTEND);
+        Run first = null;
+        for (int i = 0; i < 22; i++) {
+            Run r = run(jiho, 1L, "AGP-" + i, RunStatus.DONE);
+            if (i == 0) first = r;
+        }
+        run(mina, 1L, "AGP-M", RunStatus.RUNNING);
+        for (int i = 0; i < 52; i++) {
+            audit(jiho, "report_progress", "run=1 진행 메시지 " + i, now.minusSeconds(60 + i));
+        }
+        audit(jiho, "get_issue", "AGP-OLD", todayStartKst().minusSeconds(1));
+        cost(first, "0.3000", now);
+
+        PersonaActivityResponse res = service.activity(jiho.getId());
+
+        assertThat(res.personaId()).isEqualTo(jiho.getId());
+        assertThat(res.runs()).hasSize(20).allSatisfy(r -> assertThat(r.personaId()).isEqualTo(jiho.getId()));
+        assertThat(res.runs()).extracting(r -> r.id()).doesNotContain(first.getId());
+        assertThat(res.todayAudits()).hasSize(50);
+        assertThat(res.todayAudits()).noneMatch(a -> "AGP-OLD".equals(a.summary()));
+        assertThat(res.todayAudits().get(0).summary()).isEqualTo("run=1 " + AuditSummaryRedactor.REDACTED);
+        assertThat(res.todayCostUsd()).isEqualByComparingTo("0.3");
+    }
+
+    @Test
+    void 활동_기록이_없는_페르소나는_빈_목록과_0이다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+
+        PersonaActivityResponse res = service.activity(jiho.getId());
+
+        assertThat(res.runs()).isEmpty();
+        assertThat(res.todayAudits()).isEmpty();
+        assertThat(res.todayCostUsd()).isEqualByComparingTo("0");
+    }
+
+    @Test
+    void 없는_페르소나_활동은_404() {
+        assertThatThrownBy(() -> service.activity(9999L)).isInstanceOf(NotFoundException.class);
+    }
+}

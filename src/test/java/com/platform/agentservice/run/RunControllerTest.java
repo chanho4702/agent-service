@@ -72,7 +72,10 @@ class RunControllerTest {
                 .andExpect(jsonPath("$.id").value(77))
                 .andExpect(jsonPath("$.issueKey").value("AGP-9"))
                 .andExpect(jsonPath("$.status").value("QUEUED"))
-                .andExpect(jsonPath("$.model").value("claude-sonnet-5"));
+                .andExpect(jsonPath("$.model").value("claude-sonnet-5"))
+                .andExpect(jsonPath("$.type").value("TASK"))
+                .andExpect(jsonPath("$.trigger").value("USER"))
+                .andExpect(jsonPath("$.parentRunId").value(org.hamcrest.Matchers.nullValue()));
 
         verify(runService).execute(77L);
     }
@@ -201,13 +204,16 @@ class RunControllerTest {
     @Test
     void authenticated_user_can_list_runs_without_status_filter() throws Exception {
         RunSummaryResponse summary = new RunSummaryResponse(1L, "AGP-1", RunStatus.RUNNING, 5L, 1,
-                "claude-opus-5", Instant.parse("2026-09-06T00:00:00Z"), null);
+                "claude-opus-5", Instant.parse("2026-09-06T00:00:00Z"), null, RunType.REVIEW, RunTrigger.USER, 9L);
         given(runService.list(null)).willReturn(List.of(summary));
 
         mvc.perform(get("/api/agent/runs").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].issueKey").value("AGP-1"))
-                .andExpect(jsonPath("$[0].status").value("RUNNING"));
+                .andExpect(jsonPath("$[0].status").value("RUNNING"))
+                .andExpect(jsonPath("$[0].type").value("REVIEW"))
+                .andExpect(jsonPath("$[0].trigger").value("USER"))
+                .andExpect(jsonPath("$[0].parentRunId").value(9));
 
         verify(runService).list(isNull());
     }

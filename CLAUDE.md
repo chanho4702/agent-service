@@ -275,8 +275,8 @@ run을 띄운다.
 {"issueKey": "AGP-42", "instruction": "선택, 4000자 이하", "model": "선택, 60자 이하", "personaSlug": "선택"}
 ```
 
-- 응답: 201 + `RunSummaryResponse`(id·issueKey·status=QUEUED·personaId·attempt·model·시각 —
-  목록 API와 같은 최소 필드, type/trigger는 응답에 없다). 저장되는 run은 TASK·trigger=USER다.
+- 응답: 201 + `RunSummaryResponse`(id·issueKey·status=QUEUED·personaId·attempt·model·startedAt·endedAt·
+  type·trigger·parentRunId — 목록 API와 같은 요약. 뒤 셋은 P3a에서 추가). 저장되는 run은 TASK·trigger=USER다.
 - 페르소나: 지정 슬러그 > `SCHEDULER_PERSONA`(기본 슬러그). 못 찾으면 404 — 스케줄러처럼 조용히
   건너뛰지 않는다.
 - 이슈는 그 페르소나 bearer로 ALM에서 확인하고 run에는 ALM이 돌려준 정본 키를 쓴다. 없는 이슈는
@@ -413,3 +413,28 @@ USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogres
   진행 중인 계보(REVIEW·반려-fix)는 실패 → BLOCKED로 끝난다.
 - 실제 무인 루프에서의 리뷰 왕복 E2E는 이 문서 작성 시점(T3 커밋 `0c2837a`) 기준 단위 테스트
   (`ReviewServiceTest`·`RunServiceTest`·`WorkerLauncherTest`·`RunLineageTest`)로만 검증됐다 — 도그푸딩 실측 결과는 이후 추가한다.
+
+## 6. P3a: AI 사무실 감독 API (2026-09-26)
+
+alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`office` 패키지). 인증된 사용자 누구나 — run·게이트
+목록과 같은 권한이며 **프로젝트 권한은 보지 않는다**(그래서 감사 summary의 자유 본문을 걷어낸다, 아래).
+
+- `GET /api/agent/office?projectId=`(선택): `personas[]`(id·slug·name·emoji·role·active·`currentRun`·
+  `lastActivity`·`todayCostUsd`) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
+  `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
+  `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt`.
+  - `currentRun`: `RunService.ACTIVE_STATUSES`(QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED) 중 페르소나별 최신 1건(id 기준), 없으면 null.
+  - 최근 종결 = DONE·FAILED·CANCELLED·BLOCKED, `updatedAt` 최신순(BLOCKED는 endedAt이 비어 있어서). BLOCKED는
+    `currentRun`에도 나온다.
+  - `lastActivity`: 그 페르소나 최근 감사 1건, **5분 이내일 때만**(아니면 null).
+  - projectId는 run 축(현재 run·최근 run·게이트·비용)만 좁힌다. 감사에는 프로젝트 축이 없어 말풍선은 전체 활동 기준.
+- `GET /api/agent/personas/{id}/activity`: `runs[]`(최근 20) · `todayAudits[]`(오늘 최대 50, id·tool·status·
+  summary·createdAt) · `todayCostUsd`. 없는 페르소나는 404.
+- **비용 축**: 원장에 페르소나 축이 없어 `usage_ledger`×`run` 조인으로 페르소나별 합산한다. 한 run 비용이
+  PROJECT·PLATFORM 두 스코프로 적재되므로 **PLATFORM 행만** 센다. "오늘"은 **Asia/Seoul 자정** 기준(월 예산은
+  여전히 UTC 캘린더 월 — §5.2).
+- **summary 가림(`AuditSummaryRedactor`)**: `add_comment`·`*.comment`(코멘트 실패 노트)는 이슈키만,
+  `report_progress`는 `run=N`만 남기고 `(본문 생략)`을 붙인다. 원본 감사 행은 그대로 보존(노출 시점에만 거름).
+  토큰류는 원래 어떤 도구 summary에도 싣지 않는다. 제목(`create_issue`/`create_page`/`update_page`)·검색어는
+  메타데이터로 보고 그대로 노출한다.
+- 인덱스(V5): `tool_call_audit(created_at)`(말풍선 5분 창), `run(persona_id, id DESC)`(개인 오피스).
