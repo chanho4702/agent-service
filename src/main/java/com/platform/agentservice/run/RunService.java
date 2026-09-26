@@ -142,7 +142,7 @@ public class RunService {
         requireNoActiveRun(issue.key());
         String resolvedModel = isBlank(model) ? schedulerProperties.modelFor(projectKeyOf(issue.key())) : model.trim();
         Run run = Run.queuedUser(issue.key(), issue.projectId(), persona.getId(), DEFAULT_HARNESS_REF,
-                resolvedModel, isBlank(instruction) ? null : instruction);
+                resolvedModel, isBlank(instruction) ? null : instruction.trim());
         return runRepository.save(run);
     }
 
