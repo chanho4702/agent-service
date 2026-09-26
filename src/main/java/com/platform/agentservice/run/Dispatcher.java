@@ -82,7 +82,14 @@ public class Dispatcher {
         }
     }
 
-    /** 전역 동시성 한도 → 기본 페르소나 해석 → 라벨/상태로 이슈 검색 → 프로젝트별 한도·예산·중복 체크 순. */
+    /**
+     * 전역 동시성 한도 → 기본 페르소나 해석 → 라벨/상태로 이슈 검색 → 프로젝트별 한도·예산·중복 체크 순.
+     *
+     * <p>검색은 후보를 찾을 때까지 다음 페이지로 넘어간다(AGP-52) — 첫 페이지가 활성 run 보유·예산 거부·
+     * 프로젝트 한도 초과 이슈로 가득 차면 뒤 페이지의 정당한 후보가 영원히 픽업되지 않기 때문이다.
+     * "활성 run 없는 것만" 같은 서버 측 필터는 alm-backend 계약 변경이라 범위 밖이고, 대신
+     * {@link SchedulerProperties#maxPickPages()}로 한 틱의 ALM 호출 수를 묶는다.
+     */
     private void pickNewIssue() {
         if (runRepository.countByStatusIn(CONCURRENCY_STATUSES) >= properties.maxConcurrentGlobal()) {
             return;
@@ -95,9 +102,25 @@ public class Dispatcher {
         }
 
         String bearer = tokenService.bearerFor(persona.getMemberId());
-        IssuePageResponse page = almClient.search(null, null, TODO_STATUS, null, AUTO_LABEL, 0, bearer);
+        for (int pageNo = 0; pageNo < properties.maxPickPages(); pageNo++) {
+            IssuePageResponse page = almClient.search(null, null, TODO_STATUS, null, AUTO_LABEL, pageNo, bearer);
+            IssueResponse candidate = firstEligible(page.items());
+            if (candidate != null) {
+                pickUp(candidate, persona);
+                return; // 한 틱에 하나만 픽업한다(단순화)
+            }
+            if (isLastPage(page, pageNo)) {
+                return;
+            }
+        }
+        log.debug("픽업 페이지 상한({})까지 후보가 없어 이번 틱을 넘깁니다", properties.maxPickPages());
+    }
 
-        for (IssueResponse issue : page.items()) {
+    private IssueResponse firstEligible(List<IssueResponse> items) {
+        if (items == null) {
+            return null;
+        }
+        for (IssueResponse issue : items) {
             if (runRepository.existsByIssueKeyAndStatusIn(issue.key(), RunService.ACTIVE_STATUSES)) {
                 continue;
             }
@@ -108,16 +131,31 @@ public class Dispatcher {
                     >= properties.maxConcurrentPerProject()) {
                 continue;
             }
+            return issue;
+        }
+        return null;
+    }
 
-            try {
-                Run run = runService.createQueuedForIssue(
-                        new RunService.IssueRef(issue.key(), issue.projectId(), persona.getId()),
-                        RunTrigger.SCHEDULER, properties.modelFor(RunService.projectKeyOf(issue.key())));
-                runService.execute(run.getId());
-            } catch (Exception e) {
-                log.warn("이슈 픽업 실패, 다음 틱에 재시도합니다: issueKey={} error={}", issue.key(), e.getMessage());
-            }
-            return; // 한 틱에 하나만 픽업한다(단순화)
+    /**
+     * alm-backend 응답은 {@code page·size·total}만 준다(hasNext 없음). 빈 페이지·꽉 차지 않은 페이지·
+     * size 0(판정 불가)도 끝으로 본다 — 끝 판정을 놓쳐 빈 페이지를 상한까지 두드리지 않게.
+     */
+    private static boolean isLastPage(IssuePageResponse page, int pageNo) {
+        List<IssueResponse> items = page.items();
+        if (items == null || items.isEmpty() || page.size() <= 0 || items.size() < page.size()) {
+            return true;
+        }
+        return (long) (pageNo + 1) * page.size() >= page.total();
+    }
+
+    private void pickUp(IssueResponse issue, Persona persona) {
+        try {
+            Run run = runService.createQueuedForIssue(
+                    new RunService.IssueRef(issue.key(), issue.projectId(), persona.getId()),
+                    RunTrigger.SCHEDULER, properties.modelFor(RunService.projectKeyOf(issue.key())));
+            runService.execute(run.getId());
+        } catch (Exception e) {
+            log.warn("이슈 픽업 실패, 다음 틱에 재시도합니다: issueKey={} error={}", issue.key(), e.getMessage());
         }
     }
 }

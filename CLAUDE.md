@@ -173,7 +173,10 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
    env 커튼(진짜 격리)은 계획된 후속 작업이다(티켓 필요).
 
 자동화 정책: 라벨 `auto` + 상태 `todo`인 ALM 이슈만 픽업 대상이고, 한 틱에 하나만 새로
-픽업한다(단순화, 브리핑 지시). 동시성은 `SCHEDULER_MAX_GLOBAL`(기본 2, 전역 QUEUED+RUNNING)
+픽업한다(단순화, 브리핑 지시). 검색 첫 페이지가 활성 run 보유·예산 거부·프로젝트 한도 초과 이슈로 가득 차도
+뒤 후보가 굶지 않게 후보를 찾거나 마지막 페이지(`page·size·total`로 판정)에 닿을 때까지 다음
+페이지로 넘어간다 — 한 틱 상한 `SCHEDULER_MAX_PICK_PAGES`(`scheduler.max-pick-pages`, 기본 5,
+0 이하는 5로 본다)(AGP-52). 동시성은 `SCHEDULER_MAX_GLOBAL`(기본 2, 전역 QUEUED+RUNNING)
 · `SCHEDULER_MAX_PER_PROJECT`(기본 1, 프로젝트별) — 픽업 단계에서만 본다(이미 QUEUED인 run을
 드레인하는 건 다시 게이트하지 않음). 재시도는 `SCHEDULER_RETRY_MAX_ATTEMPTS`(기본 3) — 실패
 시 attempt+1 continuation을 만들어 재시도하고, 한도를 넘기면 `BLOCKED`로 승격해 픽업 후보에서
@@ -225,6 +228,11 @@ CANCELLED로 닫고 재개하지 않는다.
 워커가 스스로 `report_result(FAILED)`로 종결해도 `RunService`가 곧바로 재시도/BLOCKED로
 옮기므로 FAILED에 오래 머물지 않지만, 그 처리 자체가 예외로 실패하는 잔여 케이스에서는 FAILED에
 멈출 수 있다 — 그때도 이 경로로 재개한다. 대상 run이 BLOCKED·FAILED 둘 다 아니면 409.
+
+`run.error`는 덮어쓰지 않고 누적된다(AGP-53) — 실패 원인 → BLOCKED 사유 → 재개/취소 노트가
+`--- [UTC 타임스탬프] ---` 구분선으로 원인이 앞, 최신이 뒤에 쌓인다. 빈 노트(`cancel()`)는 기존
+기록을 지우지 않는다. 8000자 상한을 넘으면 앞 6000자(최초 원인)를 보존하고 남은 자리에 최신 항목의
+앞부분을 담아 `…(truncated)`로 표시한다(중간 이력만 잘린다).
 
 ### 5.5 run 감독 REST
 

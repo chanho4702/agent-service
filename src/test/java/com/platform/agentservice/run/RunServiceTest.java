@@ -854,7 +854,7 @@ class RunServiceTest {
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
                 .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
 
-        WorkerResult timedOut = WorkerResult.failure(-1, true, "partial output");
+        WorkerResult timedOut = WorkerResult.failure(-1, true, "partial output", null);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(timedOut);
 
         runService.execute(42L);
@@ -889,7 +889,7 @@ class RunServiceTest {
                 .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
 
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
-                .thenReturn(WorkerResult.failure(1, false, "boom"));
+                .thenReturn(WorkerResult.failure(1, false, "boom", null));
 
         runService.execute(3L);
 
@@ -1213,7 +1213,7 @@ class RunServiceTest {
         ReflectionTestUtils.setField(run, "id", 70L);
         stubExecuteCollaborators(70L, run, true);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
-                .thenReturn(WorkerResult.failure(1, false, "boom"));
+                .thenReturn(WorkerResult.failure(1, false, "boom", null));
 
         runService.execute(70L);
 
@@ -1238,7 +1238,7 @@ class RunServiceTest {
         Run run = queuedRun(71L);
         stubExecuteCollaborators(71L, run, true);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
-                .thenReturn(WorkerResult.failure(1, false, "boom"));
+                .thenReturn(WorkerResult.failure(1, false, "boom", null));
         org.mockito.Mockito.doThrow(new TaskRejectedException("pool full")).when(selfProxy).execute(anyLong());
 
         runService.execute(71L);

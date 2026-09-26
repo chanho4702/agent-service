@@ -89,7 +89,7 @@ class RunServiceOptimisticLockingTest {
                 .thenReturn(new CommentResponse(1L, 1L, PERSONA_MEMBER_ID, "b", null, null));
         // 워커가 실패로 죽었다고 가정 — attempt==한도에서 BLOCKED 승격 경로를 타게 한다.
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
-                .thenReturn(WorkerResult.failure(1, false, "boom"));
+                .thenReturn(WorkerResult.failure(1, false, "boom", null));
 
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,

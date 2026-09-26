@@ -40,6 +40,11 @@ public class Run {
     private static final Set<RunStatus> BLOCKABLE = EnumSet.of(RunStatus.RUNNING, RunStatus.FAILED);
     private static final Set<RunStatus> CONTINUABLE = EnumSet.of(RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED, RunStatus.FAILED);
 
+    /** {@link #error} 누적 상한과 넘칠 때 보존하는 앞부분 길이 — 앞 6000자 + 최신 항목 약 2000자. */
+    static final int ERROR_MAX_LENGTH = 8000;
+    static final int ERROR_HEAD_KEEP = 6000;
+    static final String ERROR_TRUNCATED = "\n…(truncated)";
+
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
@@ -218,14 +223,14 @@ public class Run {
     public void fail(String error) {
         requireStatus(RunStatus.RUNNING, "RUNNING 상태에서만 실패 처리할 수 있습니다");
         this.status = RunStatus.FAILED;
-        this.error = error;
+        appendError(error);
         this.endedAt = Instant.now();
     }
 
     public void block(String error) {
         requireStatus(BLOCKABLE, "RUNNING 또는 FAILED 상태에서만 차단할 수 있습니다");
         this.status = RunStatus.BLOCKED;
-        this.error = error;
+        appendError(error);
     }
 
     public void cancel() {
@@ -235,13 +240,56 @@ public class Run {
     /**
      * 취소 + 사유 기록(P2a T5) — 게이트 승인/거절로 원 run을 닫을 때 "왜 CANCELLED가
      * 됐는지"(예: 후속 continuation run id)를 {@link #error}에 남기려고 {@link #cancel()}과
-     * 별도로 둔다. 가드는 {@link #cancel()}과 동일하다.
+     * 별도로 둔다. 가드는 {@link #cancel()}과 동일하다. 노트는 기존 기록 뒤에 덧붙는다(AGP-53) —
+     * 재개·취소가 BLOCKED 사유를 지우면 사람이 왜 멈췄는지 추적할 수 없다.
      */
     public void cancelWithNote(String note) {
         requireStatus(CANCELLABLE, "QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED·FAILED 상태에서만 취소할 수 있습니다");
         this.status = RunStatus.CANCELLED;
-        this.error = note;
+        appendError(note);
         this.endedAt = Instant.now();
+    }
+
+    /**
+     * 기존 기록이 있으면 대입하지 않고 구분선과 함께 뒤에 덧붙인다(AGP-53) — 원인이 앞, 최신이 뒤.
+     * null/blank는 기록할 게 없다는 뜻이라 기존 값을 그대로 둔다({@link #cancel()}이 원인을 지우지 않게).
+     */
+    private void appendError(String message) {
+        if (message == null || message.isBlank()) {
+            return;
+        }
+        if (this.error == null || this.error.isBlank()) {
+            this.error = boundedErrorLog("", message);
+            return;
+        }
+        this.error = boundedErrorLog(this.error, "\n--- [" + Instant.now() + "] ---\n" + message);
+    }
+
+    /**
+     * 무한 성장 방지 상한. 넘치면 최초 원인(앞 {@link #ERROR_HEAD_KEEP}자)을 우선 보존하고, 남은 자리에
+     * 방금 덧붙인 최신 항목을 앞쪽부터 담는다 — 중간 이력만 잘려 나가고 원인과 최신 요지는 둘 다 남는다.
+     */
+    static String boundedErrorLog(String existing, String entry) {
+        if (existing.length() + entry.length() <= ERROR_MAX_LENGTH) {
+            return existing + entry;
+        }
+        String head = existing.length() > ERROR_HEAD_KEEP
+                ? cut(existing, ERROR_HEAD_KEEP) + ERROR_TRUNCATED
+                : existing;
+        int room = ERROR_MAX_LENGTH - head.length();
+        String tail = entry.length() > room
+                ? cut(entry, room - ERROR_TRUNCATED.length()) + ERROR_TRUNCATED
+                : entry;
+        return head + tail;
+    }
+
+    /** 서로게이트 쌍 한가운데서 자르면 깨진 문자가 PostgreSQL UTF-8 저장에서 문제를 일으킨다. */
+    private static String cut(String s, int length) {
+        int end = Math.max(0, Math.min(length, s.length()));
+        if (end > 0 && end < s.length() && Character.isHighSurrogate(s.charAt(end - 1))) {
+            end--;
+        }
+        return s.substring(0, end);
     }
 
     public void recordSession(String sessionId) {

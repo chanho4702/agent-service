@@ -24,19 +24,35 @@ public record SchedulerProperties(
         String defaultPersonaSlug,
         int retryMaxAttempts,
         String defaultModel,
-        Map<String, String> projectModels
+        Map<String, String> projectModels,
+        int maxPickPages
 ) {
 
-    /** 생성자가 둘이라 바인딩 대상을 명시해야 한다 — 없으면 Spring Boot가 어느 쪽으로 바인딩할지 정하지 못한다. */
+    /** 새 이슈 픽업이 한 틱에 순회하는 검색 페이지 상한의 기본값(AGP-52) — 걸러지는 이슈가 쌓여도 ALM 호출이 폭주하지 않게 묶는다. */
+    public static final int DEFAULT_MAX_PICK_PAGES = 5;
+
+    /** 생성자가 여럿이라 바인딩 대상을 명시해야 한다 — 없으면 Spring Boot가 어느 쪽으로 바인딩할지 정하지 못한다. */
     @ConstructorBinding
     public SchedulerProperties {
+        // 미설정(0)이나 음수를 "순회 안 함"으로 받으면 page-0 기아(AGP-52)가 조용히 되살아난다.
+        if (maxPickPages <= 0) {
+            maxPickPages = DEFAULT_MAX_PICK_PAGES;
+        }
+    }
+
+    /** 픽업 페이지 상한을 따로 정하지 않는 설정(기존 호출부·테스트) — 기본 상한을 쓴다. */
+    public SchedulerProperties(boolean enabled, long intervalMs, int maxConcurrentGlobal, int maxConcurrentPerProject,
+                               String defaultPersonaSlug, int retryMaxAttempts, String defaultModel,
+                               Map<String, String> projectModels) {
+        this(enabled, intervalMs, maxConcurrentGlobal, maxConcurrentPerProject, defaultPersonaSlug, retryMaxAttempts,
+                defaultModel, projectModels, DEFAULT_MAX_PICK_PAGES);
     }
 
     /** 모델 정책이 없는 설정(기존 호출부·테스트) — 워커 기본 모델을 쓴다. */
     public SchedulerProperties(boolean enabled, long intervalMs, int maxConcurrentGlobal, int maxConcurrentPerProject,
                                String defaultPersonaSlug, int retryMaxAttempts) {
         this(enabled, intervalMs, maxConcurrentGlobal, maxConcurrentPerProject, defaultPersonaSlug, retryMaxAttempts,
-                null, null);
+                null, null, DEFAULT_MAX_PICK_PAGES);
     }
 
     /**

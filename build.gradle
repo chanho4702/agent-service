@@ -67,5 +67,10 @@ dependencies {
 // /actuator/info의 build.version — 대시보드가 배포된 버전을 읽는다
 springBoot { buildInfo() }
 
-tasks.named('test') { useJUnitPlatform() }
+tasks.named('test') {
+    useJUnitPlatform()
+    // Windows 기본 인코딩(MS949)이면 스프링 컨텍스트가 로깅을 초기화한 뒤 한국어 로그가 깨져
+    // OutputCapture로 로그 문구를 확인하는 테스트가 전체 실행에서만 실패한다.
+    jvmArgs '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8'
+}
 tasks.named('bootJar') { archiveFileName = 'app.jar' }

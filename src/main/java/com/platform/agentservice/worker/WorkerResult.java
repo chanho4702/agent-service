@@ -28,12 +28,10 @@ public record WorkerResult(
         String workspacePath
 ) {
 
-    /** clone 실패·타임아웃·비정상 종료·JSON 파싱 실패 등 "결과를 못 얻은" 경우의 공통 생성 — 워크스페이스 경로 없음. */
-    public static WorkerResult failure(int exitCode, boolean timedOut, String rawTail) {
-        return new WorkerResult(exitCode, timedOut, null, null, null, 0L, 0L, null, rawTail, null);
-    }
-
-    /** 위와 같되 워크스페이스가 실제로 만들어진 뒤의 실패(clone 실패 등)에 경로를 함께 싣는다. */
+    /**
+     * clone 실패·타임아웃·비정상 종료·JSON 파싱 실패 등 "결과를 못 얻은" 경우의 공통 생성. 워크스페이스가
+     * 만들어지기 전의 실패면 {@code workspacePath}에 null을 넘긴다.
+     */
     public static WorkerResult failure(int exitCode, boolean timedOut, String rawTail, String workspacePath) {
         return new WorkerResult(exitCode, timedOut, null, null, null, 0L, 0L, null, rawTail, workspacePath);
     }

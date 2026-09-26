@@ -103,6 +103,10 @@ class RunResumeServiceTest {
 
         assertThat(original.getStatus()).isEqualTo(RunStatus.CANCELLED);
         assertThat(original.getError()).contains("사람 확인 후 재개").contains("11");
+        // AGP-53: 재개 노트가 멈춘 원인(최초 실패 → BLOCKED 사유)을 지우지 않고 뒤에 붙는다.
+        assertThat(original.getError()).startsWith("boom");
+        assertThat(original.getError().indexOf("3회 실패 — 사람 확인 필요"))
+                .isLessThan(original.getError().indexOf("사람 확인 후 재개"));
 
         ArgumentCaptor<Run> savedCaptor = ArgumentCaptor.forClass(Run.class);
         verify(runRepository).save(savedCaptor.capture());

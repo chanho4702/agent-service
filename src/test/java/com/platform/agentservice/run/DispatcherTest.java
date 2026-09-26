@@ -298,6 +298,147 @@ class DispatcherTest {
         verify(runRepository, never()).countByStatusInAndProjectId(any(), anyLong());
     }
 
+    // ---- AGP-52: page-0 starvation — keep paging until a candidate is found ----
+
+    private void stubPickPreconditions() {
+        when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
+        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
+        when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
+    }
+
+    private void stubSearchPage(int page, IssuePageResponse response) {
+        when(almClient.search(eq(null), eq(null), eq(List.of("todo")), eq(null), eq(List.of("auto")), eq(page), eq(BEARER)))
+                .thenReturn(response);
+    }
+
+    @Test
+    void full_first_page_of_ineligible_issues_moves_on_to_the_next_page_and_picks_there() {
+        stubPickPreconditions();
+        IssueResponse busy1 = issue(1L, "AGP-1", 9L);
+        IssueResponse busy2 = issue(2L, "AGP-2", 9L);
+        IssueResponse free = issue(3L, "AGP-3", 9L);
+        stubSearchPage(0, new IssuePageResponse(List.of(busy1, busy2), 0, 2, 3));
+        stubSearchPage(1, new IssuePageResponse(List.of(free), 1, 2, 3));
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-1", RunService.ACTIVE_STATUSES)).thenReturn(true);
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-2", RunService.ACTIVE_STATUSES)).thenReturn(true);
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-3", RunService.ACTIVE_STATUSES)).thenReturn(false);
+        when(budgetGuard.allow(9L)).thenReturn(true);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 9L)).thenReturn(0L);
+        Run created = queuedRun(300L);
+        when(runService.createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq(null))).thenReturn(created);
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(runService, times(1)).createQueuedForIssue(any(), any(), any());
+        verify(runService).createQueuedForIssue(
+                eq(new RunService.IssueRef("AGP-3", 9L, PERSONA_ID)), eq(RunTrigger.SCHEDULER), eq(null));
+        verify(runService).execute(300L);
+    }
+
+    @Test
+    void picks_only_one_issue_per_tick_and_stops_paging_once_found() {
+        stubPickPreconditions();
+        IssueResponse free1 = issue(1L, "AGP-1", 9L);
+        IssueResponse free2 = issue(2L, "AGP-2", 9L);
+        stubSearchPage(0, new IssuePageResponse(List.of(free1, free2), 0, 2, 10));
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-1", RunService.ACTIVE_STATUSES)).thenReturn(false);
+        when(budgetGuard.allow(9L)).thenReturn(true);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 9L)).thenReturn(0L);
+        when(runService.createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq(null))).thenReturn(queuedRun(301L));
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(runService, times(1)).createQueuedForIssue(any(), any(), any());
+        verify(almClient, times(1)).search(any(), any(), any(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void stops_at_the_page_cap_even_if_more_pages_remain() {
+        stubPickPreconditions();
+        when(almClient.search(any(), any(), any(), any(), any(), any(), eq(BEARER)))
+                .thenAnswer(inv -> {
+                    int page = inv.getArgument(5);
+                    return new IssuePageResponse(List.of(issue(page, "AGP-" + page, 9L)), page, 1, 100);
+                });
+        when(runRepository.existsByIssueKeyAndStatusIn(anyString(), eq(RunService.ACTIVE_STATUSES))).thenReturn(true);
+
+        SchedulerProperties capped = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3, null, null, 3);
+        dispatcher(capped).tick();
+
+        verify(almClient, times(3)).search(any(), any(), any(), any(), any(), any(), anyString());
+        verify(almClient, never()).search(any(), any(), any(), any(), any(), eq(3), anyString());
+        verify(runService, never()).createQueuedForIssue(any(), any(), any());
+    }
+
+    @Test
+    void default_page_cap_is_five() {
+        stubPickPreconditions();
+        when(almClient.search(any(), any(), any(), any(), any(), any(), eq(BEARER)))
+                .thenAnswer(inv -> {
+                    int page = inv.getArgument(5);
+                    return new IssuePageResponse(List.of(issue(page, "AGP-" + page, 9L)), page, 1, 100);
+                });
+        when(runRepository.existsByIssueKeyAndStatusIn(anyString(), eq(RunService.ACTIVE_STATUSES))).thenReturn(true);
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(almClient, times(SchedulerProperties.DEFAULT_MAX_PICK_PAGES))
+                .search(any(), any(), any(), any(), any(), any(), anyString());
+    }
+
+    @Test
+    void stops_at_the_last_page_by_total_without_requesting_beyond_it() {
+        stubPickPreconditions();
+        IssueResponse a = issue(1L, "AGP-1", 9L);
+        IssueResponse b = issue(2L, "AGP-2", 9L);
+        IssueResponse c = issue(3L, "AGP-3", 9L);
+        IssueResponse d = issue(4L, "AGP-4", 9L);
+        // 두 페이지 모두 꽉 찼지만 total=4라 page 1이 마지막이다 — 꽉 찬 페이지 판정만으로는 끝을 모른다.
+        stubSearchPage(0, new IssuePageResponse(List.of(a, b), 0, 2, 4));
+        stubSearchPage(1, new IssuePageResponse(List.of(c, d), 1, 2, 4));
+        when(runRepository.existsByIssueKeyAndStatusIn(anyString(), eq(RunService.ACTIVE_STATUSES))).thenReturn(true);
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(almClient, times(2)).search(any(), any(), any(), any(), any(), any(), anyString());
+        verify(runService, never()).createQueuedForIssue(any(), any(), any());
+    }
+
+    @Test
+    void empty_or_partial_page_is_treated_as_the_last_page() {
+        stubPickPreconditions();
+        stubSearchPage(0, new IssuePageResponse(List.of(), 0, 20, 0));
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(almClient, times(1)).search(any(), any(), any(), any(), any(), any(), anyString());
+        verify(runService, never()).createQueuedForIssue(any(), any(), any());
+    }
+
+    @Test
+    void budget_and_project_cap_rejections_on_first_page_also_advance_paging() {
+        stubPickPreconditions();
+        IssueResponse overBudget = issue(1L, "AGP-1", 7L);
+        IssueResponse projectFull = issue(2L, "BRD-1", 8L);
+        IssueResponse free = issue(3L, "OPS-1", 9L);
+        stubSearchPage(0, new IssuePageResponse(List.of(overBudget, projectFull), 0, 2, 3));
+        stubSearchPage(1, new IssuePageResponse(List.of(free), 1, 2, 3));
+        when(runRepository.existsByIssueKeyAndStatusIn(anyString(), eq(RunService.ACTIVE_STATUSES))).thenReturn(false);
+        when(budgetGuard.allow(7L)).thenReturn(false);
+        when(budgetGuard.allow(8L)).thenReturn(true);
+        when(budgetGuard.allow(9L)).thenReturn(true);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 8L)).thenReturn(1L);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 9L)).thenReturn(0L);
+        when(runService.createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq(null))).thenReturn(queuedRun(302L));
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(runService).createQueuedForIssue(
+                eq(new RunService.IssueRef("OPS-1", 9L, PERSONA_ID)), eq(RunTrigger.SCHEDULER), eq(null));
+        verify(runService).execute(302L);
+    }
+
     // ---- no default persona configured ----
 
     @Test

@@ -55,4 +55,13 @@ class SchedulerPropertiesTest {
         assertThat(properties("claude-sonnet-5", Map.of("AGP", "claude-opus-5-5")).modelFor(null))
                 .isEqualTo("claude-sonnet-5");
     }
+
+    @Test
+    void max_pick_pages_defaults_to_five_when_unset_or_non_positive() {
+        // AGP-52: 바인딩에서 값이 빠져 0이 들어와도 "순회 안 함"이 되면 page-0 기아가 되살아난다.
+        assertThat(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3).maxPickPages()).isEqualTo(5);
+        assertThat(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3, null, null, 0).maxPickPages()).isEqualTo(5);
+        assertThat(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3, null, null, -1).maxPickPages()).isEqualTo(5);
+        assertThat(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3, null, null, 8).maxPickPages()).isEqualTo(8);
+    }
 }

@@ -88,6 +88,8 @@ platform:
       max-concurrent-per-project: ${SCHEDULER_MAX_PER_PROJECT:1}
       default-persona-slug: ${SCHEDULER_PERSONA:jiho}
       retry-max-attempts: ${SCHEDULER_RETRY_MAX_ATTEMPTS:3}
+      # 새 이슈 픽업이 한 틱에 넘겨 보는 검색 페이지 상한(AGP-52) — 앞 페이지가 전부 걸러져도 뒤 후보가 굶지 않게.
+      max-pick-pages: ${SCHEDULER_MAX_PICK_PAGES:5}
       # 자동화 run 모델 정책(P2c) — 프로젝트별 맵 > 이 전역 기본 > 비움(워커 기본 모델).
       # 프로젝트별은 project-models.<프로젝트키> 또는 env PLATFORM_AGENT_SCHEDULER_PROJECT_MODELS_<KEY>(키 대소문자 무관).
       default-model: ${SCHEDULER_DEFAULT_MODEL:}
