@@ -73,6 +73,7 @@ public class ProcessCommandExecutor implements CommandExecutor {
         Set<String> keys = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         keys.addAll(BASE_ALLOWED_KEYS);
         if (extraEnvKeys != null) {
+            // yml의 ${WORKER_EXTRA_ENV_KEYS:}가 미설정이면 [""]로 바인딩될 수 있다 — 빈 이름을 허용 키로 넣지 않는다.
             extraEnvKeys.stream().filter(k -> k != null && !k.isBlank()).map(String::trim).forEach(keys::add);
         }
         this.allowedKeys = keys;

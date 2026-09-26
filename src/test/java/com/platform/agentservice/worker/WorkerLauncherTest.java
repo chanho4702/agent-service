@@ -104,6 +104,7 @@ class WorkerLauncherTest {
         assertThat(cloneCall.extraEnv()).isEmpty();
 
         FakeCommandExecutor.Call claudeCall = commandExecutor.calls.get(1);
+        // 인증 키 밖의 초과 키가 없는지만 본다 — 값은 호스트 env에 달려 있어 포지티브 전달은 ProcessCommandExecutorTest 몫.
         assertThat(WorkerLauncher.WORKER_AUTH_ENV_KEYS).containsAll(claudeCall.extraEnv().keySet());
         List<String> cmd = claudeCall.command();
         assertThat(cmd.get(0)).isEqualTo("claude");

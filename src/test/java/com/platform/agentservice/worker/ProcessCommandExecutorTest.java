@@ -10,8 +10,12 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.time.Duration;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -95,8 +99,10 @@ class ProcessCommandExecutorTest {
     @Test
     @EnabledOnOs(OS.WINDOWS)
     void real_child_process_sees_only_curtained_env(@TempDir Path cwd) {
+        // 탐침을 주입 맵에만 심으면 clear()가 빠져도 통과한다(ProcessBuilder가 미리 채우는 건 실제 OS env라
+        // 탐침이 애초에 없다). 그래서 자식이 본 키 전체가 허용 집합 안인지 본다 — 화이트리스트 밖의 실제 OS
+        // 변수(PROCESSOR_IDENTIFIER·OS 등)가 하나라도 새면 걸린다.
         Map<String, String> parent = new HashMap<>(System.getenv());
-        parent.put("AGENT_CURTAIN_LEAK_PROBE", "must-not-leak");
         parent.put("AGENT_CURTAIN_HATCH_PROBE", "hatch-value");
         ProcessCommandExecutor executor = new ProcessCommandExecutor(List.of("agent_curtain_hatch_probe"), parent);
 
@@ -104,11 +110,23 @@ class ProcessCommandExecutorTest {
                 Map.of("AGENT_TEST_ENV_VAR", "worker-value"), Duration.ofSeconds(10));
 
         assertThat(result.exitCode()).isZero();
-        assertThat(result.stdout())
-                .doesNotContain("AGENT_CURTAIN_LEAK_PROBE")
-                .contains("AGENT_CURTAIN_HATCH_PROBE=hatch-value")
-                .contains("AGENT_TEST_ENV_VAR=worker-value")
-                .containsIgnoringCase("PATH=");
+        Map<String, String> childEnv = result.stdout().lines()
+                .filter(line -> line.indexOf('=') > 0)
+                .collect(Collectors.toMap(line -> line.substring(0, line.indexOf('=')).toUpperCase(Locale.ROOT),
+                        line -> line.substring(line.indexOf('=') + 1), (a, b) -> a));
+        // cmd.exe는 PROMPT가 없으면 스스로 기본값 $P$G를 넣는다 — 그 값일 때만 커튼 밖 키로 치지 않는다
+        // (부모에서 샌 PROMPT라면 호스트 값이 보여 여기서 걸린다).
+        if ("$P$G".equals(childEnv.get("PROMPT"))) {
+            childEnv.remove("PROMPT");
+        }
+        Set<String> permitted = new HashSet<>(ProcessCommandExecutor.BASE_ALLOWED_KEYS);
+        permitted.add("AGENT_CURTAIN_HATCH_PROBE");
+        permitted.add("AGENT_TEST_ENV_VAR");
+
+        assertThat(permitted).containsAll(childEnv.keySet());
+        assertThat(childEnv).containsKey("PATH")
+                .containsEntry("AGENT_CURTAIN_HATCH_PROBE", "hatch-value")
+                .containsEntry("AGENT_TEST_ENV_VAR", "worker-value");
     }
 
     @Test
