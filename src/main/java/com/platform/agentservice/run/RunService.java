@@ -47,9 +47,11 @@ import java.util.Set;
  *
  * <p><b>T6b 추가</b>: 위 전제가 완전히는 맞지 않게 됐다 — {@link #linkCommits}가 커밋
  * 파서로 워크스페이스의 git 로그를 훑어 이슈에 COMMIT 웹링크를 남기려면 실제 경로가
- * 필요하다. DB 컬럼({@code Run.workspacePath})은 여전히 갱신하지 않고(엔티티 변경 없음),
- * {@link WorkerResult#workspacePath()}가 대신 {@link WorkerLauncher#launch}가 실제로 만든
- * 경로를 실어 나른다 — {@link #applyOutcome}에서만 쓰고 버린다.
+ * 필요하다. {@link WorkerResult#workspacePath()}가 {@link WorkerLauncher#launch}가 실제로
+ * 만든 경로를 실어 나른다. T6b 당시에는 DB 컬럼({@code Run.workspacePath})을 갱신하지
+ * 않고 {@link #applyOutcome}에서만 쓰고 버렸지만, P2c(D-P2c-1)부터는 REVIEW·반려-fix
+ * run이 원 TASK run의 워크스페이스를 재사용해야 하므로 {@code recordSessionAndLedger}가
+ * 이 경로를 {@code Run.recordWorkspace}로 실제로 영속화한다.
  */
 @Slf4j
 @Service
