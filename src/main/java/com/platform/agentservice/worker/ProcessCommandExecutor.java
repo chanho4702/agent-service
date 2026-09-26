@@ -56,7 +56,7 @@ public class ProcessCommandExecutor implements CommandExecutor {
      * git이 {@code ~/.gitconfig}(user.name/email·safe.directory·credential helper)를 못 읽어 워커
      * 커밋이 "Please tell me who you are"로 실패하고, LANG/LC_ALL이 없으면 C 로케일이 되어 git이
      * 한글 경로를 이스케이프한다. 전부 경로·로케일 값일 뿐 자격증명이 아니라 커튼 목적(비밀 차단)과
-     * 충돌하지 않는다. Windows에서는 이 키들이 없어 no-op이다.
+     * 충돌하지 않는다. Windows에서는 대개 없고, 있어도(Git Bash 셸 경유 등, HOME=USERPROFILE과 같은 위치) 무해하다.
      */
     static final Set<String> BASE_ALLOWED_KEYS = Set.of(
             "PATH", "PATHEXT", "SYSTEMROOT", "SYSTEMDRIVE", "COMSPEC", "WINDIR",
