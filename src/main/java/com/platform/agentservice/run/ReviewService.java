@@ -8,6 +8,7 @@ import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.common.error.NotFoundException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.stereotype.Service;
 
 import java.util.Optional;
@@ -137,8 +138,18 @@ public class ReviewService {
         return schedulerProperties.modelFor(RunService.projectKeyOf(task.getIssueKey()));
     }
 
+    /**
+     * run은 이미 QUEUED로 커밋됐다 — 스레드풀 포화로 제출이 거부돼도 여기서 삼킨다. 새면 호출자가 "생성 실패"로
+     * 잘못 기록하고 안내 코멘트도 빠지며, 반려 경로에서는 반려 run이 "FAILED로 남아 사람 재개 대상"으로 보이는데
+     * fix run(QUEUED)도 이미 있어 이중 상태가 된다.
+     */
     private void submit(long runId) {
-        runServiceProvider.getObject().execute(runId);
+        try {
+            runServiceProvider.getObject().execute(runId);
+        } catch (TaskRejectedException e) {
+            log.warn("run 실행 제출이 거부돼 QUEUED로 남깁니다 — 스케줄러가 켜져 있으면 드레인 틱이 집어갑니다: id={} error={}",
+                    runId, e.getMessage());
+        }
     }
 
     private void warnUnverified(Run run, String reason) {

@@ -203,7 +203,8 @@ USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.proje
 리뷰 I3) — 새 이슈 픽업뿐 아니라 QUEUED continuation 드레인, 게이트 승인, BLOCKED/FAILED
 사람 재개까지 **전부** 이 지점을 거치므로 어느 경로로 실행이 트리거되든 예외 없이 차단된다.
 거부된 run은 실패 처리하지 않고 QUEUED로 그대로 둔다 — 스위치를 끄거나 캡이 회복되면 다음
-드레인 틱이 재시도 카운트 소모 없이 다시 집어간다.
+드레인 틱이 재시도 카운트 소모 없이 다시 집어간다. 단 **스케줄러 off 환경에서는 킬스위치/캡 해제 후
+자동 재개가 없다**(드레인 부재) — 그 run을 cancel한 뒤 재요청하거나 스케줄러를 켠다.
 
 ### 5.3 게이트 승인 흐름
 
@@ -247,7 +248,8 @@ run을 띄운다.
   현재 409(기존 `DownstreamErrors` 매핑 그대로 — 404로 세분화는 AGP-25).
 - 같은 이슈에 활성 run(QUEUED/RUNNING/WAITING_APPROVAL/BLOCKED)이 있으면 409.
 - `instruction`은 앞뒤 공백을 자른 뒤 저장되고, 워커 프롬프트에 `<사용자-지시>` 경계 섹션으로
-  실린다(§5.6). 재시도·게이트 승인·재개·반려-fix continuation까지 승계된다.
+  실린다(§5.6). 재시도·게이트 승인·재개·반려-fix continuation과 REVIEW run까지 승계된다 — 리뷰어도
+  변경이 지시를 따르는지 확인한다(지시 위반은 반려 사유).
 - 실행 제출은 컨트롤러가 `RunService.execute`(`@Async`) 프록시로 한다. 워커 스레드풀이 포화돼
   제출이 거부돼도 run은 이미 QUEUED로 커밋됐으므로 201을 돌려준다 — 다음 드레인 틱이 집어간다
   (스케줄러가 꺼져 있으면 드레인도 없으므로 QUEUED에 머문다).
@@ -311,8 +313,8 @@ done 전환은 리뷰 통과 시 리뷰어만 하도록 바꿨다. 구현은 `Re
 + `WorkerLauncher`(REVIEW 프롬프트·워크스페이스 승계).
 
 **운영 경고 — 배포 전에 반드시 읽을 것.** `REVIEW_ENABLED` 기본값이 **true**다. 이 상태에서
-`REVIEW_PERSONA`를 설정하지 않고 배포하면 리뷰를 띄울 수 없으므로 **모든 무인 TASK가 미확정으로
-멈춘다**(run은 DONE, 이슈는 inprogress + 경고 코멘트). 배포 전에:
+`REVIEW_PERSONA`를 설정하지 않고 배포하면 리뷰를 띄울 수 없으므로 **모든 TASK run(스케줄러 무인 run과
+USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogress + 경고 코멘트). 배포 전에:
 
 1. §1(MCP 접속 가이드)의 페르소나 생성 절차로 **`role=REVIEWER`** 페르소나를 만든다(대상 프로젝트
    EDITOR 이상 grant — 코멘트·상태 전환·위키 보고서를 써야 한다). 작업 페르소나(`SCHEDULER_PERSONA`

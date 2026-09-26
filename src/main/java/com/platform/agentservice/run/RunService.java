@@ -20,6 +20,8 @@ import com.platform.agentservice.worker.WorkerResult;
 import com.platform.common.error.ConflictException;
 import com.platform.common.error.NotFoundException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -93,12 +95,15 @@ public class RunService {
     private final CommitLinkParser commitLinkParser;
     private final BudgetGuard budgetGuard;
     private final ReviewService reviewService;
+    /** 재시도 continuation을 {@code @Async} 프록시로 제출하기 위한 자기 지연 조회 — {@code this.execute()}는 프록시를 타지 않는다. */
+    private final ObjectProvider<RunService> selfProvider;
 
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
                        SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
-                       CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService) {
+                       CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService,
+                       ObjectProvider<RunService> selfProvider) {
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -112,6 +117,7 @@ public class RunService {
         this.commitLinkParser = commitLinkParser;
         this.budgetGuard = budgetGuard;
         this.reviewService = reviewService;
+        this.selfProvider = selfProvider;
     }
 
     /** Dispatcher가 새 이슈를 픽업할 때 넘기는 최소 참조. */
@@ -532,20 +538,34 @@ public class RunService {
     }
 
     /**
-     * attempt &lt; 한도면 continuation(QUEUED)을 만들어 다음 Dispatcher 틱의 drain이
-     * 집어가게 한다(여기서 즉시 실행하지 않는다 — Dispatcher 책임과 분리). 한도에 닿으면
+     * attempt &lt; 한도면 continuation(QUEUED)을 저장하고 곧바로 실행 제출한다. 한도에 닿으면
      * BLOCKED로 에스컬레이션한다.
+     *
+     * <p>드레인에만 맡기면 스케줄러가 꺼진 환경(USER·REVIEW run만 도는 설치)에서는 continuation이
+     * 영원히 QUEUED다 — 활성 상태라 같은 이슈 POST도 409, resume은 BLOCKED·FAILED만 받아 복구
+     * 경로가 없다. 스케줄러가 켜져 있으면 드레인 틱도 같은 run을 집을 수 있지만, {@link #execute}의
+     * QUEUED 가드와 RUNNING 선커밋 + {@code @Version} 낙관적 락이 이중 실행을 막는다.
      */
     private void handleRetryOrBlock(Run failedRun) {
         int maxAttempts = schedulerProperties.retryMaxAttempts();
         if (failedRun.getAttempt() < maxAttempts) {
             Run next = runRepository.save(Run.continuation(failedRun));
             commentBestEffort(failedRun, "🔁 재시도 " + next.getAttempt() + "/" + maxAttempts);
+            submitRetry(next.getId());
         } else {
             String blockReason = maxAttempts + "회 실패 — 사람 확인 필요";
             failedRun.block(blockReason);
             runRepository.save(failedRun);
             commentBestEffort(failedRun, "⛔ " + blockReason);
+        }
+    }
+
+    private void submitRetry(long runId) {
+        try {
+            selfProvider.getObject().execute(runId);
+        } catch (TaskRejectedException e) {
+            log.warn("재시도 run 실행 제출이 거부돼 QUEUED로 남깁니다 — 스케줄러가 켜져 있으면 드레인 틱이 집어갑니다: id={} error={}",
+                    runId, e.getMessage());
         }
     }
 

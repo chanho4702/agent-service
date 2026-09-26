@@ -66,7 +66,7 @@ public class RunController {
         runService.cancel(id);
     }
 
-    /** BLOCKED run만 대상 — 그 외 상태면 {@link RunResumeService#resume}이 409를 던진다. */
+    /** BLOCKED·FAILED run만 대상 — 그 외 상태면 {@link RunResumeService#resume}이 409를 던진다. */
     @PostMapping("/{id}/resume")
     @PreAuthorize("hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.NO_CONTENT)

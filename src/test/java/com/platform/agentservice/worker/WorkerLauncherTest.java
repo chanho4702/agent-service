@@ -549,6 +549,34 @@ class WorkerLauncherTest {
         assertThat(prompt).endsWith("runId=" + RUN_ID + "\n");
     }
 
+    /** 최종 리뷰 I1 — REVIEW run도 USER 지시를 승계하고, 리뷰어는 지시 준수를 판정 기준에 넣는다. */
+    @Test
+    void review_prompt_of_a_user_run_renders_the_instruction_and_asks_to_check_compliance() {
+        Run task = Run.queuedUser("AGP-9", 1L, PERSONA_ID, "harness://local", null, "로그인 버그부터 고쳐");
+        ReflectionTestUtils.setField(task, "id", 10L);
+        task.start("pending", null);
+        task.recordWorkspace(workDir.resolve("run-10").toString());
+        task.complete();
+        Run review = Run.queuedReview(task, PERSONA_ID, null);
+        ReflectionTestUtils.setField(review, "id", RUN_ID);
+
+        // buildJob과 같은 배선 — WorkerJob의 지시문은 run.getInstruction()에서 온다.
+        String prompt = launcherWithReview(true).buildPrompt(review,
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of(), review.getInstruction()));
+
+        assertThat(prompt).containsSubsequence("<사용자-지시>", "로그인 버그부터 고쳐", "</사용자-지시>",
+                "## 리뷰 규약", "변경이 위 <사용자-지시>를 따르는지도 확인하라(지시 위반은 반려 사유다)");
+    }
+
+    @Test
+    void review_prompt_without_instruction_has_no_compliance_line() {
+        String prompt = launcherWithReview(true).buildPrompt(reviewRun(workDir.resolve("run-10")),
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(prompt).doesNotContain("<사용자-지시>");
+        assertThat(prompt).doesNotContain("따르는지도 확인하라");
+    }
+
     @Test
     void task_prompt_forbids_done_transition_when_review_is_enabled() {
         String prompt = launcherWithReview(true).buildPrompt(run(null),

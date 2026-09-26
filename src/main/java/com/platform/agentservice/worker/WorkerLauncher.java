@@ -228,7 +228,7 @@ public class WorkerLauncher {
         }
 
         if (run.getType() == RunType.REVIEW) {
-            appendReviewConvention(sb, run);
+            appendReviewConvention(sb, run, instruction != null && !instruction.isBlank());
         } else {
             appendTaskConvention(sb, run);
         }
@@ -260,9 +260,12 @@ public class WorkerLauncher {
      * REVIEW run 규약(D-P2c-2) — 판정 채널은 report_result status 하나다. 반려 코멘트가 다음 fix run의 입력이므로
      * 구체적 지적을 요구하고, 리뷰어가 코드를 고치면 검증과 작업의 주체가 섞이므로 금지한다.
      */
-    private void appendReviewConvention(StringBuilder sb, Run run) {
+    private void appendReviewConvention(StringBuilder sb, Run run, boolean hasInstruction) {
         sb.append("## 리뷰 규약\n");
         sb.append("- 너는 리뷰어 페르소나다. 이 워크스페이스에서 `git diff origin/main..HEAD`(작업자의 로컬 커밋)를 검토하라.\n");
+        if (hasInstruction) {
+            sb.append("- 변경이 위 <사용자-지시>를 따르는지도 확인하라(지시 위반은 반려 사유다).\n");
+        }
         sb.append("- 코드를 직접 고치거나 커밋하지 마라. 판정만 한다.\n");
         sb.append("- 진행 상황은 report_progress(runId=").append(run.getId()).append(", message=...)로 보고할 수 있다.\n");
         sb.append("- 통과: add_comment로 승인 사유를 남긴 뒤 update_issue_status(done)로 이슈를 완료 처리하고 report_result(runId=")

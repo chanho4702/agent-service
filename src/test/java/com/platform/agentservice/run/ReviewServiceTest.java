@@ -14,6 +14,7 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.core.task.TaskRejectedException;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.util.List;
@@ -26,6 +27,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.ArgumentMatchers.contains;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -142,8 +144,36 @@ class ReviewServiceTest {
         assertThat(review.getWorkspacePath()).isEqualTo(WORKSPACE);
         assertThat(review.getParentRunId()).isEqualTo(10L);
         assertThat(review.getStatus()).isEqualTo(RunStatus.QUEUED);
+        // 리뷰어가 USER 지시를 모르면 지시대로 한 변경을 반려 → fix가 지시를 따라 다시 → 예산 소진 루프(최종 리뷰 I1).
+        assertThat(review.getInstruction()).isEqualTo("지시문");
         verify(runService).execute(99L);
         verify(almClient).addComment(eq(1L), contains("검증 run 99"), eq(WORKER_BEARER));
+    }
+
+    @Test
+    void rejected_review_submission_is_swallowed_because_the_run_is_already_queued() {
+        when(personaRepository.findBySlug("sora")).thenReturn(Optional.of(reviewer));
+        doThrow(new TaskRejectedException("pool full")).when(runService).execute(99L);
+
+        service(enabledWith("sora")).onRunDone(doneTask(WORKSPACE, 1));
+
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo(RunStatus.QUEUED);
+        verify(almClient).addComment(eq(1L), contains("검증 run 99"), eq(WORKER_BEARER));
+    }
+
+    @Test
+    void rejected_fix_submission_leaves_the_review_failed_not_blocked() {
+        Run task = doneTask(WORKSPACE, 1);
+        Run review = failedReview(task);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+        doThrow(new TaskRejectedException("pool full")).when(runService).execute(99L);
+
+        service(enabledWith("sora")).onReviewRejected(review);
+
+        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
+        verify(almClient).addComment(eq(1L), contains("리뷰 반려 — 수정 run 99"), eq(REVIEWER_BEARER));
     }
 
     @Test

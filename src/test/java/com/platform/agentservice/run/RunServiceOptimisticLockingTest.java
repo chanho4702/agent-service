@@ -19,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -98,10 +99,13 @@ class RunServiceOptimisticLockingTest {
         BudgetGuard budgetGuard = Mockito.mock(BudgetGuard.class);
         ReviewService reviewService = Mockito.mock(ReviewService.class);
         when(budgetGuard.allow(anyLong())).thenReturn(true);
+        @SuppressWarnings("unchecked")
+        ObjectProvider<RunService> selfProvider = Mockito.mock(ObjectProvider.class);
+        when(selfProvider.getObject()).thenReturn(Mockito.mock(RunService.class));
 
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser, budgetGuard, reviewService);
+                commitLinkParser, budgetGuard, reviewService, selfProvider);
     }
 
     @AfterEach

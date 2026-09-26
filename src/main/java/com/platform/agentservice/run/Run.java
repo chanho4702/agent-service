@@ -154,6 +154,8 @@ public class Run {
         r.trigger = parent.trigger;
         r.harnessRef = parent.harnessRef;
         r.model = model;
+        // 리뷰어가 USER 지시를 모르면 지시대로 한 변경을 반려하고, 반려-fix가 지시를 따라 되돌리는 루프가 예산을 태운다.
+        r.instruction = parent.instruction;
         r.workspacePath = parent.workspacePath;
         r.parentRunId = parent.id;
         r.status = RunStatus.QUEUED;
