@@ -59,7 +59,10 @@ public class Run {
     @Column(columnDefinition = "text") private String error;
     /** USER 트리거 run의 사람 지시문 — 재시도 continuation·반려-fix continuation까지 승계된다(지시 맥락을 잃지 않게). */
     @Column(columnDefinition = "text") private String instruction;
-    /** REVIEW run → 검증 대상 TASK run, 반려-fix continuation → 반려한 REVIEW run. 재시도 continuation에는 비워 둔다. */
+    /**
+     * REVIEW run → 검증 대상 TASK run, 반려-fix continuation → 반려한 REVIEW run. 일반 TASK의 재시도
+     * continuation에는 비워 두고, REVIEW·반려-fix의 재시도는 부모를 그대로 잇는다({@link #continuation}).
+     */
     private Long parentRunId;
     private Instant startedAt;
     private Instant endedAt;
@@ -107,9 +110,23 @@ public class Run {
         r.model = prior.model;
         // 재시도·게이트 승인·사람 재개도 같은 USER 요청의 연장이라 지시문을 잃으면 안 된다.
         r.instruction = prior.instruction;
+        if (prior.isWorkspaceLineage()) {
+            // REVIEW·반려-fix는 푸시되지 않은 앞선 커밋 위에서만 의미가 있다(D-P2c-1) — 재시도가 새로 clone하면
+            // 검증·수정 대상이 사라진다. 계보(parentRunId)도 이어야 REVIEW 재시도 후 반려 시 원 TASK를 찾는다.
+            r.workspacePath = prior.workspacePath;
+            r.parentRunId = prior.parentRunId;
+        }
         r.status = RunStatus.QUEUED;
         r.attempt = prior.attempt + 1;
         return r;
+    }
+
+    /**
+     * 원 TASK의 워크스페이스를 이어 쓰는 run인가 — REVIEW 전부, 그리고 부모가 있는 TASK(반려-fix와 그 재시도).
+     * 부모 없는 일반 TASK는 재시도 시 새로 clone한다(P2a 동작 유지).
+     */
+    public boolean isWorkspaceLineage() {
+        return type == RunType.REVIEW || (type == RunType.TASK && parentRunId != null);
     }
 
     /** 사람이 지시문을 붙여 직접 요청한 TASK run(AGP-42) — 트리거는 항상 USER다. */

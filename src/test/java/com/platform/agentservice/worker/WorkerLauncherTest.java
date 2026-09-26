@@ -6,6 +6,7 @@ import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.persona.PersonaRole;
 import com.platform.agentservice.pat.dto.PatCreateRequest;
 import com.platform.agentservice.pat.dto.PatCreatedResponse;
+import com.platform.agentservice.run.ReviewProperties;
 import com.platform.agentservice.run.Run;
 import com.platform.agentservice.run.RunTokenService;
 import com.platform.agentservice.run.RunTrigger;
@@ -68,7 +69,8 @@ class WorkerLauncherTest {
                 Map.of());
         HarnessMaterializer materializer = new HarnessMaterializer(properties);
         RunTokenService runTokenService = new RunTokenService(patService, personaRepository);
-        launcher = new WorkerLauncher(properties, materializer, commandExecutor, runTokenService);
+        launcher = new WorkerLauncher(properties, materializer, commandExecutor, runTokenService,
+                new ReviewProperties(false, null, null));
     }
 
     private Run run(String model) {
@@ -276,9 +278,12 @@ class WorkerLauncherTest {
                 "규약이 우선한다", "## 작업 규약");
     }
 
-    /** 지시문 없는 자동화 run의 프롬프트는 P2a와 바이트 단위로 같아야 한다 — 기존 워커 동작 불변(P2c T2). */
+    /**
+     * 지시문 없는 자동화 run의 프롬프트는 P2a와 바이트 단위로 같아야 한다 — 기존 워커 동작 불변(P2c T2).
+     * 리뷰를 켜면 done 전환 금지 한 줄이 더해지므로(P2c T3) 이 불변식은 리뷰를 끈 레거시 모드에 대해서만 선다.
+     */
     @Test
-    void prompt_without_instruction_is_byte_identical_to_p2a_prompt() {
+    void prompt_without_instruction_is_byte_identical_to_p2a_prompt_when_review_is_disabled() {
         String prompt = launcher.buildPrompt(run(null),
                 new WorkerJob("https://example.com/repo.git", "제목", "본문", List.of("댓글1")));
 
@@ -423,6 +428,157 @@ class WorkerLauncherTest {
 
         assertThat(result.timedOut()).isTrue();
         verify(patService).revoke(9L);
+    }
+
+    // ---- P2c T3: 기존 워크스페이스 모드 · 리뷰 프롬프트 · done 전환 금지 규약 ----
+
+    private WorkerLauncher launcherWithReview(boolean enabled) {
+        return new WorkerLauncher(properties, new HarnessMaterializer(properties), commandExecutor,
+                new RunTokenService(patService, personaRepository), new ReviewProperties(enabled, "sora", null));
+    }
+
+    /** 실경로가 기록된 DONE TASK(id=10) — REVIEW·반려-fix의 부모. */
+    private Run doneTask(Path workspace) {
+        Run task = Run.queued(RunType.TASK, "AGP-9", 1L, PERSONA_ID, RunTrigger.SCHEDULER, "harness://local", null);
+        ReflectionTestUtils.setField(task, "id", 10L);
+        task.start("pending", null);
+        task.recordWorkspace(workspace.toString());
+        task.complete();
+        return task;
+    }
+
+    private Run reviewRun(Path workspace) {
+        Run review = Run.queuedReview(doneTask(workspace), PERSONA_ID, null);
+        ReflectionTestUtils.setField(review, "id", RUN_ID);
+        return review;
+    }
+
+    @Test
+    void inherited_workspace_skips_clone_and_harness_and_runs_claude_in_it() throws IOException {
+        Path inherited = Files.createDirectories(workDir.resolve("run-10"));
+        Files.writeString(inherited.resolve("worker-commit.txt"), "앞선 작업");
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"ok\"}", "", false));
+
+        WorkerResult result = launcherWithReview(true).launch(reviewRun(inherited),
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(commandExecutor.calls).hasSize(1); // git clone 없음
+        FakeCommandExecutor.Call call = commandExecutor.calls.get(0);
+        assertThat(call.command().get(0)).isEqualTo("claude");
+        assertThat(call.cwd()).isEqualTo(inherited);
+        assertThat(result.workspacePath()).isEqualTo(inherited.toString());
+        // 앞선 커밋이 있는 워크스페이스는 그대로 남고, 새 run-<id> 디렉터리는 만들지 않는다.
+        assertThat(Files.exists(inherited.resolve("worker-commit.txt"))).isTrue();
+        assertThat(Files.exists(workDir.resolve("run-" + RUN_ID))).isFalse();
+        verify(patService).revoke(9L);
+    }
+
+    @Test
+    void inherited_workspace_mode_puts_mcp_config_in_a_sibling_dir_named_after_this_run_and_deletes_it() throws IOException {
+        Path inherited = Files.createDirectories(workDir.resolve("run-10"));
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"ok\"}", "", false));
+
+        launcherWithReview(true).launch(reviewRun(inherited), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        List<String> cmd = commandExecutor.calls.get(0).command();
+        Path expectedDir = workDir.resolve("run-" + RUN_ID + "-cfg");
+        assertThat(cmd.get(cmd.indexOf("--mcp-config") + 1)).isEqualTo(expectedDir.resolve(".mcp-run.json").toString());
+        assertThat(commandExecutor.mcpConfigContentAtCall).contains("Bearer agp_secret-token");
+        assertThat(Files.exists(expectedDir)).isFalse();
+        assertThat(Files.exists(workDir.resolve("run-10-cfg"))).isFalse();
+        assertThat(Files.exists(inherited.resolve(".mcp-run.json"))).isFalse();
+    }
+
+    @Test
+    void pending_workspace_falls_back_to_fresh_clone() {
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"ok\"}", "", false));
+        Run run = run(null);
+        ReflectionTestUtils.setField(run, "workspacePath", "pending");
+
+        launcherWithReview(true).launch(run, new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(commandExecutor.calls.get(0).command()).containsExactly("git", "clone", "https://example.com/repo.git", ".");
+        assertThat(commandExecutor.calls.get(0).cwd()).isEqualTo(workDir.resolve("run-" + RUN_ID));
+    }
+
+    /** 새 clone 위의 리뷰는 빈 diff를 통과시킬 수 있다 — 승계 워크스페이스가 사라진 계보 run은 clone 없이 실패한다. */
+    @Test
+    void vanished_inherited_workspace_fails_without_cloning_or_issuing_a_token() {
+        WorkerResult result = launcherWithReview(true).launch(reviewRun(workDir.resolve("run-10-gone")),
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(result.succeeded()).isFalse();
+        assertThat(result.rawTail()).contains("승계할 워크스페이스가 없습니다");
+        assertThat(result.workspacePath()).isNull();
+        assertThat(commandExecutor.calls).isEmpty();
+        verify(patService, org.mockito.Mockito.never()).issue(any(), org.mockito.ArgumentMatchers.anyLong());
+    }
+
+    @Test
+    void fix_run_with_vanished_workspace_also_fails_instead_of_cloning() {
+        Run fix = Run.fixContinuation(doneTask(workDir.resolve("run-10-gone")), 11L);
+        ReflectionTestUtils.setField(fix, "id", RUN_ID);
+
+        WorkerResult result = launcherWithReview(true).launch(fix,
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(result.succeeded()).isFalse();
+        assertThat(commandExecutor.calls).isEmpty();
+    }
+
+    @Test
+    void review_prompt_asks_for_diff_review_verdict_via_report_result_and_forbids_code_changes() {
+        String prompt = launcherWithReview(true).buildPrompt(reviewRun(workDir.resolve("run-10")),
+                new WorkerJob("https://example.com/repo.git", "이슈 제목", "이슈 본문", List.of("사람: 로그인 먼저")));
+
+        assertThat(prompt).containsSubsequence("<이슈-내용>", "이슈 제목", "</이슈-내용>",
+                "<코멘트>", "사람: 로그인 먼저", "</코멘트>", "규약이 우선한다", "## 리뷰 규약");
+        assertThat(prompt).contains("리뷰어 페르소나");
+        assertThat(prompt).contains("git diff origin/main..HEAD");
+        assertThat(prompt).contains("코드를 직접 고치거나 커밋하지 마라");
+        assertThat(prompt).contains("update_issue_status(done)");
+        assertThat(prompt).contains("report_result(runId=" + RUN_ID + ", status=DONE");
+        assertThat(prompt).contains("구체적인 지적사항");
+        assertThat(prompt).contains("report_result(runId=" + RUN_ID + ", status=FAILED");
+        assertThat(prompt).contains("리뷰 보고서(위키)는 통과 시에만");
+        assertThat(prompt).doesNotContain("## 작업 규약");
+        assertThat(prompt).endsWith("runId=" + RUN_ID + "\n");
+    }
+
+    @Test
+    void task_prompt_forbids_done_transition_when_review_is_enabled() {
+        String prompt = launcherWithReview(true).buildPrompt(run(null),
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(prompt).contains("이슈를 done 계열 상태로 바꾸지 마라");
+        assertThat(prompt).contains("done 전환은 검증(리뷰) run이 통과한 뒤 리뷰어가 한다");
+        assertThat(prompt).containsSubsequence("## 작업 규약", "done 계열 상태로 바꾸지 마라", "report_result(runId=" + RUN_ID);
+    }
+
+    @Test
+    void task_prompt_keeps_legacy_wording_when_review_is_disabled() {
+        String prompt = launcherWithReview(false).buildPrompt(run(null),
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(prompt).doesNotContain("done 계열 상태로 바꾸지 마라");
+        assertThat(prompt).doesNotContain("## 리뷰 규약");
+    }
+
+    @Test
+    void fix_run_prompt_says_to_build_on_previous_commits_following_review_comments() {
+        Run fix = Run.fixContinuation(doneTask(workDir.resolve("run-10")), 11L);
+        ReflectionTestUtils.setField(fix, "id", RUN_ID);
+
+        String prompt = launcherWithReview(true).buildPrompt(fix,
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of("리뷰어: 테스트 누락")));
+
+        assertThat(prompt).contains("이전 run의 커밋이 이미 있다");
+        assertThat(prompt).contains("## 작업 규약");
+        assertThat(prompt).contains("이슈를 done 계열 상태로 바꾸지 마라");
     }
 
     /** 실행 없이 커맨드 호출을 기록만 하는 페이크 — 큐에서 순서대로 결과를 꺼내 반환한다. */

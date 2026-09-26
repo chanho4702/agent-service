@@ -66,6 +66,7 @@ class RunServiceTest {
     @Mock UsageLedgerRepository usageLedgerRepository;
     @Mock CommitLinkParser commitLinkParser;
     @Mock BudgetGuard budgetGuard;
+    @Mock ReviewService reviewService;
 
     private RunService runService;
     private SchedulerProperties schedulerProperties;
@@ -80,7 +81,7 @@ class RunServiceTest {
         budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser, budgetGuard);
+                commitLinkParser, budgetGuard, reviewService);
 
         Persona persona = Persona.of(PERSONA_MEMBER_ID, "jiho", PersonaRole.BACKEND, "지호", "🔧", null);
         ReflectionTestUtils.setField(persona, "id", PERSONA_ID);
@@ -139,7 +140,7 @@ class RunServiceTest {
                 "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"));
         return new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, props, budgetProperties,
-                commitLinkParser, budgetGuard);
+                commitLinkParser, budgetGuard, reviewService);
     }
 
     @Test
@@ -914,7 +915,7 @@ class RunServiceTest {
         RunService serviceWithLowercasedRepos = new RunService(runRepository, almClient, issueClaimSupport,
                 tokenService, personaRepository, workerLauncher, lowercasedRepos, usageLedgerRepository,
                 schedulerProperties, new com.platform.agentservice.budget.BudgetProperties(
-                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser, budgetGuard);
+                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser, budgetGuard, reviewService);
 
         Run run = queuedRun(42L);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
@@ -1027,5 +1028,174 @@ class RunServiceTest {
 
         assertThat(summaries).hasSize(1);
         verify(runRepository, never()).findByStatus(any());
+    }
+
+    // ---- P2c T3 (AGP-44): 두 종결 경로가 검증 흐름에 합류한다 ----
+
+    private static final String REVIEW_WORKSPACE = "C:\\agent-work\\run-10";
+
+    /** 실경로가 기록된 DONE TASK(id=10)를 부모로 둔 QUEUED REVIEW run. */
+    private Run queuedReviewRun(long id) {
+        Run task = queuedRun(10L);
+        task.start("pending", null);
+        task.recordWorkspace(REVIEW_WORKSPACE);
+        task.complete();
+        Run review = Run.queuedReview(task, PERSONA_ID, null);
+        ReflectionTestUtils.setField(review, "id", id);
+        return review;
+    }
+
+    private void stubExecuteCollaborators(long runId, Run run, boolean claims) {
+        when(runRepository.findById(runId)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+        IssueResponse issue = issue(1L, ISSUE_KEY, "inprogress", 2);
+        if (claims) {
+            when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(issue);
+        }
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        org.mockito.Mockito.lenient().when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue);
+        org.mockito.Mockito.lenient().when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+    }
+
+    private static WorkerResult success(String workspace) {
+        return new WorkerResult(0, false, "ok", null, null, 0L, 0L, null, "raw", workspace);
+    }
+
+    @Test
+    void path_A_process_success_completes_task_then_hands_it_to_review_hook() {
+        Run run = queuedRun(42L);
+        stubExecuteCollaborators(42L, run, true);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(success("C:\\agent-work\\run-42"));
+
+        runService.execute(42L);
+
+        ArgumentCaptor<Run> done = ArgumentCaptor.forClass(Run.class);
+        verify(reviewService).onRunDone(done.capture());
+        assertThat(done.getValue().getId()).isEqualTo(42L);
+        assertThat(done.getValue().getStatus()).isEqualTo(RunStatus.DONE);
+        // 리뷰어가 같은 워크스페이스를 쓰려면 훅 시점에 실경로가 이미 기록돼 있어야 한다(D-P2c-1).
+        assertThat(done.getValue().getWorkspacePath()).isEqualTo("C:\\agent-work\\run-42");
+        verify(reviewService, never()).onReviewRejected(any());
+    }
+
+    @Test
+    void path_B_worker_self_reported_done_via_report_result_is_handed_to_review_hook_after_exit() {
+        Run run = queuedRun(42L);
+        stubExecuteCollaborators(42L, run, true);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenAnswer(inv -> {
+            run.complete(); // MCP report_result(DONE)이 launch 반환 전에 커밋된 상황
+            return success("C:\\agent-work\\run-42");
+        });
+
+        runService.execute(42L);
+
+        verify(reviewService).onRunDone(run);
+        assertThat(run.getWorkspacePath()).isEqualTo("C:\\agent-work\\run-42");
+    }
+
+    @Test
+    void review_hook_failure_leaves_the_task_done_and_creates_no_retry() {
+        Run run = queuedRun(42L);
+        stubExecuteCollaborators(42L, run, true);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(success("C:\\agent-work\\run-42"));
+        org.mockito.Mockito.doThrow(new RuntimeException("db down")).when(reviewService).onRunDone(any());
+
+        runService.execute(42L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        assertThat(saved.getAllValues()).allSatisfy(r -> assertThat(r.getId()).isEqualTo(42L));
+    }
+
+    @Test
+    void review_self_reported_failed_is_a_rejection_not_an_infra_retry() {
+        Run review = queuedReviewRun(60L);
+        stubExecuteCollaborators(60L, review, false);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenAnswer(inv -> {
+            review.fail("반려: 테스트 없음"); // 리뷰어의 report_result(FAILED)
+            return success(REVIEW_WORKSPACE);
+        });
+
+        runService.execute(60L);
+
+        verify(reviewService).onReviewRejected(review);
+        verify(reviewService, never()).onRunDone(any());
+        // 재시도 continuation이 같이 생기면 반려-fix와 이중 실행된다.
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        assertThat(saved.getAllValues()).allSatisfy(r -> assertThat(r.getId()).isEqualTo(60L));
+    }
+
+    @Test
+    void review_self_reported_done_goes_to_review_hook_which_ignores_reviews() {
+        Run review = queuedReviewRun(60L);
+        stubExecuteCollaborators(60L, review, false);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenAnswer(inv -> {
+            review.complete();
+            return success(REVIEW_WORKSPACE);
+        });
+
+        runService.execute(60L);
+
+        assertThat(review.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(reviewService).onRunDone(review); // 무한루프 가드는 ReviewService의 type 검사(ReviewServiceTest)
+    }
+
+    @Test
+    void review_exiting_without_a_verdict_is_not_a_pass_and_retries_on_the_same_workspace() {
+        Run review = queuedReviewRun(60L);
+        stubExecuteCollaborators(60L, review, false);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(success(REVIEW_WORKSPACE));
+
+        runService.execute(60L);
+
+        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
+        assertThat(review.getError()).contains("판정");
+        verify(reviewService, never()).onRunDone(any());
+        verify(reviewService, never()).onReviewRejected(any());
+        assertReviewRetryInheritsWorkspace();
+    }
+
+    @Test
+    void review_infra_timeout_retry_inherits_workspace_and_parent() {
+        Run review = queuedReviewRun(60L);
+        stubExecuteCollaborators(60L, review, false);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
+                .thenReturn(WorkerResult.failure(-1, true, "timeout", REVIEW_WORKSPACE));
+
+        runService.execute(60L);
+
+        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
+        verify(reviewService, never()).onReviewRejected(any());
+        assertReviewRetryInheritsWorkspace();
+    }
+
+    private void assertReviewRetryInheritsWorkspace() {
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        Run retry = saved.getAllValues().stream().filter(r -> r.getId() == null).findFirst().orElseThrow();
+        assertThat(retry.getType()).isEqualTo(RunType.REVIEW);
+        assertThat(retry.getAttempt()).isEqualTo(2);
+        assertThat(retry.getWorkspacePath()).isEqualTo(REVIEW_WORKSPACE);
+        assertThat(retry.getParentRunId()).isEqualTo(10L);
+    }
+
+    @Test
+    void review_run_reads_the_issue_without_claiming_it_so_the_worker_stays_assignee() {
+        Run review = queuedReviewRun(60L);
+        stubExecuteCollaborators(60L, review, false);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenAnswer(inv -> {
+            review.complete();
+            return success(REVIEW_WORKSPACE);
+        });
+
+        runService.execute(60L);
+
+        verify(issueClaimSupport, never()).claim(anyString(), any(), anyString(), anyString());
+        ArgumentCaptor<Run> launched = ArgumentCaptor.forClass(Run.class);
+        verify(workerLauncher).launch(launched.capture(), any(WorkerJob.class));
+        assertThat(launched.getValue().getWorkspacePath()).isEqualTo(REVIEW_WORKSPACE);
     }
 }

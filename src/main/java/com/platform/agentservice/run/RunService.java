@@ -72,7 +72,8 @@ public class RunService {
     public static final Set<RunStatus> ACTIVE_STATUSES =
             EnumSet.of(RunStatus.QUEUED, RunStatus.RUNNING, RunStatus.WAITING_APPROVAL, RunStatus.BLOCKED);
 
-    private static final String PENDING_WORKSPACE = "pending";
+    /** 워커가 실경로를 보고하기 전의 자리표시값 — {@link ReviewService}가 "재사용할 워크스페이스 없음"으로 판정한다. */
+    static final String PENDING_WORKSPACE = "pending";
     /** {@code harnessRef}는 현재 전역 하네스 번들 하나뿐이다(T3) — run별 선택지가 없어 상수로 둔다. */
     private static final String DEFAULT_HARNESS_REF = "harness://default";
     private static final String CLAIM_STATUS = "inprogress";
@@ -91,12 +92,13 @@ public class RunService {
     private final BudgetProperties budgetProperties;
     private final CommitLinkParser commitLinkParser;
     private final BudgetGuard budgetGuard;
+    private final ReviewService reviewService;
 
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
                        SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
-                       CommitLinkParser commitLinkParser, BudgetGuard budgetGuard) {
+                       CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService) {
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -109,6 +111,7 @@ public class RunService {
         this.budgetProperties = budgetProperties;
         this.commitLinkParser = commitLinkParser;
         this.budgetGuard = budgetGuard;
+        this.reviewService = reviewService;
     }
 
     /** Dispatcher가 새 이슈를 픽업할 때 넘기는 최소 참조. */
@@ -253,7 +256,10 @@ public class RunService {
                 .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));
         String bearer = tokenService.bearerFor(persona.getMemberId());
 
-        IssueResponse claimed = issueClaimSupport.claim(run.getIssueKey(), persona.getMemberId(), CLAIM_STATUS, bearer);
+        // 리뷰어는 claim하지 않는다 — 담당자가 리뷰어로 바뀌면 작업자 귀속이 사라지고, 이슈는 이미 inprogress다.
+        IssueResponse claimed = run.getType() == RunType.REVIEW
+                ? almClient.getByKey(run.getIssueKey(), bearer)
+                : issueClaimSupport.claim(run.getIssueKey(), persona.getMemberId(), CLAIM_STATUS, bearer);
         List<CommentResponse> comments = almClient.comments(claimed.id(), bearer);
         List<String> recentComments = comments.stream()
                 .skip(Math.max(0, comments.size() - RECENT_COMMENTS_LIMIT))
@@ -304,6 +310,11 @@ public class RunService {
      * log-and-continue로 감싸고, 이 메서드 전체도 바깥 try/catch로 감싸 그래도 뭔가 새면
      * {@link #finishFailed}로 대체 시도한다(그 폴백조차 실패하면 로그만 남기고 포기 —
      * 더는 이 메서드가 할 수 있는 게 없다).
+     *
+     * <p><b>검증 흐름(P2c T3)</b>: 이 메서드가 두 종결 경로의 합류점이라 리뷰 훅도 여기에만 건다 — DONE이면
+     * {@link ReviewService#onRunDone}(TASK만 REVIEW를 낳는다), 리뷰어의 self-FAILED는 재시도가 아니라
+     * {@link ReviewService#onReviewRejected}. REVIEW의 인프라 실패(시간 초과·비정상 종료·판정 없는 종료)는
+     * 기존 재시도 경로를 타고, {@link Run#continuation}이 워크스페이스를 승계한다.
      */
     private void applyOutcome(long runId, WorkerResult result) {
         try {
@@ -313,12 +324,20 @@ public class RunService {
 
             Run run = runRepository.findById(runId).orElseThrow();
             if (run.getStatus() == RunStatus.FAILED) {
+                if (run.getType() == RunType.REVIEW) {
+                    // 리뷰어의 FAILED는 인프라 실패가 아니라 판정(반려)이다(D-P2c-2) — 재시도하지 않고 반려-fix로 넘긴다.
+                    safelyOnReviewRejected(run);
+                    return;
+                }
                 log.debug("워커가 스스로 report_result(FAILED)로 종결했습니다(run={}) — 재시도/차단 판단을 이어갑니다.", runId);
                 handleRetryOrBlock(run);
                 return;
             }
             if (run.getStatus() != RunStatus.RUNNING) {
                 log.debug("워커가 이미 스스로 종결했습니다(run={}, status={}) — 재전이하지 않습니다.", runId, run.getStatus());
+                if (run.getStatus() == RunStatus.DONE) {
+                    safelyOnRunDone(run);
+                }
                 return;
             }
 
@@ -330,10 +349,16 @@ public class RunService {
                 finishFailed(runId, truncate(result.rawTail()));
                 return;
             }
+            if (run.getType() == RunType.REVIEW) {
+                // 판정 없이 끝난 리뷰를 통과로 치면 검증 없는 확정이 된다 — 인프라 실패로 보고 재시도(워크스페이스 승계)한다.
+                finishFailed(runId, "리뷰 판정(report_result) 없이 종료");
+                return;
+            }
 
             run.complete();
-            runRepository.save(run);
+            run = runRepository.save(run);
             commentBestEffort(run, "✅ 워커 종료: " + truncate(result.resultText()));
+            safelyOnRunDone(run);
         } catch (Exception e) {
             log.warn("run={} 결과 반영 중 예기치 못한 오류 — 실패 처리로 대체 시도합니다: {}", runId, e.getMessage());
             try {
@@ -341,6 +366,26 @@ public class RunService {
             } catch (Exception fallbackFailure) {
                 log.error("run={} 실패 처리 폴백도 실패했습니다 — run이 멈춰 있을 수 있습니다: {}", runId, fallbackFailure.getMessage());
             }
+        }
+    }
+
+    /**
+     * 검증 흐름 후처리는 run 상태가 이미 커밋된 뒤의 부가 단계다 — 여기서 새면 바깥 catch가 이미 DONE인 run을
+     * 실패 처리하려 들므로(가드에 걸려 무해하지만 로그가 오도한다) 따로 삼킨다.
+     */
+    private void safelyOnRunDone(Run run) {
+        try {
+            reviewService.onRunDone(run);
+        } catch (Exception e) {
+            log.warn("run={} 검증 run 생성 실패 — 이슈는 미확정으로 남습니다: {}", run.getId(), e.getMessage());
+        }
+    }
+
+    private void safelyOnReviewRejected(Run reviewRun) {
+        try {
+            reviewService.onReviewRejected(reviewRun);
+        } catch (Exception e) {
+            log.warn("run={} 리뷰 반려 후속 처리 실패 — FAILED로 남아 사람 재개 대상입니다: {}", reviewRun.getId(), e.getMessage());
         }
     }
 

@@ -91,6 +91,15 @@ platform:
       # 자동화 run 모델 정책(P2c) — 프로젝트별 맵 > 이 전역 기본 > 비움(워커 기본 모델).
       # 프로젝트별은 project-models.<프로젝트키> 또는 env PLATFORM_AGENT_SCHEDULER_PROJECT_MODELS_<KEY>(키 대소문자 무관).
       default-model: ${SCHEDULER_DEFAULT_MODEL:}
+    review:
+      # 리뷰 run 상시화(P2c T3, 스펙 §10.4-4 "검증 없는 확정 없음") — TASK run이 DONE이면 리뷰어 페르소나가
+      # 같은 워크스페이스의 로컬 커밋을 검증하는 REVIEW run이 뒤따른다. 이슈 done 전환은 리뷰 통과 시 리뷰어만 한다.
+      # false는 레거시 복원(TASK 워커가 직접 done 전환) — 명시적으로 끌 때만.
+      enabled: ${REVIEW_ENABLED:true}
+      # 리뷰어 페르소나 슬러그. 비었거나 없는 페르소나면 리뷰를 못 띄우므로 이슈를 inprogress로 남기고 경고 코멘트(fail-closed).
+      persona-slug: ${REVIEW_PERSONA:}
+      # REVIEW run 모델. 비우면 scheduler의 project-models > default-model > 워커 기본 순을 따른다.
+      model: ${REVIEW_MODEL:}
     budget:
       # 예산 캡(P2a T5) — BudgetService가 BudgetGuardConfig의 permissive 기본값을 대체한다.
       # 월 캡은 캘린더 월(UTC) 누적, 플랫폼 전체와 프로젝트별에 같은 값을 쓴다(P2a 결정,

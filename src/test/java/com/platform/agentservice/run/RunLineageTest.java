@@ -160,6 +160,51 @@ class RunLineageTest {
         assertThat(retry.getParentRunId()).isNull();
     }
 
+    // ---- continuation: 계보 run의 재시도는 워크스페이스를 승계한다(P2c T3) ----
+
+    @Test
+    void review_retry_continuation_inherits_workspace_and_parent_task() {
+        Run review = Run.queuedReview(doneTask(RunTrigger.SCHEDULER, null, 1), 77L, "claude-fable-5-1");
+        ReflectionTestUtils.setField(review, "id", 11L);
+        review.start("pending", 9L);
+        review.fail("시간 초과");
+
+        Run retry = Run.continuation(review);
+
+        assertThat(retry.getType()).isEqualTo(RunType.REVIEW);
+        assertThat(retry.getPersonaId()).isEqualTo(77L);
+        assertThat(retry.getModel()).isEqualTo("claude-fable-5-1");
+        assertThat(retry.getWorkspacePath()).isEqualTo(WORKSPACE);
+        // 재시도 후 반려돼도 원 TASK를 찾을 수 있어야 반려-fix가 이어진다.
+        assertThat(retry.getParentRunId()).isEqualTo(10L);
+        assertThat(retry.getAttempt()).isEqualTo(2);
+    }
+
+    @Test
+    void fix_run_retry_continuation_keeps_building_on_the_same_workspace() {
+        Run fix = Run.fixContinuation(doneTask(RunTrigger.SCHEDULER, null, 1), 11L);
+        ReflectionTestUtils.setField(fix, "id", 12L);
+        fix.start("pending", 9L);
+        fix.fail("boom");
+
+        Run retry = Run.continuation(fix);
+
+        assertThat(retry.getType()).isEqualTo(RunType.TASK);
+        assertThat(retry.getWorkspacePath()).isEqualTo(WORKSPACE);
+        assertThat(retry.getParentRunId()).isEqualTo(11L);
+        assertThat(retry.getAttempt()).isEqualTo(3);
+    }
+
+    @Test
+    void workspace_lineage_is_reviews_and_parented_tasks_only() {
+        Run plain = Run.queued(RunType.TASK, "AGP-4", 1L, 2L, RunTrigger.SCHEDULER, "harness://default", null);
+        Run task = doneTask(RunTrigger.SCHEDULER, null, 1);
+
+        assertThat(plain.isWorkspaceLineage()).isFalse();
+        assertThat(Run.queuedReview(task, 77L, null).isWorkspaceLineage()).isTrue();
+        assertThat(Run.fixContinuation(task, 11L).isWorkspaceLineage()).isTrue();
+    }
+
     // ---- start / recordWorkspace ----
 
     @Test
