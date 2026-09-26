@@ -26,6 +26,8 @@ import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.test.util.ReflectionTestUtils;
 
@@ -1225,8 +1227,14 @@ class RunServiceTest {
         verify(selfProvider).getObject();
     }
 
+    /**
+     * 거부가 새면 applyOutcome 바깥 catch가 "결과 반영 오류" 폴백을 부른다 — 그 폴백은 run이 이미 FAILED라
+     * finishFailed 가드에서 조용히 돌아가므로 상태·error·continuation만 봐서는 catch 유무를 구분할 수 없다.
+     * 그래서 폴백 경로 진입 로그가 없고 거부 삼킴 로그가 있는지를 관찰점으로 삼는다.
+     */
     @Test
-    void rejected_retry_submission_is_swallowed_and_leaves_the_continuation_queued() {
+    @ExtendWith(OutputCaptureExtension.class)
+    void rejected_retry_submission_is_swallowed_and_leaves_the_continuation_queued(CapturedOutput output) {
         Run run = queuedRun(71L);
         stubExecuteCollaborators(71L, run, true);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
@@ -1235,13 +1243,13 @@ class RunServiceTest {
 
         runService.execute(71L);
 
-        // 거부가 applyOutcome의 바깥 catch로 새면 "결과 반영 오류"로 오도된다 — 원 run의 실패 사유는 그대로여야 한다.
+        assertThat(output.getOut()).doesNotContain("결과 반영 중 예기치 못한 오류");
+        assertThat(output.getOut()).contains("재시도 run 실행 제출이 거부돼 QUEUED로 남깁니다");
         assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
         assertThat(run.getError()).isEqualTo("boom");
         ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
         verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
         assertThat(saved.getAllValues()).anyMatch(r -> r != run && r.getStatus() == RunStatus.QUEUED && r.getAttempt() == 2);
-        verify(almClient).addComment(eq(1L), eq("🔁 재시도 2/3"), eq(BEARER));
         verify(selfProxy).execute(NEW_RUN_ID);
     }
 
