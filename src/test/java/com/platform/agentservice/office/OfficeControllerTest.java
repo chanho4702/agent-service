@@ -62,7 +62,7 @@ class OfficeControllerTest {
     void 일반_사용자가_사무실을_조회하면_계약_필드가_내려온다() throws Exception {
         OfficeResponse res = new OfficeResponse(
                 List.of(new OfficeResponse.OfficePersona(3L, "jiho", "지호", "🔧", PersonaRole.BACKEND, true,
-                        new OfficeResponse.CurrentRun(11L, RunStatus.RUNNING, "AGP-1", RunType.TASK, 2, "claude-sonnet-5", T),
+                        new OfficeResponse.CurrentRun(11L, RunStatus.RUNNING, "AGP-1", RunType.TASK, RunTrigger.USER, 2, "claude-sonnet-5", T),
                         new AuditEntry(99L, "get_issue", AuditStatus.OK, "AGP-1", T),
                         new BigDecimal("1.2500"))),
                 List.of(new RunSummaryResponse(10L, "AGP-0", RunStatus.DONE, 3L, 1, null, T, T,
@@ -81,6 +81,7 @@ class OfficeControllerTest {
                 .andExpect(jsonPath("$.personas[0].active").value(true))
                 .andExpect(jsonPath("$.personas[0].currentRun.status").value("RUNNING"))
                 .andExpect(jsonPath("$.personas[0].currentRun.issueKey").value("AGP-1"))
+                .andExpect(jsonPath("$.personas[0].currentRun.trigger").value("USER"))
                 .andExpect(jsonPath("$.personas[0].currentRun.startedAt").value("2026-09-26T03:00:00Z"))
                 .andExpect(jsonPath("$.personas[0].lastActivity.tool").value("get_issue"))
                 .andExpect(jsonPath("$.personas[0].lastActivity.createdAt").value("2026-09-26T03:00:00Z"))

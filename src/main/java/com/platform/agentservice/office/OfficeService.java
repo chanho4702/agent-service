@@ -144,7 +144,8 @@ public class OfficeService {
 
     /**
      * 게이트에는 프로젝트 축이 없어 run을 한 번에 불러 붙인다. 미결 게이트는 사람이 쌓아 두지 않는 한 소수라
-     * 전부 읽고 나서 필터·자른다(개수는 필터 후 기준).
+     * 전부 읽고 나서 필터·자른다(개수는 필터 후 기준). 요청문은 가리지 않는다 — 기존 {@code GET /api/agent/gates}와
+     * 같은 노출 수준을 유지하는 의도적 결정이다({@link OfficeResponse.PendingGate} 참고).
      */
     private List<OfficeResponse.PendingGate> pendingGates(Long projectId) {
         List<Gate> pending = gateRepository.findByDecisionIsNull();
@@ -170,7 +171,7 @@ public class OfficeService {
             return null;
         }
         return new OfficeResponse.CurrentRun(run.getId(), run.getStatus(), run.getIssueKey(), run.getType(),
-                run.getAttempt(), run.getModel(), run.getStartedAt());
+                run.getTrigger(), run.getAttempt(), run.getModel(), run.getStartedAt());
     }
 
     private static AuditEntry toEntry(ToolCallAudit a) {

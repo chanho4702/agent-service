@@ -160,6 +160,7 @@ class OfficeServiceTest {
         assertThat(j.currentRun().status()).isEqualTo(RunStatus.RUNNING);
         assertThat(j.currentRun().issueKey()).isEqualTo("AGP-2");
         assertThat(j.currentRun().type()).isEqualTo(RunType.TASK);
+        assertThat(j.currentRun().trigger()).isEqualTo(RunTrigger.SCHEDULER);
         assertThat(j.currentRun().attempt()).isEqualTo(1);
         assertThat(j.currentRun().model()).isEqualTo("claude-sonnet-5");
         assertThat(j.currentRun().startedAt()).isNotNull();
@@ -209,7 +210,7 @@ class OfficeServiceTest {
 
         assertThat(res.personas().get(0).lastActivity()).satisfies(a -> {
             assertThat(a.tool()).isEqualTo("add_comment");
-            assertThat(a.summary()).isEqualTo("AGP-1 " + AuditSummaryRedactor.REDACTED);
+            assertThat(a.summary()).isEqualTo("AGP-1 " + AuditSummaryRedactor.BODY_REDACTED);
             assertThat(a.status()).isEqualTo(AuditStatus.OK);
         });
         assertThat(res.personas().get(1).lastActivity()).isNull();
@@ -279,6 +280,25 @@ class OfficeServiceTest {
     }
 
     @Test
+    void 게이트_요약은_200자_경계에_걸린_이모지를_반쪽으로_자르지_않는다() {
+        // 🔧는 서로게이트 쌍(2 char) — 199번째 char부터 시작하므로 200자에서 자르면 상위 서로게이트만 남는다.
+        String request = "a".repeat(OfficeService.GATE_SUMMARY_MAX - 1) + "🔧" + "뒤쪽";
+
+        String summary = OfficeService.abbreviate(request);
+
+        assertThat(summary).isEqualTo("a".repeat(OfficeService.GATE_SUMMARY_MAX - 1) + "…");
+        assertThat(summary.chars().anyMatch(c -> Character.isSurrogate((char) c))).isFalse();
+    }
+
+    @Test
+    void 게이트_요약은_이모지가_경계_안에_온전히_들어가면_그대로_둔다() {
+        String request = "a".repeat(OfficeService.GATE_SUMMARY_MAX - 2) + "🔧" + "뒤쪽";
+
+        assertThat(OfficeService.abbreviate(request))
+                .isEqualTo("a".repeat(OfficeService.GATE_SUMMARY_MAX - 2) + "🔧…");
+    }
+
+    @Test
     void 개인_활동은_최근_run_20건과_오늘_감사_50건과_오늘_비용을_준다() {
         Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
         Persona mina = persona(2L, "mina", PersonaRole.FRONTEND);
@@ -301,7 +321,7 @@ class OfficeServiceTest {
         assertThat(res.runs()).extracting(r -> r.id()).doesNotContain(first.getId());
         assertThat(res.todayAudits()).hasSize(50);
         assertThat(res.todayAudits()).noneMatch(a -> "AGP-OLD".equals(a.summary()));
-        assertThat(res.todayAudits().get(0).summary()).isEqualTo("run=1 " + AuditSummaryRedactor.REDACTED);
+        assertThat(res.todayAudits().get(0).summary()).isEqualTo("run=1 " + AuditSummaryRedactor.BODY_REDACTED);
         assertThat(res.todayCostUsd()).isEqualByComparingTo("0.3");
     }
 

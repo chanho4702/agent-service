@@ -424,6 +424,8 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
   `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt`.
   - `currentRun`: `RunService.ACTIVE_STATUSES`(QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED) 중 페르소나별 최신 1건(id 기준), 없으면 null.
+    필드: id·status·issueKey·type·trigger·attempt·model·startedAt. 감사 로그(`AuditEntry`)에는 runId가 없다 —
+    `tool_call_audit`에 run 축 컬럼이 없어서(스키마 변경 없이 생략).
   - 최근 종결 = DONE·FAILED·CANCELLED·BLOCKED, `updatedAt` 최신순(BLOCKED는 endedAt이 비어 있어서). BLOCKED는
     `currentRun`에도 나온다.
   - `lastActivity`: 그 페르소나 최근 감사 1건, **5분 이내일 때만**(아니면 null).
@@ -433,8 +435,12 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 - **비용 축**: 원장에 페르소나 축이 없어 `usage_ledger`×`run` 조인으로 페르소나별 합산한다. 한 run 비용이
   PROJECT·PLATFORM 두 스코프로 적재되므로 **PLATFORM 행만** 센다. "오늘"은 **Asia/Seoul 자정** 기준(월 예산은
   여전히 UTC 캘린더 월 — §5.2).
-- **summary 가림(`AuditSummaryRedactor`)**: `add_comment`·`*.comment`(코멘트 실패 노트)는 이슈키만,
-  `report_progress`는 `run=N`만 남기고 `(본문 생략)`을 붙인다. 원본 감사 행은 그대로 보존(노출 시점에만 거름).
-  토큰류는 원래 어떤 도구 summary에도 싣지 않는다. 제목(`create_issue`/`create_page`/`update_page`)·검색어는
-  메타데이터로 보고 그대로 노출한다.
-- 인덱스(V5): `tool_call_audit(created_at)`(말풍선 5분 창), `run(persona_id, id DESC)`(개인 오피스).
+- **summary 가림(`AuditSummaryRedactor`)**: 이 API는 ALM 프로젝트·위키 스페이스 권한을 보지 않으므로 본문뿐 아니라
+  제목·검색어도 권한 우회 표면이다 — 도구명+식별자만 남긴다. `add_comment`·`*.comment`(코멘트 실패 노트)는 이슈키 +
+  `(본문 생략)`, `report_progress`는 `run=N` + `(본문 생략)`, `create_issue`/`create_page`/`update_page`는
+  `projectId=`/`spaceId=`/`pageId=` + `(제목 생략)`, `search_issues`/`find_pages`는 `projectId=`/`spaceId=` +
+  `(검색어 생략)`. 원본 감사 행은 그대로 보존(노출 시점에만 거름). 토큰류는 원래 어떤 도구 summary에도 싣지 않는다.
+- **게이트 요청문은 가리지 않는다(의도)**: `pendingGates[].requestSummary`는 기존 `GET /api/agent/gates`가 인증 사용자
+  누구나에게 전문을 주는 것과 같은 노출 수준이라 가림을 거치지 않는다.
+- 인덱스(V5): `tool_call_audit(created_at)`(말풍선 5분 창), `run(persona_id, id DESC)`(개인 오피스),
+  `gate(id) WHERE decision IS NULL`(미결 게이트 부분 인덱스).
