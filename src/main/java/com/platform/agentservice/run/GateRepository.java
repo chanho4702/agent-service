@@ -9,4 +9,7 @@ public interface GateRepository extends JpaRepository<Gate, Long> {
 
     /** {@code GET /api/agent/gates}(pending 미지정/false) — 요청순 최신 50건. */
     List<Gate> findTop50ByOrderByRequestedAtDesc();
+
+    /** 회의 run의 PLAN 게이트 승인 이어받기(P3b) — 조상 run에 승인된 계획이 있는지. */
+    List<Gate> findByRunIdAndKindAndDecisionOrderByIdAsc(long runId, GateKind kind, GateDecision decision);
 }

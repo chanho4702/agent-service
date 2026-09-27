@@ -220,7 +220,7 @@ class RunToolsTest {
         when(almClient.addComment(eq(1L), org.mockito.ArgumentMatchers.anyString(), eq(BEARER)))
                 .thenReturn(new CommentResponse(8L, 1L, PERSONA_MEMBER_ID, "body", null, null));
 
-        String result = runTools.reportResult(42L, "DONE", "작업 완료했습니다");
+        String result = runTools.reportResult(42L, "DONE", "작업 완료했습니다", null);
 
         assertThat(result).contains("DONE");
         assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
@@ -234,7 +234,7 @@ class RunToolsTest {
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenThrow(new RuntimeException("alm-backend 다운"));
 
-        String result = runTools.reportResult(42L, "DONE", "작업 완료했습니다");
+        String result = runTools.reportResult(42L, "DONE", "작업 완료했습니다", null);
 
         // run 종결은 이미 커밋됐으므로 도구는 성공을 보고한다 — 코멘트 실패는 경고로만 덧붙인다.
         assertThat(result).contains("DONE").contains("경고: 이슈 코멘트 기록 실패");
@@ -251,7 +251,7 @@ class RunToolsTest {
         when(almClient.addComment(eq(1L), org.mockito.ArgumentMatchers.anyString(), eq(BEARER)))
                 .thenReturn(new CommentResponse(8L, 1L, PERSONA_MEMBER_ID, "body", null, null));
 
-        String result = runTools.reportResult(42L, "failed", "타임아웃");
+        String result = runTools.reportResult(42L, "failed", "타임아웃", null);
 
         assertThat(result).contains("FAILED");
         assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
@@ -267,7 +267,7 @@ class RunToolsTest {
         when(almClient.addComment(eq(1L), org.mockito.ArgumentMatchers.anyString(), eq(BEARER)))
                 .thenReturn(new CommentResponse(8L, 1L, PERSONA_MEMBER_ID, "body", null, null));
 
-        String result = runTools.reportResult(42L, "BLOCKED", "사람 개입 필요");
+        String result = runTools.reportResult(42L, "BLOCKED", "사람 개입 필요", null);
 
         assertThat(result).contains("BLOCKED");
         assertThat(run.getStatus()).isEqualTo(RunStatus.BLOCKED);
@@ -277,7 +277,7 @@ class RunToolsTest {
     @Test
     void report_result_rejects_bad_status_text() {
         // applyOutcome의 switch default가 runRepository 조회보다 먼저 실패하므로 run 조회가 일어나지 않는다.
-        String result = runTools.reportResult(42L, "WAT", "무슨 상태?");
+        String result = runTools.reportResult(42L, "WAT", "무슨 상태?", null);
 
         assertThat(result).startsWith("오류:").contains("WAT");
         verify(runRepository, never()).findById(org.mockito.ArgumentMatchers.anyLong());
@@ -289,7 +289,7 @@ class RunToolsTest {
         Run run = runningRun(42L, OTHER_PERSONA_ID);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
 
-        String result = runTools.reportResult(42L, "DONE", "완료");
+        String result = runTools.reportResult(42L, "DONE", "완료", null);
 
         assertThat(result).startsWith("오류:");
         assertThat(run.getStatus()).isEqualTo(RunStatus.RUNNING);
@@ -300,9 +300,114 @@ class RunToolsTest {
         Run run = queuedRun(42L, PERSONA_ID);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
 
-        String result = runTools.reportResult(42L, "DONE", "완료");
+        String result = runTools.reportResult(42L, "DONE", "완료", null);
 
         assertThat(result).startsWith("오류:");
         assertThat(run.getStatus()).isEqualTo(RunStatus.QUEUED);
+    }
+
+    // ---- P3b: report_result pageId · 회의 run ----
+
+    private Run runningMeeting(long id, String issueKey) {
+        Run run = Run.queuedMeeting(RunType.MEETING, issueKey, 1L, List.of(PERSONA_ID), RunTrigger.USER,
+                "harness://local", null, "안건");
+        ReflectionTestUtils.setField(run, "id", id);
+        run.start("/work/run-" + id, 1L);
+        return run;
+    }
+
+    @Test
+    void report_result_records_page_id_on_the_run_and_audits_it() {
+        Run run = runningRun(42L, PERSONA_ID);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY));
+
+        String result = runTools.reportResult(42L, "DONE", "보고서 작성", 501L);
+
+        assertThat(result).contains("DONE");
+        assertThat(run.getOutputPageId()).isEqualTo(501L);
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"),
+                eq("run=42 status=DONE pageId=501"), eq(AuditStatus.OK));
+    }
+
+    @Test
+    void report_result_failed_and_blocked_also_record_page_id() {
+        Run failed = runningRun(42L, PERSONA_ID);
+        Run blocked = runningRun(43L, PERSONA_ID);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(failed));
+        when(runRepository.findById(43L)).thenReturn(Optional.of(blocked));
+
+        runTools.reportResult(42L, "FAILED", "중간 보고", 7L);
+        runTools.reportResult(43L, "BLOCKED", "막힘", 8L);
+
+        assertThat(failed.getOutputPageId()).isEqualTo(7L);
+        assertThat(blocked.getOutputPageId()).isEqualTo(8L);
+    }
+
+    @Test
+    void report_result_without_page_id_keeps_task_runs_backward_compatible() {
+        Run run = runningRun(42L, PERSONA_ID);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+
+        runTools.reportResult(42L, "DONE", "완료", null);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        assertThat(run.getOutputPageId()).isNull();
+    }
+
+    @Test
+    void report_result_rejects_non_positive_page_id_without_transition() {
+        Run run = runningRun(42L, PERSONA_ID);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+
+        String result = runTools.reportResult(42L, "DONE", "완료", 0L);
+
+        assertThat(result).startsWith("오류:");
+        assertThat(run.getStatus()).isEqualTo(RunStatus.RUNNING);
+    }
+
+    @Test
+    void meeting_done_without_page_id_is_refused_and_run_stays_running() {
+        Run run = runningMeeting(44L, "AGP-9");
+        when(runRepository.findById(44L)).thenReturn(Optional.of(run));
+
+        String result = runTools.reportResult(44L, "DONE", "회의 끝", null);
+
+        assertThat(result).startsWith("오류:").contains("pageId");
+        assertThat(run.getStatus()).isEqualTo(RunStatus.RUNNING);
+        verify(almClient, never()).addComment(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void meeting_without_agenda_issue_reports_without_touching_alm() {
+        Run run = runningMeeting(45L, "PROJECT-1");
+        when(runRepository.findById(45L)).thenReturn(Optional.of(run));
+
+        String progress = runTools.reportProgress(45L, "기획 발언 정리 중");
+        String result = runTools.reportResult(45L, "DONE", "결정 3건", 501L);
+
+        assertThat(progress).startsWith("진행상황 기록 완료").doesNotStartWith("오류");
+        assertThat(result).isEqualTo("run 종결 기록 완료: DONE");
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        assertThat(run.getOutputPageId()).isEqualTo(501L);
+        org.mockito.Mockito.verifyNoInteractions(almClient);
+    }
+
+    @Test
+    void meeting_plan_gate_without_agenda_issue_parks_run_without_comment() {
+        Run run = runningMeeting(46L, "PROJECT-1");
+        when(runRepository.findById(46L)).thenReturn(Optional.of(run));
+        when(gateRepository.save(org.mockito.ArgumentMatchers.any(com.platform.agentservice.run.Gate.class)))
+                .thenAnswer(inv -> {
+                    com.platform.agentservice.run.Gate g = inv.getArgument(0);
+                    ReflectionTestUtils.setField(g, "id", 3L);
+                    return g;
+                });
+
+        String result = runTools.requestGate(46L, "PLAN", "회의록 pageId=501 / 제안 이슈: 로그인 API");
+
+        assertThat(result).startsWith("게이트 등록됨(gate id=3)").doesNotContain("경고");
+        assertThat(run.getStatus()).isEqualTo(RunStatus.WAITING_APPROVAL);
+        org.mockito.Mockito.verifyNoInteractions(almClient);
     }
 }

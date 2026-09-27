@@ -98,6 +98,7 @@ class RunServiceOptimisticLockingTest {
         BudgetProperties budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         BudgetGuard budgetGuard = Mockito.mock(BudgetGuard.class);
         ReviewService reviewService = Mockito.mock(ReviewService.class);
+        MeetingService meetingService = Mockito.mock(MeetingService.class);
         when(budgetGuard.allow(anyLong())).thenReturn(true);
         @SuppressWarnings("unchecked")
         ObjectProvider<RunService> selfProvider = Mockito.mock(ObjectProvider.class);
@@ -105,7 +106,7 @@ class RunServiceOptimisticLockingTest {
 
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser, budgetGuard, reviewService, selfProvider);
+                commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
     }
 
     @AfterEach

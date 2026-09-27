@@ -52,7 +52,8 @@ public class GateService {
         long newRunId = continuationRun.getId();
         run.cancelWithNote("게이트 승인 — 후속 run " + newRunId + "로 재개");
 
-        String issueKey = run.getIssueKey();
+        // 안건 이슈 없는 회의 run은 ALM에 코멘트할 이슈가 없다(대표 키) — null이면 코멘트를 건너뛴다.
+        String issueKey = run.hasAgendaIssue() ? run.getIssueKey() : null;
         long personaId = run.getPersonaId();
         GateKind kind = gate.getKind();
         afterCommit(() -> {
@@ -71,7 +72,7 @@ public class GateService {
         gate.reject(deciderId);
         run.cancelWithNote("게이트 거절(" + gate.getKind() + ")");
 
-        String issueKey = run.getIssueKey();
+        String issueKey = run.hasAgendaIssue() ? run.getIssueKey() : null;
         long personaId = run.getPersonaId();
         GateKind kind = gate.getKind();
         String request = gate.getRequest();
@@ -110,6 +111,9 @@ public class GateService {
 
     /** {@code RunService.commentBestEffort}와 동일한 패턴 — 상태 전이는 이미 커밋됐으므로 코멘트 실패는 경고로만. */
     private void commentBestEffort(long personaId, String issueKey, String body) {
+        if (issueKey == null) {
+            return;
+        }
         try {
             Persona persona = personaRepository.findById(personaId)
                     .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + personaId));

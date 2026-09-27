@@ -52,6 +52,9 @@ public class RunTools {
         PatPrincipal actor = ToolActor.current();
         return audited.run("report_progress", "run=" + runId + " " + message, () -> {
             String issueKey = runToolService.requireRunningIssueKey(runId, actor.personaId());
+            if (issueKey == null) {
+                return "진행상황 기록 완료(안건 이슈 없는 회의 run — 이슈 코멘트 생략)";
+            }
             addComment(issueKey, "🤖 진행: " + message, actor);
             return "진행상황 기록 완료";
         });
@@ -73,25 +76,29 @@ public class RunTools {
         });
     }
 
-    @McpTool(name = "report_result", description = "run을 종결한다(status: DONE|FAILED|BLOCKED).")
+    @McpTool(name = "report_result", description = "run을 종결한다(status: DONE|FAILED|BLOCKED). "
+            + "산출물 위키 페이지(회의록·보고서)가 있으면 pageId로 함께 보고한다 — 회의 run의 DONE은 pageId 필수.")
     public String reportResult(
             @McpToolParam(description = "run id", required = true) long runId,
             @McpToolParam(description = "종결 상태: DONE|FAILED|BLOCKED", required = true) String status,
-            @McpToolParam(description = "요약/사유", required = true) String summary) {
+            @McpToolParam(description = "요약/사유", required = true) String summary,
+            @McpToolParam(description = "산출물 위키 페이지 id(회의록·작업 보고서, 선택 — 회의 run의 DONE은 필수)",
+                    required = false) Long pageId) {
         PatPrincipal actor = ToolActor.current();
-        return audited.run("report_result", "run=" + runId + " status=" + status, () -> {
+        String auditSummary = "run=" + runId + " status=" + status + (pageId != null ? " pageId=" + pageId : "");
+        return audited.run("report_result", auditSummary, () -> {
             String normalized = status == null ? "" : status.toUpperCase();
-            RunResultOutcome outcome = applyOutcome(runId, actor.personaId(), normalized, summary);
+            RunResultOutcome outcome = applyOutcome(runId, actor.personaId(), normalized, summary, pageId);
             String warning = commentBestEffort("report_result", outcome.issueKey(), commentFor(normalized, summary), actor);
             return "run 종결 기록 완료: " + normalized + warning;
         });
     }
 
-    private RunResultOutcome applyOutcome(long runId, long callerPersonaId, String status, String summary) {
+    private RunResultOutcome applyOutcome(long runId, long callerPersonaId, String status, String summary, Long pageId) {
         return switch (status) {
-            case "DONE" -> runToolService.completeRun(runId, callerPersonaId);
-            case "FAILED" -> runToolService.failRun(runId, callerPersonaId, summary);
-            case "BLOCKED" -> runToolService.blockRun(runId, callerPersonaId, summary);
+            case "DONE" -> runToolService.completeRun(runId, callerPersonaId, pageId);
+            case "FAILED" -> runToolService.failRun(runId, callerPersonaId, summary, pageId);
+            case "BLOCKED" -> runToolService.blockRun(runId, callerPersonaId, summary, pageId);
             default -> throw new IllegalArgumentException("알 수 없는 종결 상태(DONE|FAILED|BLOCKED만 허용): " + status);
         };
     }
@@ -126,6 +133,9 @@ public class RunTools {
      * 문구를 반환한다(성공 시 빈 문자열).
      */
     private String commentBestEffort(String tool, String issueKey, String body, PatPrincipal actor) {
+        if (issueKey == null) {
+            return "";
+        }
         try {
             addComment(issueKey, body, actor);
             return "";

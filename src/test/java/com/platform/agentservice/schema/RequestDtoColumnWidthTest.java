@@ -5,6 +5,7 @@ import com.platform.agentservice.pat.dto.PatCreateRequest;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.agentservice.run.Run;
+import com.platform.agentservice.run.dto.MeetingCreateRequest;
 import com.platform.agentservice.run.dto.UserRunCreateRequest;
 import jakarta.persistence.Column;
 import jakarta.validation.constraints.Pattern;
@@ -38,7 +39,8 @@ class RequestDtoColumnWidthTest {
                 Arguments.of(PersonaCreateRequest.class, "emoji", Persona.class, "emoji", 16),
                 Arguments.of(PatCreateRequest.class, "label", PatToken.class, "label", 120),
                 Arguments.of(UserRunCreateRequest.class, "issueKey", Run.class, "issueKey", 40),
-                Arguments.of(UserRunCreateRequest.class, "model", Run.class, "model", 60));
+                Arguments.of(UserRunCreateRequest.class, "model", Run.class, "model", 60),
+                Arguments.of(MeetingCreateRequest.class, "agendaIssueKey", Run.class, "issueKey", 40));
     }
 
     @ParameterizedTest(name = "{0}.{1} @Size(max) == {2}.{3} @Column(length) == {4}")

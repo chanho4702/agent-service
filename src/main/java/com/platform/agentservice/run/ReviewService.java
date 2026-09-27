@@ -39,17 +39,19 @@ public class ReviewService {
     private final AlmClient almClient;
     private final ReviewProperties reviewProperties;
     private final SchedulerProperties schedulerProperties;
+    private final MeetingService meetingService;
     private final ObjectProvider<RunService> runServiceProvider;
 
     public ReviewService(RunRepository runRepository, PersonaRepository personaRepository, TokenService tokenService,
                          AlmClient almClient, ReviewProperties reviewProperties, SchedulerProperties schedulerProperties,
-                         ObjectProvider<RunService> runServiceProvider) {
+                         MeetingService meetingService, ObjectProvider<RunService> runServiceProvider) {
         this.runRepository = runRepository;
         this.personaRepository = personaRepository;
         this.tokenService = tokenService;
         this.almClient = almClient;
         this.reviewProperties = reviewProperties;
         this.schedulerProperties = schedulerProperties;
+        this.meetingService = meetingService;
         this.runServiceProvider = runServiceProvider;
     }
 
@@ -111,7 +113,9 @@ public class ReviewService {
         int maxAttempts = schedulerProperties.retryMaxAttempts();
         int nextAttempt = task.getAttempt() + 1;
         if (nextAttempt > maxAttempts) {
-            blockRejected(reviewRun, "리뷰 반려 — 시도 한도 " + maxAttempts + "회 소진, 사람 확인 필요");
+            String reason = "리뷰 반려 — 시도 한도 " + maxAttempts + "회 소진, 사람 확인 필요";
+            blockRejected(reviewRun, reason);
+            safelyEscalate(reviewRun, reason);
             return;
         }
 
@@ -164,6 +168,15 @@ public class ReviewService {
         reviewRun.block(reason);
         runRepository.save(reviewRun);
         commentBestEffort(reviewRun.getPersonaId(), reviewRun.getIssueKey(), "⛔ " + reason);
+    }
+
+    /** 반려 run의 BLOCKED는 이미 커밋됐다 — 자동 에스컬레이션(D-P3b-4③) 실패는 삼킨다. */
+    private void safelyEscalate(Run blockedRun, String reason) {
+        try {
+            meetingService.onBlocked(blockedRun, reason);
+        } catch (Exception e) {
+            log.warn("검증 run={} 자동 에스컬레이션 생성 실패 — BLOCKED로 남아 사람 재개 대상입니다: {}", blockedRun.getId(), e.getMessage());
+        }
     }
 
     private void commentBestEffort(long personaId, String issueKey, String body) {

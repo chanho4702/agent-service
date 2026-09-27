@@ -110,6 +110,18 @@ platform:
       persona-slug: ${REVIEW_PERSONA:}
       # REVIEW run 모델. 비우면 scheduler의 project-models > default-model > 워커 기본 순을 따른다.
       model: ${REVIEW_MODEL:}
+    meetings:
+      # 회의 run(P3b, 스펙 §6) — MEETING(착수/계획)·RETRO(회고)·ESCALATION. 워커가 참석 페르소나를 롤플레이해 회의록을 위키에 쓴다.
+      # 회의록을 쓰는 위키 스페이스 id. 비면 회의 소집 API는 400, 회고 cron·자동 에스컬레이션은 건너뛴다.
+      # 워커 페르소나(진행자)에게 이 스페이스 EDITOR grant가 있어야 create_page가 성공한다.
+      space-id: ${MEETING_SPACE_ID:}
+      # 회고 주기 — Spring cron 6필드, Asia/Seoul(예: "0 0 18 * * MON-FRI"). 비우면 꺼짐.
+      # SCHEDULER_ENABLED=false여도 이것만 켜면 동작한다. repos 매핑의 프로젝트마다 RETRO run 하나.
+      retro-cron: ${MEETING_RETRO_CRON:}
+      # BLOCKED 승격(재시도 한도·리뷰 반려 한도) 시 ESCALATION 회의 run 자동 생성. 기본 off — BLOCKED마다 회의 비용이 붙는다.
+      auto-escalation: ${MEETING_AUTO_ESCALATION:false}
+      # 회의 결정→이슈를 워커가 create_issue로 직접 만든다. false면 PLAN 게이트로 사람 승인 후 이어받은 run이 만든다.
+      auto-issue: ${MEETING_AUTO_ISSUE:true}
     budget:
       # 예산 캡(P2a T5) — BudgetService가 BudgetGuardConfig의 permissive 기본값을 대체한다.
       # 월 캡은 캘린더 월(UTC) 누적, 플랫폼 전체와 프로젝트별에 같은 값을 쓴다(P2a 결정,

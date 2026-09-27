@@ -19,8 +19,23 @@ public record OfficeResponse(
         long pendingGateCount,
         List<PendingGate> pendingGates,
         BudgetStatusResponse budget,
-        Instant generatedAt
+        Instant generatedAt,
+        List<BoardPost> boardPosts
 ) {
+
+    /**
+     * 사무실 게시판(P3b D-P3b-7) — 회의록이 보고된 완료 회의 run. 제목은 위키를 조회하지 않고 프론트가 type 라벨 + 시각으로
+     * 그린다(권한 없는 스페이스 제목 노출도 피한다). issueKey는 안건 이슈 없는 회의면 {@code PROJECT-<projectId>}다.
+     */
+    public record BoardPost(
+            long runId,
+            RunType type,
+            String issueKey,
+            long projectId,
+            long pageId,
+            Instant endedAt
+    ) {
+    }
 
     /** currentRun·lastActivity는 없으면 null — 유휴 페르소나, 5분 넘게 조용한 페르소나. */
     public record OfficePersona(

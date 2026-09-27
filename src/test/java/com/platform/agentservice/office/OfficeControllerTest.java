@@ -70,7 +70,8 @@ class OfficeControllerTest {
                 1L,
                 List.of(new OfficeResponse.PendingGate(5L, 12L, "AGP-2", 3L, GateKind.MERGE, "머지 승인", T)),
                 new BudgetStatusResponse(new BigDecimal("100"), new BigDecimal("12.5"), false),
-                T);
+                T,
+                List.of(new OfficeResponse.BoardPost(21L, RunType.MEETING, "AGP-3", 7L, 501L, T)));
         given(officeService.office(7L)).willReturn(res);
 
         mvc.perform(get("/api/agent/office").param("projectId", "7").with(authentication(TestAuth.user(2L, "Bob"))))
@@ -92,13 +93,19 @@ class OfficeControllerTest {
                 .andExpect(jsonPath("$.pendingGates[0].requestSummary").value("머지 승인"))
                 .andExpect(jsonPath("$.budget.monthlyCapUsd").value(100))
                 .andExpect(jsonPath("$.budget.killSwitch").value(false))
-                .andExpect(jsonPath("$.generatedAt").value("2026-09-26T03:00:00Z"));
+                .andExpect(jsonPath("$.generatedAt").value("2026-09-26T03:00:00Z"))
+                .andExpect(jsonPath("$.boardPosts[0].runId").value(21))
+                .andExpect(jsonPath("$.boardPosts[0].type").value("MEETING"))
+                .andExpect(jsonPath("$.boardPosts[0].issueKey").value("AGP-3"))
+                .andExpect(jsonPath("$.boardPosts[0].projectId").value(7))
+                .andExpect(jsonPath("$.boardPosts[0].pageId").value(501))
+                .andExpect(jsonPath("$.boardPosts[0].endedAt").value("2026-09-26T03:00:00Z"));
     }
 
     @Test
     void projectId_없이도_조회된다() throws Exception {
         given(officeService.office(null)).willReturn(new OfficeResponse(List.of(), List.of(), 0, List.of(),
-                new BudgetStatusResponse(BigDecimal.TEN, BigDecimal.ZERO, false), T));
+                new BudgetStatusResponse(BigDecimal.TEN, BigDecimal.ZERO, false), T, List.of()));
 
         mvc.perform(get("/api/agent/office").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())

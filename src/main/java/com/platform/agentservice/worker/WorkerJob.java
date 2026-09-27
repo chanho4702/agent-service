@@ -12,12 +12,31 @@ import java.util.List;
  * 곧 지시이므로(스펙 §10.4-1) 워커 프롬프트에 반드시 포함된다.
  *
  * <p>{@code instruction}은 USER run의 사람 직접 지시문이다(AGP-42, D-P2c-6). 자동화 run에는 없다({@code null}).
+ *
+ * <p>{@code meeting}은 회의 run(P3b)에만 있다 — 회의 run은 clone하지 않으므로 {@code repoUrl}이 {@code null}이다.
  */
 public record WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments,
-                        String instruction) {
+                        String instruction, MeetingContext meeting) {
 
     /** 지시문이 없는 자동화 run용. */
     public WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments) {
-        this(repoUrl, issueTitle, issueBody, recentComments, null);
+        this(repoUrl, issueTitle, issueBody, recentComments, null, null);
+    }
+
+    public WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments,
+                     String instruction) {
+        this(repoUrl, issueTitle, issueBody, recentComments, instruction, null);
+    }
+
+    /**
+     * 회의 프롬프트 재료(D-P3b-5). {@code recentRuns}는 회고 자료(RETRO만, 그 외 빈 목록), {@code approvedPlan}은
+     * PLAN 게이트 승인 뒤 이어받은 run에서만 채워진다(승인된 요청문 — 있으면 회의를 다시 열지 않는다).
+     */
+    public record MeetingContext(long projectId, long spaceId, boolean autoIssue, List<Attendee> attendees,
+                                 List<String> recentRuns, String approvedPlan) {
+    }
+
+    /** 참석 페르소나 — 첫 번째가 진행자. {@code voice}는 페르소나 말투(voicePrompt, 없으면 null). */
+    public record Attendee(String slug, String name, String role, String emoji, String voice) {
     }
 }

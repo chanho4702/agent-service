@@ -54,6 +54,7 @@ class ReviewServiceTest {
     @Mock PersonaRepository personaRepository;
     @Mock TokenService tokenService;
     @Mock AlmClient almClient;
+    @Mock MeetingService meetingService;
     @Mock ObjectProvider<RunService> runServiceProvider;
     @Mock RunService runService;
 
@@ -87,7 +88,7 @@ class ReviewServiceTest {
 
     private ReviewService service(ReviewProperties reviewProperties, SchedulerProperties schedulerProperties) {
         return new ReviewService(runRepository, personaRepository, tokenService, almClient, reviewProperties,
-                schedulerProperties, runServiceProvider);
+                schedulerProperties, meetingService, runServiceProvider);
     }
 
     private static ReviewProperties enabledWith(String slug) {
@@ -357,5 +358,62 @@ class ReviewServiceTest {
 
         verify(runRepository, never()).save(any());
         verify(runRepository, never()).findById(anyLong());
+    }
+
+    // ---- P3b: 회의 run과 자동 에스컬레이션 ----
+
+    @Test
+    void meeting_run_done_never_creates_a_review_because_meetings_have_no_code_output() {
+        for (RunType type : RunType.MEETING_TYPES) {
+            Run meeting = Run.queuedMeeting(type, ISSUE_KEY, 1L, List.of(WORKER_PERSONA_ID), RunTrigger.USER,
+                    "harness://default", null, "안건");
+            ReflectionTestUtils.setField(meeting, "id", 20L);
+            meeting.start("pending", null);
+            meeting.recordWorkspace(WORKSPACE);
+            meeting.recordOutputPage(501L);
+            meeting.complete();
+
+            service(enabledWith("sora")).onRunDone(meeting);
+        }
+
+        verify(runRepository, never()).save(any());
+        verify(runService, never()).execute(anyLong());
+        verify(almClient, never()).addComment(anyLong(), anyString(), anyString());
+    }
+
+    @Test
+    void rejection_past_attempt_limit_hands_the_blocked_review_to_auto_escalation() {
+        Run task = doneTask(WORKSPACE, 3);
+        Run review = failedReview(task);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+
+        service(enabledWith("sora")).onReviewRejected(review);
+
+        verify(meetingService).onBlocked(review, "리뷰 반려 — 시도 한도 3회 소진, 사람 확인 필요");
+    }
+
+    @Test
+    void rejection_that_can_continue_or_blocks_for_other_reasons_does_not_escalate() {
+        Run task = doneTask(WORKSPACE, 1);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+        service(enabledWith("sora")).onReviewRejected(failedReview(task));
+
+        Run orphan = failedReview(doneTask(WORKSPACE, 1));
+        when(runRepository.findById(10L)).thenReturn(Optional.empty());
+        service(enabledWith("sora")).onReviewRejected(orphan);
+
+        verify(meetingService, never()).onBlocked(any(), anyString());
+    }
+
+    @Test
+    void auto_escalation_failure_after_rejection_is_swallowed() {
+        Run task = doneTask(WORKSPACE, 3);
+        Run review = failedReview(task);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+        org.mockito.Mockito.doThrow(new RuntimeException("boom")).when(meetingService).onBlocked(any(), anyString());
+
+        service(enabledWith("sora")).onReviewRejected(review);
+
+        assertThat(review.getStatus()).isEqualTo(RunStatus.BLOCKED);
     }
 }

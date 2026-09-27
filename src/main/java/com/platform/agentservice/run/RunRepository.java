@@ -2,6 +2,7 @@ package com.platform.agentservice.run;
 
 import org.springframework.data.jpa.repository.JpaRepository;
 
+import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
 
@@ -26,4 +27,24 @@ public interface RunRepository extends JpaRepository<Run, Long> {
     List<Run> findTop10ByStatusInAndProjectIdOrderByUpdatedAtDescIdDesc(Collection<RunStatus> statuses, long projectId);
 
     List<Run> findTop20ByPersonaIdOrderByIdDesc(long personaId);
+
+    // ---- 회의 run(P3b) ----
+
+    /** 같은 프로젝트 동시 회의 1건 제한 — 회의 run의 이슈키는 프로젝트 대표 키일 수 있어 이슈 축이 아니라 프로젝트 축으로 본다. */
+    boolean existsByProjectIdAndTypeInAndStatusIn(long projectId, Collection<RunType> types, Collection<RunStatus> statuses);
+
+    boolean existsByIssueKeyAndTypeAndStatusIn(String issueKey, RunType type, Collection<RunStatus> statuses);
+
+    /** 에스컬레이션 "관련 롤" — 그 이슈에서 run을 돌린 페르소나. */
+    List<Run> findTop50ByIssueKeyOrderByIdDesc(String issueKey);
+
+    /** 회고 자료 — 최근 창 안에 갱신된 run. */
+    List<Run> findTop30ByProjectIdAndUpdatedAtGreaterThanEqualOrderByIdDesc(long projectId, Instant since);
+
+    /** 사무실 게시판(D-P3b-7) — 산출물(회의록) 페이지가 있는 완료 회의 run. */
+    List<Run> findTop5ByTypeInAndStatusAndOutputPageIdIsNotNullOrderByEndedAtDescIdDesc(
+            Collection<RunType> types, RunStatus status);
+
+    List<Run> findTop5ByTypeInAndStatusAndProjectIdAndOutputPageIdIsNotNullOrderByEndedAtDescIdDesc(
+            Collection<RunType> types, RunStatus status, long projectId);
 }

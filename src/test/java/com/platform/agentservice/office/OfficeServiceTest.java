@@ -340,4 +340,66 @@ class OfficeServiceTest {
     void 없는_페르소나_활동은_404() {
         assertThatThrownBy(() -> service.activity(9999L)).isInstanceOf(NotFoundException.class);
     }
+
+    // ---- P3b: 게시판(boardPosts) ----
+
+    private Run meetingRun(Persona p, RunType type, long projectId, String issueKey, RunStatus target, Long pageId,
+                           Instant endedAt) {
+        Run r = runs.save(Run.queuedMeeting(type, issueKey, projectId, java.util.List.of(p.getId()), RunTrigger.USER,
+                "harness://default", null, "안건"));
+        r.start("pending", null);
+        if (pageId != null) {
+            r.recordOutputPage(pageId);
+        }
+        if (target == RunStatus.DONE) {
+            r.complete();
+        } else {
+            r.fail("실패");
+        }
+        r = runs.saveAndFlush(r);
+        setTime("run", "ended_at", r.getId(), endedAt);
+        return r;
+    }
+
+    @Test
+    void 게시판은_회의록이_보고된_완료_회의_run_최신_5건이다() {
+        Persona p = persona(1L, "seoyeon", PersonaRole.PLANNER);
+        Run oldest = meetingRun(p, RunType.MEETING, 1L, "PROJECT-1", RunStatus.DONE, 500L, now.minusSeconds(600));
+        Run retro = meetingRun(p, RunType.RETRO, 1L, "PROJECT-1", RunStatus.DONE, 501L, now.minusSeconds(500));
+        Run escalation = meetingRun(p, RunType.ESCALATION, 1L, "AGP-9", RunStatus.DONE, 502L, now.minusSeconds(400));
+        Run m3 = meetingRun(p, RunType.MEETING, 2L, "WEB-1", RunStatus.DONE, 503L, now.minusSeconds(300));
+        Run m4 = meetingRun(p, RunType.MEETING, 1L, "AGP-3", RunStatus.DONE, 504L, now.minusSeconds(200));
+        Run newest = meetingRun(p, RunType.RETRO, 1L, "PROJECT-1", RunStatus.DONE, 505L, now.minusSeconds(100));
+        // 제외 대상: 회의록 없는 완료, 실패한 회의, 페이지를 보고한 TASK.
+        meetingRun(p, RunType.MEETING, 1L, "PROJECT-1", RunStatus.DONE, null, now.minusSeconds(50));
+        meetingRun(p, RunType.MEETING, 1L, "PROJECT-1", RunStatus.FAILED, 506L, now.minusSeconds(40));
+        Run task = runs.save(Run.queued(RunType.TASK, "AGP-1", 1L, p.getId(), RunTrigger.USER, "harness://default", null));
+        task.start("pending", null);
+        task.recordOutputPage(507L);
+        task.complete();
+        runs.saveAndFlush(task);
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.boardPosts()).extracting(OfficeResponse.BoardPost::runId)
+                .containsExactly(newest.getId(), m4.getId(), m3.getId(), escalation.getId(), retro.getId());
+        OfficeResponse.BoardPost first = res.boardPosts().get(0);
+        assertThat(first.type()).isEqualTo(RunType.RETRO);
+        assertThat(first.issueKey()).isEqualTo("PROJECT-1");
+        assertThat(first.projectId()).isEqualTo(1L);
+        assertThat(first.pageId()).isEqualTo(505L);
+        assertThat(first.endedAt()).isEqualTo(now.minusSeconds(100));
+        assertThat(res.boardPosts()).extracting(OfficeResponse.BoardPost::runId).doesNotContain(oldest.getId());
+    }
+
+    @Test
+    void 게시판도_projectId로_좁혀진다() {
+        Persona p = persona(1L, "seoyeon", PersonaRole.PLANNER);
+        Run mine = meetingRun(p, RunType.MEETING, 1L, "PROJECT-1", RunStatus.DONE, 500L, now.minusSeconds(100));
+        meetingRun(p, RunType.MEETING, 2L, "PROJECT-2", RunStatus.DONE, 501L, now.minusSeconds(50));
+
+        assertThat(service.office(1L).boardPosts()).extracting(OfficeResponse.BoardPost::runId)
+                .containsExactly(mine.getId());
+        assertThat(service.office(null).boardPosts()).hasSize(2);
+    }
 }

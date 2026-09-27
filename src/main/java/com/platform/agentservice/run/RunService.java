@@ -77,7 +77,7 @@ public class RunService {
     /** 워커가 실경로를 보고하기 전의 자리표시값 — {@link ReviewService}가 "재사용할 워크스페이스 없음"으로 판정한다. */
     static final String PENDING_WORKSPACE = "pending";
     /** {@code harnessRef}는 현재 전역 하네스 번들 하나뿐이다(T3) — run별 선택지가 없어 상수로 둔다. */
-    private static final String DEFAULT_HARNESS_REF = "harness://default";
+    static final String DEFAULT_HARNESS_REF = "harness://default";
     private static final String CLAIM_STATUS = "inprogress";
     private static final int RECENT_COMMENTS_LIMIT = 10;
     private static final int SUMMARY_MAX_LENGTH = 500;
@@ -95,6 +95,7 @@ public class RunService {
     private final CommitLinkParser commitLinkParser;
     private final BudgetGuard budgetGuard;
     private final ReviewService reviewService;
+    private final MeetingService meetingService;
     /** 재시도 continuation을 {@code @Async} 프록시로 제출하기 위한 자기 지연 조회 — {@code this.execute()}는 프록시를 타지 않는다. */
     private final ObjectProvider<RunService> selfProvider;
 
@@ -103,7 +104,7 @@ public class RunService {
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
                        SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
                        CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService,
-                       ObjectProvider<RunService> selfProvider) {
+                       MeetingService meetingService, ObjectProvider<RunService> selfProvider) {
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -117,6 +118,7 @@ public class RunService {
         this.commitLinkParser = commitLinkParser;
         this.budgetGuard = budgetGuard;
         this.reviewService = reviewService;
+        this.meetingService = meetingService;
         this.selfProvider = selfProvider;
     }
 
@@ -256,6 +258,12 @@ public class RunService {
      * 바꿔놓고 워커를 못 띄우는 상황을 피한다).
      */
     private WorkerJob buildJob(Run run) {
+        if (run.getType().isMeeting()) {
+            // D-P3b-2: 회의는 clone도 claim도 하지 않는다 — 리포 매핑이 없는 프로젝트에서도 회의가 죽지 않아야 한다.
+            Persona facilitator = personaRepository.findById(run.getPersonaId())
+                    .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));
+            return meetingService.buildJob(run, tokenService.bearerFor(facilitator.getMemberId()));
+        }
         String repoUrl = resolveRepoUrl(run.getIssueKey());
 
         Persona persona = personaRepository.findById(run.getPersonaId())
@@ -360,6 +368,12 @@ public class RunService {
                 finishFailed(runId, "리뷰 판정(report_result) 없이 종료");
                 return;
             }
+            if (run.getType().isMeeting()) {
+                // 회의 산출물은 report_result(pageId)로만 받는다(D-P3b-3) — 보고 없이 끝난 회의를 완료로 치면 게시판에 안 걸리는
+                // "회의록 없는 완료"가 된다.
+                finishFailed(runId, "회의록 보고(report_result) 없이 종료");
+                return;
+            }
 
             run.complete();
             run = runRepository.save(run);
@@ -462,13 +476,18 @@ public class RunService {
             return;
         }
         try {
+            Run run = runRepository.findById(runId)
+                    .orElseThrow(() -> new NotFoundException("run을 찾을 수 없습니다: " + runId));
+            if (run.getType().isMeeting()) {
+                // 회의 워크스페이스는 git 저장소가 아니다 — git은 상위 디렉터리로 거슬러 올라가 저장소를 찾으므로, 작업 디렉터리가
+                // 어떤 리포 안에 있으면 남의 커밋을 이 이슈에 링크할 수 있다.
+                return;
+            }
             List<CommitLinkParser.CommitLink> links = commitLinkParser.parse(Path.of(workspacePath));
             if (links.isEmpty()) {
                 return;
             }
 
-            Run run = runRepository.findById(runId)
-                    .orElseThrow(() -> new NotFoundException("run을 찾을 수 없습니다: " + runId));
             Persona persona = personaRepository.findById(run.getPersonaId())
                     .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));
             String bearer = tokenService.bearerFor(persona.getMemberId());
@@ -557,6 +576,16 @@ public class RunService {
             failedRun.block(blockReason);
             runRepository.save(failedRun);
             commentBestEffort(failedRun, "⛔ " + blockReason);
+            safelyEscalate(failedRun, blockReason);
+        }
+    }
+
+    /** BLOCKED는 이미 커밋됐다 — 자동 에스컬레이션(D-P3b-4③) 실패가 run 처리 흐름을 망치지 않게 삼킨다. */
+    private void safelyEscalate(Run blockedRun, String reason) {
+        try {
+            meetingService.onBlocked(blockedRun, reason);
+        } catch (Exception e) {
+            log.warn("run={} 자동 에스컬레이션 생성 실패 — BLOCKED로 남아 사람 재개 대상입니다: {}", blockedRun.getId(), e.getMessage());
         }
     }
 
@@ -571,6 +600,9 @@ public class RunService {
 
     /** 상태 전이는 이미 커밋된 뒤의 부가 알림이다 — 실패해도 run 처리 흐름을 막지 않는다. */
     private void commentBestEffort(Run run, String body) {
+        if (!run.hasAgendaIssue()) {
+            return;
+        }
         try {
             Persona persona = personaRepository.findById(run.getPersonaId())
                     .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));

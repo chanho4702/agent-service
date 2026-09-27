@@ -17,6 +17,7 @@ import com.platform.agentservice.run.Run;
 import com.platform.agentservice.run.RunRepository;
 import com.platform.agentservice.run.RunService;
 import com.platform.agentservice.run.RunStatus;
+import com.platform.agentservice.run.RunType;
 import com.platform.agentservice.run.dto.RunSummaryResponse;
 import com.platform.common.error.NotFoundException;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -124,8 +125,20 @@ public class OfficeService {
         BudgetStatusResponse budget = new BudgetStatusResponse(snapshot.monthlyCapUsd(),
                 snapshot.platformMonthToDateUsd(), snapshot.killSwitch());
 
+        List<Run> posts = projectId == null
+                ? runRepository.findTop5ByTypeInAndStatusAndOutputPageIdIsNotNullOrderByEndedAtDescIdDesc(
+                        RunType.MEETING_TYPES, RunStatus.DONE)
+                : runRepository.findTop5ByTypeInAndStatusAndProjectIdAndOutputPageIdIsNotNullOrderByEndedAtDescIdDesc(
+                        RunType.MEETING_TYPES, RunStatus.DONE, projectId);
+
         return new OfficeResponse(personas, finished.stream().map(RunSummaryResponse::of).toList(),
-                gates.size(), gates.stream().limit(PENDING_GATE_LIMIT).toList(), budget, now);
+                gates.size(), gates.stream().limit(PENDING_GATE_LIMIT).toList(), budget, now,
+                posts.stream().map(OfficeService::toBoardPost).toList());
+    }
+
+    private static OfficeResponse.BoardPost toBoardPost(Run run) {
+        return new OfficeResponse.BoardPost(run.getId(), run.getType(), run.getIssueKey(), run.getProjectId(),
+                run.getOutputPageId(), run.getEndedAt());
     }
 
     public PersonaActivityResponse activity(long personaId) {

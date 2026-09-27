@@ -26,16 +26,18 @@ public class RunToolService {
     private final RunRepository runRepository;
     private final GateRepository gateRepository;
 
+    /** {@code issueKey}는 코멘트 대상 — 안건 이슈 없는 회의 run이면 null(ALM에 없는 대표 키로 코멘트하지 않는다). */
     public record GateRequestResult(long gateId, String issueKey) {
     }
 
+    /** {@code issueKey}는 코멘트 대상 — {@link GateRequestResult}와 같은 규칙. */
     public record RunResultOutcome(String issueKey) {
     }
 
-    /** {@code report_progress} 검증 — 상태 변경 없음(읽기 전용). */
+    /** {@code report_progress} 검증 — 상태 변경 없음(읽기 전용). 코멘트할 이슈가 없으면 null. */
     @Transactional(readOnly = true)
     public String requireRunningIssueKey(long runId, long callerPersonaId) {
-        return loadAndAuthorize(runId, callerPersonaId, RunStatus.RUNNING).getIssueKey();
+        return commentTarget(loadAndAuthorize(runId, callerPersonaId, RunStatus.RUNNING));
     }
 
     /** {@code request_gate} — Gate 생성 + run→WAITING_APPROVAL. */
@@ -44,31 +46,55 @@ public class RunToolService {
         Run run = loadAndAuthorize(runId, callerPersonaId, RunStatus.RUNNING);
         Gate gate = gateRepository.save(Gate.request(runId, kind, request));
         run.parkForApproval();
-        return new GateRequestResult(gate.getId(), run.getIssueKey());
+        return new GateRequestResult(gate.getId(), commentTarget(run));
     }
 
-    /** {@code report_result} status=DONE. */
+    /**
+     * {@code report_result} status=DONE. {@code pageId}(선택)는 산출물 위키 페이지로 run에 기록된다(D-P3b-3).
+     * 회의 run은 pageId 없이 완료할 수 없다 — 회의록이 곧 회의의 산출물이고, 게시판이 이 값으로 링크를 만든다.
+     * 거부는 상태 전이 전이라 워커가 pageId를 붙여 다시 부르면 된다.
+     */
     @Transactional
-    public RunResultOutcome completeRun(long runId, long callerPersonaId) {
+    public RunResultOutcome completeRun(long runId, long callerPersonaId, Long pageId) {
         Run run = loadAndAuthorize(runId, callerPersonaId, RunStatus.RUNNING);
+        if (run.getType().isMeeting() && pageId == null) {
+            throw new IllegalArgumentException("회의 run은 회의록 pageId 없이 완료할 수 없습니다: run=" + runId);
+        }
+        recordOutputPage(run, pageId);
         run.complete();
-        return new RunResultOutcome(run.getIssueKey());
+        return new RunResultOutcome(commentTarget(run));
     }
 
-    /** {@code report_result} status=FAILED. */
+    /** {@code report_result} status=FAILED. 실패해도 남긴 페이지(중간 보고서)가 있으면 기록한다. */
     @Transactional
-    public RunResultOutcome failRun(long runId, long callerPersonaId, String error) {
+    public RunResultOutcome failRun(long runId, long callerPersonaId, String error, Long pageId) {
         Run run = loadAndAuthorize(runId, callerPersonaId, RunStatus.RUNNING);
+        recordOutputPage(run, pageId);
         run.fail(error);
-        return new RunResultOutcome(run.getIssueKey());
+        return new RunResultOutcome(commentTarget(run));
     }
 
     /** {@code report_result} status=BLOCKED. */
     @Transactional
-    public RunResultOutcome blockRun(long runId, long callerPersonaId, String error) {
+    public RunResultOutcome blockRun(long runId, long callerPersonaId, String error, Long pageId) {
         Run run = loadAndAuthorize(runId, callerPersonaId, RunStatus.RUNNING);
+        recordOutputPage(run, pageId);
         run.block(error);
-        return new RunResultOutcome(run.getIssueKey());
+        return new RunResultOutcome(commentTarget(run));
+    }
+
+    private static void recordOutputPage(Run run, Long pageId) {
+        if (pageId == null) {
+            return;
+        }
+        if (pageId <= 0) {
+            throw new IllegalArgumentException("pageId는 양수여야 합니다: " + pageId);
+        }
+        run.recordOutputPage(pageId);
+    }
+
+    private static String commentTarget(Run run) {
+        return run.hasAgendaIssue() ? run.getIssueKey() : null;
     }
 
     private Run loadAndAuthorize(long runId, long callerPersonaId, RunStatus requiredStatus) {

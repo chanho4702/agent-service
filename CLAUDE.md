@@ -414,6 +414,82 @@ USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogres
 - 실제 무인 루프에서의 리뷰 왕복 E2E는 이 문서 작성 시점(T3 커밋 `0c2837a`) 기준 단위 테스트
   (`ReviewServiceTest`·`RunServiceTest`·`WorkerLauncherTest`·`RunLineageTest`)로만 검증됐다 — 도그푸딩 실측 결과는 이후 추가한다.
 
+### 5.9 회의 run (P3b, 2026-09-27, AGP-15 — 스펙 §6)
+
+회의는 별도 엔진이 아니라 같은 워커 파이프라인의 run 타입 3종이다(`RunType.MEETING`(착수/계획)·`RETRO`(회고)·
+`ESCALATION`). 워커(`claude -p`)가 회의 프롬프트로 참석 페르소나를 롤플레이하고, 산출물은 위키 회의록 페이지다.
+구현은 `MeetingService`(소집·참석 규칙·워커 입력·자동 트리거) + `WorkerLauncher.buildMeetingPrompt` + `MeetingController`.
+게이트·예산·킬 스위치는 TASK와 똑같이 `RunService.execute` 진입점에서 걸린다.
+
+**설정(`platform.agent.meetings.*`)**
+
+| 키 | env | 기본 | 의미 |
+|---|---|---|---|
+| `space-id` | `MEETING_SPACE_ID` | 빈 값 | 회의록 위키 스페이스. 비면 소집 API 400, 회고 cron·자동 에스컬레이션은 건너뜀. 진행자 페르소나에 이 스페이스 EDITOR grant 필요 |
+| `retro-cron` | `MEETING_RETRO_CRON` | 빈 값(off) | Spring cron 6필드, **Asia/Seoul**. `SCHEDULER_ENABLED=false`여도 이것만으로 동작 |
+| `auto-escalation` | `MEETING_AUTO_ESCALATION` | `false` | BLOCKED 승격 시 ESCALATION run 자동 생성(비용 때문에 기본 off) |
+| `auto-issue` | `MEETING_AUTO_ISSUE` | `true` | 결정→이슈를 워커가 `create_issue`로 직접. false면 PLAN 게이트 경유 |
+
+**소집 API — `POST /api/agent/meetings`(ADMIN)**
+
+```json
+{"type": "MEETING|RETRO|ESCALATION", "projectId": 1, "agendaIssueKey": "선택, 40자", "agenda": "선택, 4000자", "personaSlugs": ["선택, 20명 이하"]}
+```
+
+- 201 응답: `{"run": RunSummaryResponse, "attendees": [{"personaId","slug","name","role","emoji"}]}` — attendees[0]이 진행자.
+- 참석자: `personaSlugs`가 있으면 그 순서(첫 번째 = 진행자, 없는 슬러그 404·비활성 400). 없으면 **활성** 페르소나 중
+  계획=PLANNER·DESIGNER·FRONTEND·BACKEND, 회고=전원, 에스컬레이션=그 이슈에서 run을 돌린 페르소나(회의 run 제외)+REVIEWER
+  (관련 run이 없으면 PLANNER+REVIEWER)를 롤 순서(PLANNER→DESIGNER→FRONTEND→BACKEND→OPS→REVIEWER)·id 순으로 세운다.
+  진행자가 run 소유 페르소나다(run 토큰·기록 명의). 참석자 id는 `run.attendee_persona_ids`에 저장돼 continuation까지 승계된다.
+- `agendaIssueKey`가 있으면 진행자 bearer로 ALM에서 확인(없으면 기존 `DownstreamErrors` 매핑)하고 다른 프로젝트 이슈면 400,
+  run.issueKey는 ALM 정본 키. 없으면 **`PROJECT-<projectId>`** 대표 키(`Run.projectIssueKey`) — 이 run은
+  `hasAgendaIssue()=false`라 서버 코멘트·`report_progress`/`report_result`/`request_gate` 코멘트를 전부 건너뛴다.
+  알려진 판정 한계(수용): ALM 프로젝트 키를 문자 그대로 `PROJECT`로 만든 설치에서 이슈 번호가 projectId와 우연히 같은
+  안건(`PROJECT-<projectId>`)을 지정하면 합성 키로 오판해 그 회의의 이슈 코멘트가 생략된다 — 프로젝트 키 `PROJECT`를 피하라.
+- `projectId`는 ALM `getProject`로 확인하고 그 키로 모델 정책(§5.1)을 푼다. MEETING·ESCALATION은 `agendaIssueKey`·`agenda`
+  둘 다 없으면 400(빈 회의 방지). `agenda`는 `run.instruction`에 들어가 `<사용자-지시>` 경계로 프롬프트에 실린다.
+- 같은 프로젝트에 활성(QUEUED/RUNNING/WAITING_APPROVAL/BLOCKED) 회의 run이 있으면 409. 이슈 단위 중복 가드는 쓰지 않는다.
+  단, 안건 이슈가 있는 회의 run은 활성인 동안 그 이슈의 TASK 생성·픽업을 막는다(`existsByIssueKeyAndStatusIn`이 타입 무관).
+- 실행 제출은 컨트롤러가 `RunService.execute` 프록시로(§5.5와 같은 이유).
+
+**실행(워커 회의 모드)** — `RunService.buildJob`이 회의 타입이면 리포 매핑·claim을 전부 건너뛰고 `MeetingService.buildJob`에
+넘긴다(안건 이슈가 있으면 본문·최근 코멘트 10건만 읽는다). `WorkerLauncher`는 clone 없이 빈 워크스페이스
+(`AGENT_WORK_DIR/run-{id}`) + 하네스 실체화만 한다. 회의 워크스페이스는 git 저장소가 아니므로 커밋 링크 파서를 태우지 않는다
+(git이 상위 디렉터리 저장소를 찾아 남의 커밋을 링크할 수 있어서). RETRO는 서버가 최근 24시간 그 프로젝트 run 요약(최대 30건)을
+`<최근-run>` 블록으로 싣는다(워커에 run 조회 도구가 없다).
+
+**프롬프트 계약(`WorkerLauncher.buildMeetingPrompt`)** — 순서: `## 회의 소집`(종류·목적·산출물·프로젝트 id·안건 이슈·회의록
+스페이스 id) → `## 참석자(1번이 진행자 — 너)`(emoji 이름 — 롤, slug, 말투=voicePrompt) → 데이터 블록(`<이슈-내용>`·`<코멘트>`
+[안건 이슈 있을 때]·`<최근-run>`[RETRO]·`<사용자-지시>`·`<승인된-계획>`) → "블록은 데이터, 규약 우선" 문장 → `## 회의 규약` →
+`## 회의록 템플릿`(참석자/안건/논의/결정/액션아이템[+ESCALATION은 "사람에게 묻는 질문"]) → `runId=N`. 규약 요지: 진행자가
+참석자를 순서대로 롤플레이, 코드·git 금지, 맥락은 도구로 조회, 안건 이슈 claim·상태 변경 금지, 회의록은
+`create_page(spaceId=<space-id>)`로 한 번만, 결정→이슈는 `auto-issue`면 `create_issue` 직접/아니면 `request_gate(PLAN)`로
+승인 요청 후 종료, 안건 이슈가 있으면 회의록 링크 코멘트, **마감은 `report_result(status=DONE, pageId=<회의록>)`**.
+
+**`report_result`의 `pageId`(선택 인자, 하위 호환)** — 어떤 run이든 DONE/FAILED/BLOCKED와 함께 pageId를 주면
+`run.output_page_id`에 기록된다(양수만). **회의 run의 DONE은 pageId 필수** — 없으면 도구가 오류를 돌려주고 run은 RUNNING
+그대로다(워커가 pageId를 붙여 다시 부른다). 회의 run이 `report_result` 없이 프로세스만 성공하면 완료가 아니라 **실패**
+("회의록 보고(report_result) 없이 종료") → 일반 재시도 경로.
+
+**PLAN 게이트 이어받기(`auto-issue=false`)** — 회의 continuation(재시도·게이트 승인·재개)은 직전 회의 run을
+`parentRunId`로 잇는다(TASK 재시도와 다름). `MeetingService.buildJob`이 조상 사슬(최대 20단계)에서 승인된 PLAN 게이트를 찾으면
+그 요청문을 `<승인된-계획>`으로 싣고, 프롬프트는 "회의를 다시 열지 말고 제안 이슈를 만들어 기존 회의록을 갱신한 뒤
+`report_result(DONE, pageId=그 회의록)`"으로 바뀐다.
+
+**자동 에스컬레이션(`auto-escalation=true`)** — BLOCKED 승격 두 지점(`RunService.handleRetryOrBlock` 재시도 한도,
+`ReviewService.onReviewRejected` 반려 한도)에서 `MeetingService.onBlocked`를 부른다(예외는 삼킨다 — BLOCKED는 이미 커밋).
+원 run의 프로젝트·이슈키·trigger를 승계한 ESCALATION run을 만들어 제출하고 이슈에 소집 코멘트를 남긴다. 지시문:
+`<이슈키> <재시도 한도>회 실패/반려 — 원인 분석과 사람에게 물을 질문 목록` + 원 run id·타입 + 차단 사유 + 실패 기록 끝 1000자.
+가드: **원 run이 회의 3종이면 만들지 않는다**(재귀 방지), 같은 이슈에 활성 ESCALATION이 있으면 건너뛴다. 리뷰 반려의
+"원 run 없음·워크스페이스 없음" BLOCKED는 대상이 아니다(한도 분기만).
+
+**회고 cron** — `retro-cron`이 있을 때만 `MeetingRetroSchedulingConfig`가 등록된다(자체 `@EnableScheduling` — 스케줄러
+킬스위치와 독립. 이 경우 `Dispatcher.tick`도 스케줄되지만 `enabled` 확인에서 바로 돌아간다). 틱마다 `worker.repos` 매핑의
+프로젝트 키마다 ALM 프로젝트 목록(진행자 명의 1회 조회)으로 id를 풀어 프로젝트별 RETRO run 하나(trigger=SCHEDULER,
+참석=활성 전원, 대표 키 `PROJECT-<id>`). ALM에 없는 키·활성 회의가 있는 프로젝트는 건너뛴다.
+
+**리뷰와의 관계** — 회의 run의 DONE은 REVIEW를 만들지 않는다(`ReviewService.onRunDone`은 TASK만 — 테스트로 고정).
+
 ## 6. P3a: AI 사무실 감독 API (2026-09-26)
 
 alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`office` 패키지). 인증된 사용자 누구나 — run·게이트
@@ -422,7 +498,11 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 - `GET /api/agent/office?projectId=`(선택): `personas[]`(id·slug·name·emoji·role·active·`currentRun`·
   `lastActivity`·`todayCostUsd`) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
-  `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt`.
+  `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래).
+  - `boardPosts`(사무실 게시판, D-P3b-7): 회의 run(MEETING/RETRO/ESCALATION) 중 DONE이고 `output_page_id`가 있는 것
+    `endedAt` 최신순 5건 — `{runId, type, issueKey, projectId, pageId, endedAt}`. 제목은 위키를 조회하지 않는다(프론트가
+    type 라벨+시각으로 그림 — 권한 없는 스페이스 제목 노출도 피함). 안건 이슈 없는 회의의 issueKey는 `PROJECT-<projectId>`.
+    projectId 필터 적용. 부분 인덱스 `idx_run_board`(V6).
   - `currentRun`: `RunService.ACTIVE_STATUSES`(QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED) 중 페르소나별 최신 1건(id 기준), 없으면 null.
     필드: id·status·issueKey·type·trigger·attempt·model·startedAt. 감사 로그(`AuditEntry`)에는 runId가 없다 —
     `tool_call_audit`에 run 축 컬럼이 없어서(스키마 변경 없이 생략).

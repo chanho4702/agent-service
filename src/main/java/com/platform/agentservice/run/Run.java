@@ -9,8 +9,11 @@ import org.hibernate.annotations.CreationTimestamp;
 import org.hibernate.annotations.UpdateTimestamp;
 
 import java.time.Instant;
+import java.util.Arrays;
 import java.util.EnumSet;
+import java.util.List;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 /**
  * 에이전트 실행 한 건 — 스펙 D9·§10.5. QUEUED에서 시작해 RUNNING을 거쳐 종단(DONE/CANCELLED)
@@ -67,8 +70,13 @@ public class Run {
     /**
      * REVIEW run → 검증 대상 TASK run, 반려-fix continuation → 반려한 REVIEW run. 일반 TASK의 재시도
      * continuation에는 비워 두고, REVIEW·반려-fix의 재시도는 부모를 그대로 잇는다({@link #continuation}).
+     * 회의 run의 continuation(재시도·게이트 승인·재개)은 직전 회의 run을 부모로 둔다.
      */
     private Long parentRunId;
+    /** 워커가 {@code report_result(pageId=)}로 보고한 산출물 위키 페이지(회의록·보고서, D-P3b-3). */
+    private Long outputPageId;
+    /** 회의 run 참석 페르소나 id 쉼표 목록 — 첫 번째가 진행자(= {@link #personaId}). 회의 run이 아니면 null. */
+    @Column(length = 400) private String attendeePersonaIds;
     private Instant startedAt;
     private Instant endedAt;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
@@ -121,6 +129,12 @@ public class Run {
             r.workspacePath = prior.workspacePath;
             r.parentRunId = prior.parentRunId;
         }
+        if (prior.type.isMeeting()) {
+            // 회의 continuation은 직전 run을 부모로 잇는다 — PLAN 게이트 승인 뒤 이어받은 run이 조상 사슬에서 승인된
+            // 계획을 찾아 회의를 다시 열지 않고 이슈만 만들게 하기 위함이다(MeetingService.approvedPlan).
+            r.parentRunId = prior.id;
+            r.attendeePersonaIds = prior.attendeePersonaIds;
+        }
         r.status = RunStatus.QUEUED;
         r.attempt = prior.attempt + 1;
         return r;
@@ -140,6 +154,47 @@ public class Run {
         Run r = queued(RunType.TASK, issueKey, projectId, personaId, RunTrigger.USER, harnessRef, model);
         r.instruction = instruction;
         return r;
+    }
+
+    /**
+     * 회의 run(D-P3b-1). 진행자는 참석자 첫 번째이며 run의 소유 페르소나다 — run 토큰·기록 명의가 진행자다.
+     * 안건 이슈가 없으면 issueKey는 {@link #projectIssueKey}(기존 NOT NULL 컬럼 재사용, D-P3b-2).
+     */
+    public static Run queuedMeeting(RunType type, String issueKey, long projectId, List<Long> attendeeIds,
+                                    RunTrigger trigger, String harnessRef, String model, String instruction) {
+        if (type == null || !type.isMeeting()) {
+            throw new IllegalArgumentException("회의 run 종류가 아닙니다: " + type);
+        }
+        if (attendeeIds == null || attendeeIds.isEmpty()) {
+            throw new IllegalArgumentException("회의 참석자가 없습니다");
+        }
+        Run r = queued(type, issueKey, projectId, attendeeIds.get(0), trigger, harnessRef, model);
+        r.instruction = instruction;
+        r.attendeePersonaIds = attendeeIds.stream().map(String::valueOf).collect(Collectors.joining(","));
+        return r;
+    }
+
+    /** 안건 이슈 없는 회의의 대표 키 — 커밋 파서·claim·코멘트는 이 키를 이슈로 취급하지 않는다({@link #hasAgendaIssue}). */
+    public static String projectIssueKey(long projectId) {
+        return "PROJECT-" + projectId;
+    }
+
+    /** issueKey가 실제 ALM 이슈인가 — 안건 이슈 없는 회의만 false다(ALM에 없는 키로 코멘트·조회를 시도하지 않게). */
+    public boolean hasAgendaIssue() {
+        return !(type.isMeeting() && projectIssueKey(projectId).equals(issueKey));
+    }
+
+    /** 참석자 id(진행자 먼저). 회의 run이 아니면 빈 목록. */
+    public List<Long> getAttendeeIds() {
+        if (attendeePersonaIds == null || attendeePersonaIds.isBlank()) {
+            return List.of();
+        }
+        return Arrays.stream(attendeePersonaIds.split(","))
+                .map(String::trim).filter(s -> !s.isEmpty()).map(Long::valueOf).toList();
+    }
+
+    public void recordOutputPage(long pageId) {
+        this.outputPageId = pageId;
     }
 
     /**

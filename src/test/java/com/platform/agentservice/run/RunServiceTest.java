@@ -71,6 +71,7 @@ class RunServiceTest {
     @Mock CommitLinkParser commitLinkParser;
     @Mock BudgetGuard budgetGuard;
     @Mock ReviewService reviewService;
+    @Mock MeetingService meetingService;
     /** 자기 지연 조회가 돌려주는 {@code @Async} 프록시 대역 — 재시도 제출을 관찰만 하고 실행하지 않는다. */
     @Mock ObjectProvider<RunService> selfProvider;
     @Mock RunService selfProxy;
@@ -88,7 +89,7 @@ class RunServiceTest {
         budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser, budgetGuard, reviewService, selfProvider);
+                commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
 
         Persona persona = Persona.of(PERSONA_MEMBER_ID, "jiho", PersonaRole.BACKEND, "지호", "🔧", null);
         ReflectionTestUtils.setField(persona, "id", PERSONA_ID);
@@ -160,7 +161,7 @@ class RunServiceTest {
                 "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of());
         return new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, props, budgetProperties,
-                commitLinkParser, budgetGuard, reviewService, selfProvider);
+                commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
     }
 
     @Test
@@ -936,7 +937,7 @@ class RunServiceTest {
         RunService serviceWithLowercasedRepos = new RunService(runRepository, almClient, issueClaimSupport,
                 tokenService, personaRepository, workerLauncher, lowercasedRepos, usageLedgerRepository,
                 schedulerProperties, new com.platform.agentservice.budget.BudgetProperties(
-                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser, budgetGuard, reviewService, selfProvider);
+                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
 
         Run run = queuedRun(42L);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
@@ -1268,5 +1269,103 @@ class RunServiceTest {
         ArgumentCaptor<Run> launched = ArgumentCaptor.forClass(Run.class);
         verify(workerLauncher).launch(launched.capture(), any(WorkerJob.class));
         assertThat(launched.getValue().getWorkspacePath()).isEqualTo(REVIEW_WORKSPACE);
+    }
+
+    // ---- P3b: 회의 run ----
+
+    private Run queuedMeetingRun(long id, String issueKey) {
+        Run run = Run.queuedMeeting(RunType.MEETING, issueKey, PROJECT_ID, List.of(PERSONA_ID), RunTrigger.USER,
+                "harness://default", null, "안건");
+        ReflectionTestUtils.setField(run, "id", id);
+        return run;
+    }
+
+    private static WorkerJob meetingJob() {
+        return new WorkerJob(null, null, null, List.of(), "안건", new WorkerJob.MeetingContext(PROJECT_ID, 7L, true,
+                List.of(new WorkerJob.Attendee("jiho", "지호", "BACKEND", null, null)), List.of(), null));
+    }
+
+    @Test
+    void meeting_run_builds_job_via_meeting_service_without_repo_mapping_or_claim_and_never_parses_commits() {
+        // 리포 매핑이 없는 프로젝트(PROJECT-1)여도 회의는 죽지 않는다.
+        Run run = queuedMeetingRun(80L, "PROJECT-1");
+        when(runRepository.findById(80L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+        WorkerJob job = meetingJob();
+        when(meetingService.buildJob(run, BEARER)).thenReturn(job);
+        when(workerLauncher.launch(any(Run.class), eq(job))).thenAnswer(inv -> {
+            run.recordOutputPage(501L);
+            run.complete();
+            return new WorkerResult(0, false, "ok", "sess", null, 0L, 0L, null, "raw", "C:/agent-work/run-80");
+        });
+
+        runService.execute(80L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        verify(issueClaimSupport, never()).claim(anyString(), any(), anyString(), anyString());
+        verify(commitLinkParser, never()).parse(any());
+        // 안건 이슈가 없는 회의는 ALM에 없는 대표 키라 이슈 조회·코멘트를 시도하지 않는다.
+        verify(almClient, never()).getByKey(anyString(), anyString());
+        verify(reviewService).onRunDone(run);
+    }
+
+    @Test
+    void meeting_run_that_exits_without_report_result_fails_instead_of_completing() {
+        Run run = queuedMeetingRun(81L, "AGP-9");
+        when(runRepository.findById(81L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+        when(meetingService.buildJob(run, BEARER)).thenReturn(meetingJob());
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
+                .thenReturn(new WorkerResult(0, false, "회의 끝", "sess", null, 0L, 0L, null, "raw", "C:/agent-work/run-81"));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+
+        runService.execute(81L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
+        assertThat(run.getError()).contains("회의록 보고(report_result) 없이 종료");
+        verify(reviewService, never()).onRunDone(any());
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        assertThat(saved.getAllValues()).anyMatch(r -> r != run && r.getType() == RunType.MEETING
+                && r.getStatus() == RunStatus.QUEUED && r.getParentRunId() != null && r.getParentRunId() == 81L);
+    }
+
+    @Test
+    void blocking_at_retry_limit_hands_the_run_to_auto_escalation() {
+        Run third = queuedRun(3L);
+        ReflectionTestUtils.setField(third, "attempt", 3);
+        when(runRepository.findById(3L)).thenReturn(Optional.of(third));
+        stubSaveReturnsArgument();
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
+                .thenReturn(WorkerResult.failure(1, false, "boom", null));
+
+        runService.execute(3L);
+
+        assertThat(third.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        verify(meetingService).onBlocked(third, "3회 실패 — 사람 확인 필요");
+    }
+
+    @Test
+    void auto_escalation_failure_is_swallowed_and_run_stays_blocked() {
+        Run third = queuedRun(3L);
+        ReflectionTestUtils.setField(third, "attempt", 3);
+        when(runRepository.findById(3L)).thenReturn(Optional.of(third));
+        stubSaveReturnsArgument();
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
+                .thenReturn(WorkerResult.failure(1, false, "boom", null));
+        org.mockito.Mockito.doThrow(new RuntimeException("db down")).when(meetingService).onBlocked(any(), anyString());
+
+        runService.execute(3L);
+
+        assertThat(third.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        assertThat(third.getError()).doesNotContain("결과 반영 오류");
     }
 }
