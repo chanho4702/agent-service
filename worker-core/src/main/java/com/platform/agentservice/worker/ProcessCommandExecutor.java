@@ -87,9 +87,12 @@ public class ProcessCommandExecutor implements CommandExecutor {
         this.parentEnv = Map.copyOf(parentEnv);
     }
 
+    private static final boolean WINDOWS = System.getProperty("os.name", "").toLowerCase(java.util.Locale.ROOT).contains("win");
+
     @Override
     public ExecResult exec(List<String> command, Path cwd, Map<String, String> extraEnv, Duration timeout) {
-        ProcessBuilder builder = new ProcessBuilder(command);
+        ProcessBuilder builder = new ProcessBuilder(WINDOWS ? command.stream().map(ProcessCommandExecutor::escapeWindowsArg).toList()
+                : command);
         builder.directory(cwd.toFile());
         applyCurtain(builder.environment(), extraEnv);
 
@@ -152,6 +155,36 @@ public class ProcessCommandExecutor implements CommandExecutor {
      */
     protected void destroy(Process process) {
         process.destroyForcibly();
+    }
+
+    /**
+     * Windows 명령행 인자 속 큰따옴표 이스케이프(AGP-69 E2E 실측). JDK는 공백이 있는 인자를 {@code "…"}로 감쌀 뿐 안쪽 {@code "}를
+     * 이스케이프하지 않는다 — 자식(claude.exe·git.exe, 표준 CommandLineToArgvW 규칙)은 그 따옴표에서 인자를 끊는다. 워커 프롬프트에
+     * {@code title="[착수/계획 회의] …"} 같은 따옴표가 있어 프롬프트가 거기서 잘리고 뒤의 규약(`report_result` 마감 등)이 통째로
+     * 사라졌다(run 18). 규칙: 따옴표 앞의 역슬래시 n개는 2n개로 늘리고 따옴표 앞에 역슬래시 하나를 붙인다. 따옴표 앞이 아닌 역슬래시
+     * (Windows 경로)와 끝 역슬래시는 건드리지 않는다 — 끝 역슬래시는 JDK가 감쌀 때 하나를 덧붙인다.
+     */
+    static String escapeWindowsArg(String arg) {
+        if (arg == null || arg.indexOf('"') < 0) {
+            return arg;
+        }
+        StringBuilder out = new StringBuilder(arg.length() + 16);
+        int backslashes = 0;
+        for (int i = 0; i < arg.length(); i++) {
+            char c = arg.charAt(i);
+            if (c == '\\') {
+                backslashes++;
+                continue;
+            }
+            if (c == '"') {
+                out.append("\\".repeat(backslashes * 2 + 1)).append('"');
+            } else {
+                out.append("\\".repeat(backslashes)).append(c);
+            }
+            backslashes = 0;
+        }
+        out.append("\\".repeat(backslashes));
+        return out.toString();
     }
 
     /** 자식 env를 비우고 허용 키만 부모에서 옮긴 뒤 extraEnv를 덧씌운다 — 호출부 명시값이 항상 이긴다. */

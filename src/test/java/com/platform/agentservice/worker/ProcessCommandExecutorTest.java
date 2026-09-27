@@ -174,4 +174,40 @@ class ProcessCommandExecutorTest {
         assertThat(version.exitCode()).as(version.stderr()).isZero();
         assertThat(version.stdout()).containsIgnoringCase("claude");
     }
+
+    @Test
+    void windows_arg_escaping_escapes_quotes_and_the_backslashes_right_before_them_only() {
+        assertThat(ProcessCommandExecutor.escapeWindowsArg("no quotes C:\\path\\")).isEqualTo("no quotes C:\\path\\");
+        assertThat(ProcessCommandExecutor.escapeWindowsArg("title=\"[회의] x\"")).isEqualTo("title=\\\"[회의] x\\\"");
+        assertThat(ProcessCommandExecutor.escapeWindowsArg("a\\\"b")).isEqualTo("a\\\\\\\"b");
+        assertThat(ProcessCommandExecutor.escapeWindowsArg("C:\\dir\\ \"q\"")).isEqualTo("C:\\dir\\ \\\"q\\\"");
+    }
+
+    /**
+     * run 18(로컬 러너 E2E) 회귀 — 따옴표·줄바꿈·공백·역슬래시가 섞인 프롬프트가 자식 프로세스에 한 인자로 온전히 닿는다. 자식은 Java
+     * 단일 파일 실행(인자 파싱이 claude.exe·git.exe와 같은 MSVCRT 규칙)으로 받은 인자를 UTF-8 base64로 돌려준다.
+     */
+    @Test
+    @EnabledOnOs(OS.WINDOWS)
+    void windows_child_receives_prompt_with_quotes_as_one_intact_argument(@TempDir Path dir) throws Exception {
+        Path echo = dir.resolve("EchoArgs.java");
+        Files.writeString(echo, "public class EchoArgs { public static void main(String[] a) { System.out.println(a.length); "
+                + "for (String s : a) System.out.println(java.util.Base64.getEncoder().encodeToString("
+                + "s.getBytes(java.nio.charset.StandardCharsets.UTF_8))); } }");
+        String prompt = "## 회의\n- create_page(spaceId=5, title=\"[착수/계획 회의] <날짜>\", contentMarkdown=...)\n"
+                + "경로 C:\\agent-work\\run-1\\ 와 \\\"이중\\\" 그리고 끝\\";
+        String javaExe = Path.of(System.getProperty("java.home"), "bin", "java.exe").toString();
+        ProcessCommandExecutor executor = new ProcessCommandExecutor(List.of(), System.getenv());
+
+        CommandExecutor.ExecResult r = executor.exec(List.of(javaExe, echo.toString(), prompt, "--next", "x y"), dir, Map.of(),
+                Duration.ofSeconds(60));
+
+        assertThat(r.exitCode()).as(r.stderr()).isZero();
+        List<String> lines = r.stdout().lines().toList();
+        assertThat(lines.get(0)).isEqualTo("3");
+        assertThat(new String(java.util.Base64.getDecoder().decode(lines.get(1)), java.nio.charset.StandardCharsets.UTF_8))
+                .isEqualTo(prompt);
+        assertThat(new String(java.util.Base64.getDecoder().decode(lines.get(3)), java.nio.charset.StandardCharsets.UTF_8))
+                .isEqualTo("x y");
+    }
 }
