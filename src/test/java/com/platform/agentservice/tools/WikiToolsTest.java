@@ -2,6 +2,7 @@ package com.platform.agentservice.tools;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.agentservice.audit.AuditService;
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.WikiClient;
@@ -25,6 +26,7 @@ import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.util.List;
 
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyString;
@@ -79,7 +81,7 @@ class WikiToolsTest {
 
         assertThat(result).contains("\"id\":1").contains("\"key\":\"ENG\"").contains("\"name\":\"엔지니어링\"");
         assertThat(result).doesNotContain("설명");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("list_spaces"), anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("list_spaces"), anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     // ---- get_page ----
@@ -92,7 +94,7 @@ class WikiToolsTest {
 
         assertThat(result).contains("\"title\":\"제목\"").contains("\"content\":\"본문\"")
                 .contains("\"version\":3").contains("\"spaceId\":1").contains("\"status\":\"published\"");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_page"), anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_page"), anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     // ---- find_pages: query 있으면 검색, 없으면 루트 목록 ----
@@ -205,7 +207,7 @@ class WikiToolsTest {
         verify(wikiClient, times(2)).getPage(eq(7L), eq(BEARER));
         verify(wikiClient, times(1)).updatePage(eq(7L), eq(firstAttempt), eq(BEARER));
         verify(wikiClient, times(1)).updatePage(eq(7L), eq(secondAttempt), eq(BEARER));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_page"), anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_page"), anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -219,7 +221,7 @@ class WikiToolsTest {
 
         assertThat(result).startsWith("오류:").contains("버전 충돌");
         verify(wikiClient, times(2)).updatePage(eq(7L), any(), eq(BEARER));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_page"), anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_page"), anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     // ---- append_to_page: 기존 본문 보존 ----
@@ -274,7 +276,7 @@ class WikiToolsTest {
         String result = wikiTools.getPage(7L);
 
         assertThat(result).isEqualTo("오류: 문서를 찾을 수 없습니다");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_page"), anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_page"), anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -284,7 +286,7 @@ class WikiToolsTest {
         String result = wikiTools.getPage(7L);
 
         assertThat(result).isEqualTo("권한 서비스/다운스트림 일시 장애 — 권한 없음이 아님, 잠시 후 재시도하세요: wiki-backend 다운");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_page"), anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_page"), anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     // ---- ToolActor ----

@@ -1,5 +1,6 @@
 package com.platform.agentservice.office;
 
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.audit.ToolCallAudit;
 import com.platform.agentservice.audit.ToolCallAuditRepository;
@@ -10,6 +11,7 @@ import com.platform.agentservice.budget.UsageLedger;
 import com.platform.agentservice.budget.UsageLedgerRepository;
 import com.platform.agentservice.office.dto.OfficeResponse;
 import com.platform.agentservice.office.dto.PersonaActivityResponse;
+import com.platform.agentservice.office.dto.PersonaPresence;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.persona.PersonaRole;
@@ -93,6 +95,12 @@ class OfficeServiceTest {
 
     private ToolCallAudit audit(Persona p, String tool, String summary, Instant at) {
         ToolCallAudit a = audits.saveAndFlush(ToolCallAudit.of(p.getId(), 1L, tool, summary, AuditStatus.OK));
+        setTime("tool_call_audit", "created_at", a.getId(), at);
+        return a;
+    }
+
+    private ToolCallAudit audit(Persona p, String tool, AuditOrigin origin, Long runId, Instant at) {
+        ToolCallAudit a = audits.saveAndFlush(ToolCallAudit.of(p.getId(), 1L, tool, "AGP-1", AuditStatus.OK, origin, runId));
         setTime("tool_call_audit", "created_at", a.getId(), at);
         return a;
     }
@@ -234,6 +242,63 @@ class OfficeServiceTest {
             assertThat(a.status()).isEqualTo(AuditStatus.OK);
         });
         assertThat(res.personas().get(1).lastActivity()).isNull();
+    }
+
+    /** AGP-63 — 말풍선·개인 활동에 실행 출처와 WORKER run id가 실린다. V12 이전 행(origin NULL)은 null(미상)로 그대로 나온다. */
+    @Test
+    void 감사_뷰에_출처와_runId가_실리고_기존_NULL_행은_null이다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Persona mina = persona(2L, "mina", PersonaRole.FRONTEND);
+        audit(jiho, "get_issue", AuditOrigin.WORKER, 11L, now.minus(Duration.ofMinutes(1)));
+        audit(mina, "get_issue", "AGP-1", now.minus(Duration.ofMinutes(1)));
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.personas().get(0).lastActivity()).satisfies(a -> {
+            assertThat(a.origin()).isEqualTo(AuditOrigin.WORKER);
+            assertThat(a.runId()).isEqualTo(11L);
+        });
+        assertThat(res.personas().get(1).lastActivity()).satisfies(a -> {
+            assertThat(a.origin()).isNull();
+            assertThat(a.runId()).isNull();
+        });
+
+        PersonaActivityResponse act = service.activity(jiho.getId());
+        assertThat(act.todayAudits()).singleElement().satisfies(a -> {
+            assertThat(a.origin()).isEqualTo(AuditOrigin.WORKER);
+            assertThat(a.runId()).isEqualTo(11L);
+        });
+    }
+
+    /** AGP-63 — presence: 활성 run 없고 5분 안 EXTERNAL 감사가 있을 때만 EXTERNAL. */
+    @Test
+    void 외부_MCP_재실은_활성_run_없이_5분_안_EXTERNAL_감사가_있을_때만이다() {
+        Persona external = persona(1L, "ext", PersonaRole.BACKEND);
+        Persona busy = persona(2L, "busy", PersonaRole.BACKEND);
+        Persona stale = persona(3L, "stale", PersonaRole.BACKEND);
+        Persona worker = persona(4L, "worker", PersonaRole.BACKEND);
+        Persona legacy = persona(5L, "legacy", PersonaRole.BACKEND);
+        Persona system = persona(6L, "system", PersonaRole.BACKEND);
+        audit(external, "get_issue", AuditOrigin.EXTERNAL, null, now.minus(Duration.ofMinutes(4)));
+        // 가장 최근이 WORKER여도 창 안에 EXTERNAL이 있으면 재실 — 말풍선(최신 1건)과 별개로 판정한다.
+        audit(external, "get_issue", AuditOrigin.WORKER, 3L, now.minus(Duration.ofMinutes(1)));
+        audit(busy, "get_issue", AuditOrigin.EXTERNAL, null, now.minus(Duration.ofMinutes(1)));
+        run(busy, 1L, "AGP-9", RunStatus.RUNNING);
+        audit(stale, "get_issue", AuditOrigin.EXTERNAL, null, now.minus(Duration.ofMinutes(6)));
+        audit(worker, "get_issue", AuditOrigin.WORKER, 5L, now.minus(Duration.ofMinutes(1)));
+        audit(legacy, "get_issue", "AGP-1", now.minus(Duration.ofMinutes(1)));
+        audit(system, "credential.put", AuditOrigin.SYSTEM, null, now.minus(Duration.ofMinutes(1)));
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.personas()).extracting(OfficeResponse.OfficePersona::slug, OfficeResponse.OfficePersona::presence)
+                .containsExactly(
+                        org.assertj.core.groups.Tuple.tuple("ext", PersonaPresence.EXTERNAL),
+                        org.assertj.core.groups.Tuple.tuple("busy", null),
+                        org.assertj.core.groups.Tuple.tuple("stale", null),
+                        org.assertj.core.groups.Tuple.tuple("worker", null),
+                        org.assertj.core.groups.Tuple.tuple("legacy", null),
+                        org.assertj.core.groups.Tuple.tuple("system", null));
     }
 
     @Test

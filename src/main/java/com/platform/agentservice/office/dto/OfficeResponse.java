@@ -71,7 +71,8 @@ public record OfficeResponse(
 
     /**
      * currentRun·lastActivity는 없으면 null — 유휴 페르소나, 5분 넘게 조용한 페르소나. {@code avatarConfig}(AGP-62)는 저장된 JSON 문자열,
-     * 미설정이면 null. 스킬·기본 모델은 싣지 않는다 — 사무실은 관리 권한을 보지 않는 표면이다.
+     * 미설정이면 null. 스킬·기본 모델은 싣지 않는다 — 사무실은 관리 권한을 보지 않는 표면이다. {@code presence}(AGP-63)는
+     * currentRun이 없고 최근 5분 안에 EXTERNAL 감사가 있으면 {@code EXTERNAL}, 그 밖 null.
      */
     public record OfficePersona(
             long id,
@@ -83,12 +84,19 @@ public record OfficeResponse(
             CurrentRun currentRun,
             AuditEntry lastActivity,
             BigDecimal todayCostUsd,
-            String avatarConfig
+            String avatarConfig,
+            PersonaPresence presence
     ) {
+        /** presence가 없는 항목(기존 호출부·테스트). */
+        public OfficePersona(long id, String slug, String name, String emoji, PersonaRole role, boolean active,
+                             CurrentRun currentRun, AuditEntry lastActivity, BigDecimal todayCostUsd, String avatarConfig) {
+            this(id, slug, name, emoji, role, active, currentRun, lastActivity, todayCostUsd, avatarConfig, null);
+        }
+
         /** 아바타 설정이 없는 항목(기존 호출부·테스트). */
         public OfficePersona(long id, String slug, String name, String emoji, PersonaRole role, boolean active,
                              CurrentRun currentRun, AuditEntry lastActivity, BigDecimal todayCostUsd) {
-            this(id, slug, name, emoji, role, active, currentRun, lastActivity, todayCostUsd, null);
+            this(id, slug, name, emoji, role, active, currentRun, lastActivity, todayCostUsd, null, null);
         }
     }
 

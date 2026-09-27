@@ -1,11 +1,13 @@
 package com.platform.agentservice.office;
 
 import com.platform.agentservice.TestAuth;
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.budget.dto.BudgetStatusResponse;
 import com.platform.agentservice.office.dto.AuditEntry;
 import com.platform.agentservice.office.dto.OfficeResponse;
 import com.platform.agentservice.office.dto.PersonaActivityResponse;
+import com.platform.agentservice.office.dto.PersonaPresence;
 import com.platform.agentservice.persona.PersonaRole;
 import com.platform.agentservice.run.GateKind;
 import com.platform.agentservice.run.RunStatus;
@@ -114,6 +116,41 @@ class OfficeControllerTest {
                 .andExpect(jsonPath("$.activeMeeting.attendeePersonaIds[1]").value(3))
                 .andExpect(jsonPath("$.activeMeeting.startedAt").value("2026-09-26T03:00:00Z"))
                 .andExpect(jsonPath("$.features.chat").value(true));
+    }
+
+    /** AGP-63 — lastActivity·todayAudits의 origin·runId, personas[].presence 직렬화(없으면 null). */
+    @Test
+    void 실행_출처와_재실이_직렬화된다() throws Exception {
+        given(officeService.office(null)).willReturn(new OfficeResponse(List.of(
+                new OfficeResponse.OfficePersona(3L, "jiho", "지호", "🔧", PersonaRole.BACKEND, true, null,
+                        new AuditEntry(99L, "get_issue", AuditStatus.OK, "AGP-1", T, AuditOrigin.EXTERNAL, null),
+                        BigDecimal.ZERO, null, PersonaPresence.EXTERNAL),
+                new OfficeResponse.OfficePersona(4L, "mina", "미나", "🎨", PersonaRole.FRONTEND, true, null,
+                        new AuditEntry(98L, "get_issue", AuditStatus.OK, "AGP-2", T, AuditOrigin.WORKER, 11L),
+                        BigDecimal.ZERO, null, null),
+                new OfficeResponse.OfficePersona(5L, "old", "옛날", "🤖", PersonaRole.OPS, true, null,
+                        new AuditEntry(97L, "get_issue", AuditStatus.OK, "AGP-3", T), BigDecimal.ZERO)),
+                List.of(), 0, List.of(), new BudgetStatusResponse(BigDecimal.TEN, BigDecimal.ZERO, false), T, List.of(),
+                null, new OfficeResponse.Features(false)));
+        given(officeService.activity(4L)).willReturn(new PersonaActivityResponse(4L, List.of(),
+                List.of(new AuditEntry(1L, "report_progress", AuditStatus.OK, "run=11 (본문 생략)", T,
+                        AuditOrigin.WORKER, 11L)), BigDecimal.ZERO));
+
+        mvc.perform(get("/api/agent/office").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.personas[0].presence").value("EXTERNAL"))
+                .andExpect(jsonPath("$.personas[0].lastActivity.origin").value("EXTERNAL"))
+                .andExpect(jsonPath("$.personas[0].lastActivity.runId").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.personas[1].presence").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.personas[1].lastActivity.origin").value("WORKER"))
+                .andExpect(jsonPath("$.personas[1].lastActivity.runId").value(11))
+                .andExpect(jsonPath("$.personas[2].lastActivity.origin").value(org.hamcrest.Matchers.nullValue()))
+                .andExpect(jsonPath("$.personas[2].lastActivity.runId").value(org.hamcrest.Matchers.nullValue()));
+
+        mvc.perform(get("/api/agent/personas/4/activity").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.todayAudits[0].origin").value("WORKER"))
+                .andExpect(jsonPath("$.todayAudits[0].runId").value(11));
     }
 
     @Test

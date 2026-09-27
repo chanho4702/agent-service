@@ -3,6 +3,7 @@ package com.platform.agentservice.tools;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import com.platform.agentservice.audit.AuditService;
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.IssueClaimSupport;
@@ -34,6 +35,7 @@ import java.time.LocalDate;
 import java.util.List;
 import java.util.Optional;
 
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -101,7 +103,7 @@ class IssueToolsTest {
 
         assertThat(result).contains("PROJ-1").contains("inprogress");
         verify(almClient, times(1)).update(eq(1L), eq(expectedRequest), eq(BEARER));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -129,7 +131,7 @@ class IssueToolsTest {
         verify(almClient, times(2)).getByKey(eq("PROJ-1"), eq(BEARER));
         verify(almClient, times(1)).update(eq(1L), eq(firstAttempt), eq(BEARER));
         verify(almClient, times(1)).update(eq(1L), eq(secondAttempt), eq(BEARER));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -144,7 +146,7 @@ class IssueToolsTest {
         assertThat(result).startsWith("오류:").contains("버전 충돌");
         // 최초 시도 + 재시도 1회 = 정확히 2번
         verify(almClient, times(2)).update(eq(1L), org.mockito.ArgumentMatchers.any(), eq(BEARER));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -238,7 +240,7 @@ class IssueToolsTest {
         assertThat(req.expectedVersion()).isEqualTo(2);
         // 멘션은 알림 트리거 — 되쓰기에서 다시 보내면 안 된다.
         assertThat(req.mentionedUserIds()).isNull();
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), eq("AGP-2 fields=title"), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), eq("AGP-2 fields=title"), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -262,7 +264,7 @@ class IssueToolsTest {
         assertThat(result).startsWith("오류:").contains("변경할 필드가 없습니다");
         verify(almClient, never()).getByKey(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
         verify(almClient, never()).update(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString());
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -284,7 +286,7 @@ class IssueToolsTest {
         assertThat(result).isEqualTo("이슈 AGP-2 수정 완료: title");
         verify(almClient, times(2)).getByKey("AGP-2", BEARER);
         verify(almClient).update(11L, second, BEARER);
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -297,7 +299,7 @@ class IssueToolsTest {
 
         assertThat(result).isEqualTo("오류: 다른 사용자가 먼저 이슈를 수정했습니다");
         verify(almClient, times(2)).update(eq(11L), org.mockito.ArgumentMatchers.any(), eq(BEARER));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -308,7 +310,7 @@ class IssueToolsTest {
 
         assertThat(result).isEqualTo("오류: 이슈를 찾을 수 없습니다: AGP-404");
         verify(almClient, never()).update(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString());
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("update_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -389,7 +391,7 @@ class IssueToolsTest {
 
         assertThat(result).startsWith("오류:").contains("ghost");
         verify(almClient, never()).create(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(), org.mockito.ArgumentMatchers.anyString());
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("create_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("create_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -415,7 +417,7 @@ class IssueToolsTest {
         String result = issueTools.addComment("PROJ-1", "hello");
 
         assertThat(result).contains("5");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("add_comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("add_comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -425,7 +427,7 @@ class IssueToolsTest {
         String result = issueTools.getIssue("PROJ-1");
 
         assertThat(result).isEqualTo("오류: 이슈를 찾을 수 없습니다");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     // ---- 503 구분 메시지 ----
@@ -455,7 +457,7 @@ class IssueToolsTest {
         String result = issueTools.getIssue("PROJ-1");
 
         assertThat(result).isEqualTo("권한 서비스/다운스트림 일시 장애 — 권한 없음이 아님, 잠시 후 재시도하세요: org-service 다운");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     // ---- log_work: workedOn 기본값 = 오늘 ----

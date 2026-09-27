@@ -129,7 +129,8 @@ public class PatService {
             return Optional.empty();
         }
         touchIfStale(token);
-        return Optional.of(new PatPrincipal(token.getOwnerMemberId(), token.getPersonaId(), persona.get().getMemberId()));
+        return Optional.of(new PatPrincipal(token.getOwnerMemberId(), token.getPersonaId(), persona.get().getMemberId(),
+                token.isRunToken(), token.runIdFromLabel()));
     }
 
     private static String safePrefix(String rawToken) {

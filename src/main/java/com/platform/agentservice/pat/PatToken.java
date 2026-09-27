@@ -63,6 +63,18 @@ public class PatToken {
                 && label != null && label.startsWith(RUN_LABEL_PREFIX);
     }
 
+    /** run 토큰이면 label {@code run:<id>}의 run id, 아니거나 해석 불가면 null. */
+    public Long runIdFromLabel() {
+        if (!isRunToken()) {
+            return null;
+        }
+        try {
+            return Long.valueOf(label.substring(RUN_LABEL_PREFIX.length()));
+        } catch (NumberFormatException e) {
+            return null;
+        }
+    }
+
     public boolean isExpired(Instant now) {
         return expiresAt != null && expiresAt.isBefore(now);
     }

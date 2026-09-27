@@ -145,7 +145,8 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
    하고, done 전환은 검증 run을 통과시킨 리뷰어 페르소나의 몫이다(§5.8). 사람이 PAT로 직접 도구를
    호출하는 경우는 이 규약 그대로다.
 6. 모든 기록은 호출에 쓰인 PAT의 페르소나 명의로 남는다(작성자=페르소나 memberId) —
-   `tool_call_audit` 테이블에 도구·상태·persona_id가 매 호출마다 적재된다.
+   `tool_call_audit` 테이블에 도구·상태·persona_id가 매 호출마다 적재된다. 행마다 실행 출처(`origin` —
+   우리 워커 run이면 WORKER + `run_id`, 사람이 발급받은 PAT이면 EXTERNAL)도 남는다(§11).
 7. 이슈 제목·설명·우선순위를 고칠 때는 `update_issue`(AGP-37)를 쓴다 — DB 직접 수정 금지.
    넘긴 필드만 바뀌고(null·생략=그대로, 셋 다 없으면 오류) 나머지는 현재 값으로 되쓴다.
    이슈를 수정하는 도구(`claim_issue`/`update_issue_status`/`update_issue`)와 디스패처 자동 claim은
@@ -693,7 +694,8 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 목록과 같은 권한이며 **프로젝트 권한은 보지 않는다**(그래서 감사 summary의 자유 본문을 걷어낸다, 아래).
 
 - `GET /api/agent/office?projectId=`(선택): `personas[]`(id·slug·name·emoji·role·active·`currentRun`·
-  `lastActivity`·`todayCostUsd`·`avatarConfig`(AGP-62 — JSON 문자열, 미설정 null. skills·defaultModel은 싣지 않는다)) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
+  `lastActivity`·`todayCostUsd`·`avatarConfig`(AGP-62 — JSON 문자열, 미설정 null. skills·defaultModel은 싣지 않는다)·
+  `presence`(AGP-63, 아래)) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
   `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래) · `activeMeeting`(P3e, 아래) ·
   `features`(P3g — `{chat: boolean}`, §9).
@@ -708,15 +710,19 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
     `hostPersonaId`=run 소유 페르소나(진행자, `attendeePersonaIds[0]`과 같지만 명시 계약), 참석자는 `run.attendee_persona_ids` 저장
     순서 그대로(명단이 비면 진행자 1명). QUEUED·WAITING_APPROVAL·BLOCKED 회의는 싣지 않는다. 쿼리 1회, `run(status)` 인덱스.
   - `currentRun`: `RunService.ACTIVE_STATUSES`(QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED) 중 페르소나별 최신 1건(id 기준), 없으면 null.
-    필드: id·status·issueKey·type·trigger·attempt·model·startedAt. 감사 로그(`AuditEntry`)에는 runId가 없다 —
-    `tool_call_audit`에 run 축 컬럼이 없어서(스키마 변경 없이 생략).
+    필드: id·status·issueKey·type·trigger·attempt·model·startedAt.
   - 최근 종결 = DONE·FAILED·CANCELLED·BLOCKED, `updatedAt` 최신순(BLOCKED는 endedAt이 비어 있어서). BLOCKED는
     `currentRun`에도 나온다.
-  - `lastActivity`: 그 페르소나 최근 감사 1건, **5분 이내일 때만**(아니면 null).
+  - `lastActivity`: 그 페르소나 최근 감사 1건, **5분 이내일 때만**(아니면 null). `AuditEntry` = id·tool·status·summary·createdAt·
+    `origin`(`WORKER|EXTERNAL|SYSTEM|null` — null은 V12 이전 행, 미상)·`runId`(WORKER 호출의 run id, 그 밖 null) — AGP-63, §11.
+  - `presence`(AGP-63): `"EXTERNAL"|null` — `currentRun`이 없고 최근 5분 안에 그 페르소나의 EXTERNAL 감사가 **한 건이라도** 있으면
+    `EXTERNAL`(외부 CLI로 작업 중 — 사무실 "원격 접속 중" 연출). 최신 1건이 WORKER여도 창 안에 EXTERNAL이 있으면 EXTERNAL이다
+    (말풍선과 별개 쿼리 1회, V5 `created_at` 인덱스). 활성 run 판정은 `currentRun`과 같은 집합이라 projectId 필터 시 그 프로젝트
+    run만 본다(다른 프로젝트에서 run이 돌아도 이 사무실에는 "원격 접속 중"으로 보일 수 있다).
   - projectId는 run 축(현재 run·최근 run·게이트·비용)과 페르소나 목록(P3f — 그 프로젝트 소속 + 전사 공용, 다른 프로젝트 소속이라도
     이 프로젝트 활성 run이 있으면 포함)을 좁힌다. 감사에는 프로젝트 축이 없어 말풍선은 전체 활동 기준.
 - `GET /api/agent/personas/{id}/activity`: `runs[]`(최근 20) · `todayAudits[]`(오늘 최대 50, id·tool·status·
-  summary·createdAt) · `todayCostUsd`. 없는 페르소나는 404.
+  summary·createdAt·origin·runId — 위 `AuditEntry`) · `todayCostUsd`. 없는 페르소나는 404.
 - **비용 축**: 원장에 페르소나 축이 없어 `usage_ledger`×`run` 조인으로 페르소나별 합산한다. 한 run 비용이
   PROJECT·PLATFORM 두 스코프로 적재되므로 **PLATFORM 행만** 센다. "오늘"은 **Asia/Seoul 자정** 기준(월 예산은
   여전히 UTC 캘린더 월 — §5.2).
@@ -1009,3 +1015,34 @@ Anthropic 호출 대상은 §8의 `AGENT_ANTHROPIC_API_URL`을 같이 쓴다. �
 **한계** — 스킬은 프롬프트 수준 참고 자료다(도구 권한을 바꾸지 않는다). 편집은 이미 만들어진 run의 모델을 바꾸지 않고, 스킬은 다음
 실행(launch)부터 반영된다. 낙관적 락이 없다 — 동시 편집은 나중 저장이 이긴다(JPA가 행 전체를 쓰므로 서로 다른 필드를 동시에 고쳐도 먼저
 저장한 쪽 변경이 사라질 수 있다 — 관리 화면 단일 편집자 전제로 수용).
+
+## 11. AGP-63: 실행 경로 두 가지 — 내부 워커 vs 외부 MCP (2026-09-27)
+
+"MCP로 연결해서 하는 경우랑 직접 우리 UI에서 하는 경우 나눠줘야 한다"(사용자 지시). 두 경로는 같은 MCP 도구(§3)를 부르지만 구조가
+다르다 — 감사·사무실에서 섞여 보이지 않도록 `tool_call_audit.origin`(V12)으로 구분한다.
+
+| | 내부 워커(우리 UI·스케줄러) | 외부 MCP(사람의 Claude Code 등) |
+|---|---|---|
+| 시작 | USER run(`POST /api/agent/runs`)·스케줄러 픽업·회의/매니저 소집 → **run 생성** | 사람이 관리자에게 받은 페르소나 PAT으로 자기 클라이언트에서 접속(§1·§2) — **run 없음** |
+| 인증 | run 토큰(디스패처가 run마다 발급하는 임시 PAT, 종결 시 철회 — `PatToken.isRunToken()`) | 사람용 PAT(`agp_*`, 철회·만료 전까지 유효) |
+| 예산·킬 스위치(§5.2) | 적용(`RunService.execute` 진입점) | **미적용** — 호출자 자기 비용·자기 하네스 |
+| 리뷰 상시화(§5.8)·게이트(§5.3) | 적용(done은 리뷰어만, `request_gate`·`report_*`는 run 토큰 전용) | 미적용 — §3 규약 5번대로 호출자가 직접 done |
+| LLM 키·과금 | 우리 쪽(§8 프로젝트 > 전역 > env) | 호출자 쪽(우리 키를 쓰지 않는다) |
+| 기록 | 페르소나 명의 + 감사 `origin=WORKER`, `run_id` | 페르소나 명의 + 감사 `origin=EXTERNAL` |
+| 사무실 | `currentRun`·말풍선 | 활성 run 없으면 `presence=EXTERNAL`("원격 접속 중") + 말풍선 |
+
+**origin 판정(단일 지점 — `Audited` ← `PatPrincipal.origin()`)**
+
+| origin | 조건 | run_id |
+|---|---|---|
+| `WORKER` | 호출을 인증한 토큰이 run 토큰(발급자 = 시스템 센티널 0 **그리고** label `run:` 접두 — 사람이 label을 `run:`으로 지어도 EXTERNAL) | label `run:<id>`의 id(해석 불가면 null) |
+| `EXTERNAL` | 그 밖의 PAT(사람용) | null |
+| `SYSTEM` | PAT 없는 서버 내부 기록 — `AuditService.record` 5인자 경로(`chat.say`·`credential.put`/`delete` 등) | null |
+| null | V12 이전 행(미상) — 백필하지 않는다 | null |
+
+- 판정은 `PatService.validate`가 토큰에서 한 번 뽑아 `PatPrincipal(runToken, runId)`에 싣고, `Audited.run`·`note`가 그대로 적는다.
+  도구마다 따로 판정하지 않는다. 입력 인코딩 거부(§3-9) 감사도 `Audited`를 거치므로 같은 규칙이다.
+- 새 서버 내부 감사 지점을 만들면 5인자 `record`(=SYSTEM)를 쓰고, PAT 문맥의 도구는 반드시 `Audited`를 거친다.
+- `run_id`는 FK 없는 표시용 참조다(run 행이 지워져도 감사는 남는다).
+- 가림 규칙(`AuditSummaryRedactor`, §6)은 origin과 무관하게 같다.
+- 한계: 외부 MCP 쪽 비용은 우리 원장에 없다(호출자 과금). 외부 호출에도 예산·리뷰를 걸려면 별도 정책이 필요하다(현재 없음).

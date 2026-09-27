@@ -14,8 +14,14 @@ public class AuditService {
         this.repository = repository;
     }
 
+    /** PAT 없는 서버 내부 기록(chat.say·credential.* 등) — 출처 SYSTEM. */
     public void record(Long personaId, Long actorMemberId, String tool, String summary, AuditStatus status) {
-        repository.save(ToolCallAudit.of(personaId, actorMemberId, tool, truncate(summary), status));
+        record(personaId, actorMemberId, tool, summary, status, AuditOrigin.SYSTEM, null);
+    }
+
+    public void record(Long personaId, Long actorMemberId, String tool, String summary, AuditStatus status,
+                       AuditOrigin origin, Long runId) {
+        repository.save(ToolCallAudit.of(personaId, actorMemberId, tool, truncate(summary), status, origin, runId));
     }
 
     private String truncate(String summary) {

@@ -1,6 +1,7 @@
 package com.platform.agentservice.tools;
 
 import com.platform.agentservice.audit.AuditService;
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.TokenService;
@@ -30,6 +31,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 import java.util.List;
 import java.util.Optional;
 
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
@@ -108,7 +110,7 @@ class RunToolsTest {
 
         assertThat(result).isEqualTo("진행상황 기록 완료");
         verify(almClient).addComment(1L, "🤖 진행: 절반 완료", BEARER);
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_progress"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_progress"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -120,7 +122,7 @@ class RunToolsTest {
 
         assertThat(result).startsWith("오류:");
         verify(almClient, never()).addComment(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_progress"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_progress"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -154,7 +156,7 @@ class RunToolsTest {
         ArgumentCaptor<String> bodyCaptor = ArgumentCaptor.forClass(String.class);
         verify(almClient).addComment(eq(1L), bodyCaptor.capture(), eq(BEARER));
         assertThat(bodyCaptor.getValue()).startsWith("⏸ 승인 대기(MERGE): 머지해도 될까요?");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     // ---- comment best-effort (fix round 1): state change is the source of truth, comment failure is non-fatal ----
@@ -173,8 +175,8 @@ class RunToolsTest {
         // 상태 전이는 이미 커밋됐으므로 도구는 성공을 보고한다 — 코멘트 실패는 경고로만 덧붙인다.
         assertThat(result).contains("게이트 등록됨(gate id=7)").contains("경고: 이슈 코멘트 기록 실패");
         assertThat(run.getStatus()).isEqualTo(RunStatus.WAITING_APPROVAL);
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate.comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("request_gate.comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -225,7 +227,7 @@ class RunToolsTest {
         assertThat(result).contains("DONE");
         assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
         verify(almClient).addComment(1L, "✅ 완료: 작업 완료했습니다", BEARER);
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -239,8 +241,8 @@ class RunToolsTest {
         // run 종결은 이미 커밋됐으므로 도구는 성공을 보고한다 — 코멘트 실패는 경고로만 덧붙인다.
         assertThat(result).contains("DONE").contains("경고: 이슈 코멘트 기록 실패");
         assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result.comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result.comment"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -327,7 +329,7 @@ class RunToolsTest {
         assertThat(result).contains("DONE");
         assertThat(run.getOutputPageId()).isEqualTo(501L);
         verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("report_result"),
-                eq("run=42 status=DONE pageId=501"), eq(AuditStatus.OK));
+                eq("run=42 status=DONE pageId=501"), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test

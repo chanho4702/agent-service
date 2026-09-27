@@ -22,4 +22,11 @@ public interface ToolCallAuditRepository extends JpaRepository<ToolCallAudit, Lo
     List<ToolCallAudit> findLatestPerPersonaSince(@Param("since") Instant since);
 
     List<ToolCallAudit> findTop50ByPersonaIdAndCreatedAtGreaterThanEqualOrderByIdDesc(Long personaId, Instant since);
+
+    /** 창 안에 해당 출처 감사가 있는 페르소나(사무실 presence — AGP-63). created_at 인덱스(V5)를 탄다. */
+    @Query("""
+            select distinct a.personaId from ToolCallAudit a
+             where a.personaId is not null and a.origin = :origin and a.createdAt >= :since
+            """)
+    List<Long> findPersonaIdsWithOriginSince(@Param("origin") AuditOrigin origin, @Param("since") Instant since);
 }

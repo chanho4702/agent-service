@@ -3,6 +3,7 @@ package com.platform.agentservice.tools;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.platform.agentservice.audit.AuditService;
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.OrgClient;
@@ -29,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verify;
@@ -83,7 +85,7 @@ class ContextToolsTest {
         assertThat(json.get("role").asText()).isEqualTo("BACKEND");
         assertThat(json.get("memberId").asLong()).isEqualTo(PERSONA_MEMBER_ID);
         org.mockito.Mockito.verifyNoInteractions(almClient, orgClient, tokenService);
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("whoami"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("whoami"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -93,7 +95,7 @@ class ContextToolsTest {
         String result = contextTools.whoami();
 
         assertThat(result).contains("오류");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("whoami"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("whoami"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test
@@ -164,7 +166,7 @@ class ContextToolsTest {
         assertThat(json.get("members").get(1).get("id").asLong()).isEqualTo(2L);
         assertThat(json.get("members").get(1).get("displayName").asText()).isEqualTo("페르소나봇");
         assertThat(json.get("members").get(1).get("kind").asText()).isEqualTo("AGENT");
-        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_project_context"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK));
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("get_project_context"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.platform.agentservice.tools;
 
 import com.platform.agentservice.audit.AuditService;
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.pat.PatPrincipal;
 import io.modelcontextprotocol.server.McpServerFeatures;
@@ -16,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static org.mockito.ArgumentMatchers.isNull;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -82,7 +84,7 @@ class ToolInputGuardTest {
         assertThat(calls).hasValue(0);
         assertThat(((McpSchema.TextContent) result.content().get(0)).text())
                 .isEqualTo("오류: 입력 인코딩 거부 — 파라미터 'body': 제어문자 U+0000 (2번째 문자)");
-        verify(auditService).record(eq(5L), eq(100L), eq("add_comment"), eq("입력 거부: body"), eq(AuditStatus.ERROR));
+        verify(auditService).record(eq(5L), eq(100L), eq("add_comment"), eq("입력 거부: body"), eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
     }
 
     @Test

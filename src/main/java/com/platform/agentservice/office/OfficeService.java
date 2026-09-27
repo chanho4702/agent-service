@@ -1,5 +1,6 @@
 package com.platform.agentservice.office;
 
+import com.platform.agentservice.audit.AuditOrigin;
 import com.platform.agentservice.audit.ToolCallAudit;
 import com.platform.agentservice.audit.ToolCallAuditRepository;
 import com.platform.agentservice.budget.BudgetService;
@@ -10,6 +11,7 @@ import com.platform.agentservice.chat.ChatAvailability;
 import com.platform.agentservice.office.dto.AuditEntry;
 import com.platform.agentservice.office.dto.OfficeResponse;
 import com.platform.agentservice.office.dto.PersonaActivityResponse;
+import com.platform.agentservice.office.dto.PersonaPresence;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.run.Gate;
@@ -111,6 +113,8 @@ public class OfficeService {
 
         Map<Long, AuditEntry> bubbles = auditRepository.findLatestPerPersonaSince(now.minus(BUBBLE_WINDOW)).stream()
                 .collect(Collectors.toMap(ToolCallAudit::getPersonaId, OfficeService::toEntry, (a, b) -> a));
+        Set<Long> externalRecent = Set.copyOf(
+                auditRepository.findPersonaIdsWithOriginSince(AuditOrigin.EXTERNAL, now.minus(BUBBLE_WINDOW)));
 
         List<PersonaCost> costRows = projectId == null
                 ? ledgerRepository.sumCostByPersonaSince(todayStart)
@@ -125,7 +129,8 @@ public class OfficeService {
                         || currentRuns.containsKey(p.getId()))
                 .map(p -> new OfficeResponse.OfficePersona(p.getId(), p.getSlug(), p.getName(), p.getEmoji(),
                         p.getRole(), p.isActive(), toCurrent(currentRuns.get(p.getId())), bubbles.get(p.getId()),
-                        costs.getOrDefault(p.getId(), BigDecimal.ZERO), p.getAvatarConfig()))
+                        costs.getOrDefault(p.getId(), BigDecimal.ZERO), p.getAvatarConfig(),
+                        presence(currentRuns.containsKey(p.getId()), externalRecent.contains(p.getId()))))
                 .toList();
 
         List<Run> finished = projectId == null
@@ -210,6 +215,14 @@ public class OfficeService {
                 .toList();
     }
 
+    /**
+     * 외부 CLI 재실(AGP-63). 활성 run이 있으면 그 run이 캐릭터 상태를 정하므로 null — 워커 작업 중 연출과 "원격 접속 중"이
+     * 겹치지 않게. 활성 run 판정은 currentRun과 같은 집합(projectId 필터가 있으면 그 프로젝트 run)이다.
+     */
+    static PersonaPresence presence(boolean hasActiveRun, boolean externalRecent) {
+        return !hasActiveRun && externalRecent ? PersonaPresence.EXTERNAL : null;
+    }
+
     private static OfficeResponse.CurrentRun toCurrent(Run run) {
         if (run == null) {
             return null;
@@ -220,7 +233,7 @@ public class OfficeService {
 
     private static AuditEntry toEntry(ToolCallAudit a) {
         return new AuditEntry(a.getId(), a.getTool(), a.getStatus(),
-                AuditSummaryRedactor.redact(a.getTool(), a.getSummary()), a.getCreatedAt());
+                AuditSummaryRedactor.redact(a.getTool(), a.getSummary()), a.getCreatedAt(), a.getOrigin(), a.getRunId());
     }
 
     private static Instant todayStart(Instant now) {

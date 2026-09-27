@@ -161,6 +161,40 @@ class PatServiceTest {
         assertThat(patService.validate(response.token())).isEmpty();
     }
 
+    /** AGP-63 — run 토큰은 WORKER + label의 run id, 사람용 PAT(run: 라벨 포함)은 EXTERNAL + run id 없음. */
+    @Test
+    void validate_principal_carries_origin_and_run_id() {
+        PatCreatedResponse runToken = patService.issue(
+                new PatCreateRequest(PatToken.RUN_LABEL_PREFIX + "7", "qa-bot", null), PatToken.SYSTEM_OWNER_MEMBER_ID);
+        PatCreatedResponse human = patService.issue(new PatCreateRequest("my-claude-code", "qa-bot", null), 42L);
+        PatCreatedResponse humanRunLabel = patService.issue(
+                new PatCreateRequest(PatToken.RUN_LABEL_PREFIX + "9", "qa-bot", null), 42L);
+
+        assertThat(patService.validate(runToken.token())).get().satisfies(p -> {
+            assertThat(p.origin()).isEqualTo(com.platform.agentservice.audit.AuditOrigin.WORKER);
+            assertThat(p.runId()).isEqualTo(7L);
+        });
+        assertThat(patService.validate(human.token())).get().satisfies(p -> {
+            assertThat(p.origin()).isEqualTo(com.platform.agentservice.audit.AuditOrigin.EXTERNAL);
+            assertThat(p.runId()).isNull();
+        });
+        assertThat(patService.validate(humanRunLabel.token())).get().satisfies(p -> {
+            assertThat(p.origin()).isEqualTo(com.platform.agentservice.audit.AuditOrigin.EXTERNAL);
+            assertThat(p.runId()).isNull();
+        });
+    }
+
+    @Test
+    void run_token_with_unparsable_label_is_still_worker_without_run_id() {
+        PatCreatedResponse response = patService.issue(
+                new PatCreateRequest(PatToken.RUN_LABEL_PREFIX + "x", "qa-bot", null), PatToken.SYSTEM_OWNER_MEMBER_ID);
+
+        assertThat(patService.validate(response.token())).get().satisfies(p -> {
+            assertThat(p.runToken()).isTrue();
+            assertThat(p.runId()).isNull();
+        });
+    }
+
     @Test
     void validate_rejections_are_logged_without_raw_token(CapturedOutput output) {
         String unknown = "agp_abcdSECRETSECRETSECRET";

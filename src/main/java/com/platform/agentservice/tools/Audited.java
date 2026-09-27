@@ -30,10 +30,10 @@ public class Audited {
         PatPrincipal actor = ToolActor.current();
         try {
             String result = action.get();
-            auditService.record(actor.personaId(), actor.ownerMemberId(), tool, summary, AuditStatus.OK);
+            record(actor, tool, summary, AuditStatus.OK);
             return result;
         } catch (Exception e) {
-            auditService.record(actor.personaId(), actor.ownerMemberId(), tool, summary, AuditStatus.ERROR);
+            record(actor, tool, summary, AuditStatus.ERROR);
             return errorMessage(e);
         }
     }
@@ -48,7 +48,12 @@ public class Audited {
      */
     public void note(String tool, String summary, AuditStatus status) {
         PatPrincipal actor = ToolActor.current();
-        auditService.record(actor.personaId(), actor.ownerMemberId(), tool, summary, status);
+        record(actor, tool, summary, status);
+    }
+
+    /** 출처는 인증에 쓰인 토큰으로 정한다(AGP-63) — run 토큰=WORKER(+run id), 사람용 PAT=EXTERNAL. */
+    private void record(PatPrincipal actor, String tool, String summary, AuditStatus status) {
+        auditService.record(actor.personaId(), actor.ownerMemberId(), tool, summary, status, actor.origin(), actor.runId());
     }
 
     private String errorMessage(Exception e) {
