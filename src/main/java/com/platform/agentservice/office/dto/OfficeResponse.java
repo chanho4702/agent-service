@@ -26,6 +26,11 @@ public record OfficeResponse(
     /**
      * 사무실 게시판(P3b D-P3b-7) — 회의록이 보고된 완료 회의 run. 제목은 위키를 조회하지 않고 프론트가 type 라벨 + 시각으로
      * 그린다(권한 없는 스페이스 제목 노출도 피한다). issueKey는 안건 이슈 없는 회의면 {@code PROJECT-<projectId>}다.
+     *
+     * <p>{@code spaceId}는 위키 링크({@code /spaces/:spaceId/pages/:pageId})용이며, run별로 저장하지 않고 조회 시점의
+     * {@code platform.agent.meetings.space-id} 설정값을 쓴다 — 회의록은 전부 그 스페이스에 쓰이기 때문이다. 한계: 운영 중
+     * 스페이스 설정을 바꾸면 이전 스페이스에 쓰인 과거 게시물의 링크가 깨질 수 있다(게시물은 최근 5건뿐이라 수용).
+     * 설정이 비어 있으면 null이다.
      */
     public record BoardPost(
             long runId,
@@ -33,6 +38,7 @@ public record OfficeResponse(
             String issueKey,
             long projectId,
             long pageId,
+            Long spaceId,
             Instant endedAt
     ) {
     }

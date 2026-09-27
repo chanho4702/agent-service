@@ -13,6 +13,7 @@ import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.run.Gate;
 import com.platform.agentservice.run.GateRepository;
+import com.platform.agentservice.run.MeetingProperties;
 import com.platform.agentservice.run.Run;
 import com.platform.agentservice.run.RunRepository;
 import com.platform.agentservice.run.RunService;
@@ -67,26 +68,30 @@ public class OfficeService {
     private final ToolCallAuditRepository auditRepository;
     private final UsageLedgerRepository ledgerRepository;
     private final BudgetService budgetService;
+    private final MeetingProperties meetingProperties;
     private final Clock clock;
 
     @Autowired
     public OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
                          GateRepository gateRepository, ToolCallAuditRepository auditRepository,
-                         UsageLedgerRepository ledgerRepository, BudgetService budgetService) {
+                         UsageLedgerRepository ledgerRepository, BudgetService budgetService,
+                         MeetingProperties meetingProperties) {
         this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
-                Clock.systemUTC());
+                meetingProperties, Clock.systemUTC());
     }
 
     /** 테스트 전용 — 5분 창·오늘 경계를 고정 시각으로 검증한다. */
     OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
                   GateRepository gateRepository, ToolCallAuditRepository auditRepository,
-                  UsageLedgerRepository ledgerRepository, BudgetService budgetService, Clock clock) {
+                  UsageLedgerRepository ledgerRepository, BudgetService budgetService,
+                  MeetingProperties meetingProperties, Clock clock) {
         this.personaRepository = personaRepository;
         this.runRepository = runRepository;
         this.gateRepository = gateRepository;
         this.auditRepository = auditRepository;
         this.ledgerRepository = ledgerRepository;
         this.budgetService = budgetService;
+        this.meetingProperties = meetingProperties;
         this.clock = clock;
     }
 
@@ -131,14 +136,15 @@ public class OfficeService {
                 : runRepository.findTop5ByTypeInAndStatusAndProjectIdAndOutputPageIdIsNotNullOrderByEndedAtDescIdDesc(
                         RunType.MEETING_TYPES, RunStatus.DONE, projectId);
 
+        Long spaceId = meetingProperties.hasSpace() ? meetingProperties.spaceId() : null;
         return new OfficeResponse(personas, finished.stream().map(RunSummaryResponse::of).toList(),
                 gates.size(), gates.stream().limit(PENDING_GATE_LIMIT).toList(), budget, now,
-                posts.stream().map(OfficeService::toBoardPost).toList());
+                posts.stream().map(r -> toBoardPost(r, spaceId)).toList());
     }
 
-    private static OfficeResponse.BoardPost toBoardPost(Run run) {
+    private static OfficeResponse.BoardPost toBoardPost(Run run, Long spaceId) {
         return new OfficeResponse.BoardPost(run.getId(), run.getType(), run.getIssueKey(), run.getProjectId(),
-                run.getOutputPageId(), run.getEndedAt());
+                run.getOutputPageId(), spaceId, run.getEndedAt());
     }
 
     public PersonaActivityResponse activity(long personaId) {

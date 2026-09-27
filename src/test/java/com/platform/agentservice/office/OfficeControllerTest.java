@@ -71,7 +71,7 @@ class OfficeControllerTest {
                 List.of(new OfficeResponse.PendingGate(5L, 12L, "AGP-2", 3L, GateKind.MERGE, "머지 승인", T)),
                 new BudgetStatusResponse(new BigDecimal("100"), new BigDecimal("12.5"), false),
                 T,
-                List.of(new OfficeResponse.BoardPost(21L, RunType.MEETING, "AGP-3", 7L, 501L, T)));
+                List.of(new OfficeResponse.BoardPost(21L, RunType.MEETING, "AGP-3", 7L, 501L, 9L, T)));
         given(officeService.office(7L)).willReturn(res);
 
         mvc.perform(get("/api/agent/office").param("projectId", "7").with(authentication(TestAuth.user(2L, "Bob"))))
@@ -99,6 +99,7 @@ class OfficeControllerTest {
                 .andExpect(jsonPath("$.boardPosts[0].issueKey").value("AGP-3"))
                 .andExpect(jsonPath("$.boardPosts[0].projectId").value(7))
                 .andExpect(jsonPath("$.boardPosts[0].pageId").value(501))
+                .andExpect(jsonPath("$.boardPosts[0].spaceId").value(9))
                 .andExpect(jsonPath("$.boardPosts[0].endedAt").value("2026-09-26T03:00:00Z"));
     }
 

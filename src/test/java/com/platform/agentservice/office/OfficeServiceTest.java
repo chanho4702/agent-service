@@ -15,6 +15,7 @@ import com.platform.agentservice.persona.PersonaRole;
 import com.platform.agentservice.run.Gate;
 import com.platform.agentservice.run.GateKind;
 import com.platform.agentservice.run.GateRepository;
+import com.platform.agentservice.run.MeetingProperties;
 import com.platform.agentservice.run.Run;
 import com.platform.agentservice.run.RunRepository;
 import com.platform.agentservice.run.RunStatus;
@@ -63,7 +64,8 @@ class OfficeServiceTest {
     void setUp() {
         // 자정 근처에 돌아도 "오늘" 경계가 흔들리지 않게 한국 정오로 고정한다(행 시각은 전부 이 값 기준으로 옮긴다).
         now = LocalDate.now(OfficeService.OFFICE_ZONE).atTime(12, 0).atZone(OfficeService.OFFICE_ZONE).toInstant();
-        service = new OfficeService(personas, runs, gates, audits, ledger, budgetService, Clock.fixed(now, ZoneOffset.UTC));
+        service = new OfficeService(personas, runs, gates, audits, ledger, budgetService,
+                new MeetingProperties(7L, null, false, true), Clock.fixed(now, ZoneOffset.UTC));
         given(budgetService.snapshot()).willReturn(
                 new BudgetService.BudgetSnapshot(new BigDecimal("100"), new BigDecimal("12.5"), false));
     }
@@ -388,6 +390,7 @@ class OfficeServiceTest {
         assertThat(first.issueKey()).isEqualTo("PROJECT-1");
         assertThat(first.projectId()).isEqualTo(1L);
         assertThat(first.pageId()).isEqualTo(505L);
+        assertThat(first.spaceId()).isEqualTo(7L);
         assertThat(first.endedAt()).isEqualTo(now.minusSeconds(100));
         assertThat(res.boardPosts()).extracting(OfficeResponse.BoardPost::runId).doesNotContain(oldest.getId());
     }
@@ -401,5 +404,16 @@ class OfficeServiceTest {
         assertThat(service.office(1L).boardPosts()).extracting(OfficeResponse.BoardPost::runId)
                 .containsExactly(mine.getId());
         assertThat(service.office(null).boardPosts()).hasSize(2);
+    }
+
+    @Test
+    void 회의록_스페이스가_미설정이면_게시물_spaceId는_null이다() {
+        Persona p = persona(1L, "seoyeon", PersonaRole.PLANNER);
+        meetingRun(p, RunType.MEETING, 1L, "PROJECT-1", RunStatus.DONE, 500L, now.minusSeconds(100));
+        OfficeService noSpace = new OfficeService(personas, runs, gates, audits, ledger, budgetService,
+                new MeetingProperties(null, null, false, true), Clock.fixed(now, ZoneOffset.UTC));
+
+        assertThat(noSpace.office(null).boardPosts()).singleElement()
+                .satisfies(post -> assertThat(post.spaceId()).isNull());
     }
 }
