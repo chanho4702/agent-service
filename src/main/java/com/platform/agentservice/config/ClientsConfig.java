@@ -55,9 +55,13 @@ public class ClientsConfig {
 
     /** 패키지 전용 — 테스트가 실제 타임아웃 강제 동작을 검증할 수 있도록 노출한다. */
     static JdkClientHttpRequestFactory timeoutRequestFactory(Duration connectTimeout, Duration readTimeout) {
-        HttpClient httpClient = HttpClient.newBuilder().connectTimeout(connectTimeout).build();
-        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(httpClient);
+        JdkClientHttpRequestFactory requestFactory = new JdkClientHttpRequestFactory(timeoutHttpClient(connectTimeout));
         requestFactory.setReadTimeout(readTimeout);
         return requestFactory;
+    }
+
+    /** 패키지 전용 — 연결 타임아웃 설정을 네트워크 없이 결정적으로 검증하려고 분리했다(AGP-30). */
+    static HttpClient timeoutHttpClient(Duration connectTimeout) {
+        return HttpClient.newBuilder().connectTimeout(connectTimeout).build();
     }
 }

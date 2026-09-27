@@ -219,6 +219,20 @@ class RunServiceTest {
     }
 
     @Test
+    void createUserRun_inactive_persona_is_400_without_touching_alm() {
+        Persona inactive = persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho");
+        inactive.changeActive(false);
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(inactive));
+
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessage("비활성 페르소나입니다: jiho");
+
+        verify(almClient, never()).getByKey(anyString(), anyString());
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
     void createUserRun_unset_default_persona_slug_is_404() {
         RunService service = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, null, 3));
 
@@ -243,10 +257,11 @@ class RunServiceTest {
     @Test
     void createUserRun_propagates_alm_lookup_failure_and_saves_nothing() {
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
-        when(almClient.getByKey("AGP-404", BEARER)).thenThrow(new ConflictException("이슈를 찾을 수 없습니다"));
+        // AGP-25: alm 404는 DownstreamErrors가 NotFoundException으로 옮긴다 — 컨트롤러 응답도 409가 아니라 404다.
+        when(almClient.getByKey("AGP-404", BEARER)).thenThrow(new NotFoundException("이슈를 찾을 수 없습니다"));
 
         assertThatThrownBy(() -> runService.createUserRun("AGP-404", null, null, null))
-                .isInstanceOf(ConflictException.class)
+                .isInstanceOf(NotFoundException.class)
                 .hasMessageContaining("이슈를 찾을 수 없습니다");
 
         verify(runRepository, never()).save(any());
@@ -309,7 +324,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -331,7 +346,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -382,7 +397,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of(
                 new CommentResponse(1L, 1L, PERSONA_MEMBER_ID, "댓글1", null, null)));
 
@@ -418,7 +433,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -442,7 +457,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -467,7 +482,7 @@ class RunServiceTest {
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
         // buildJob()의 첫 네트워크 호출(claim) 시점에 run이 이미 RUNNING이어야 한다 — 그 안에서
         // 같은 runId로 재드레인(execute 재호출)을 재현해도 QUEUED가 아니라서 즉시 no-op이어야 한다.
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenAnswer(inv -> {
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenAnswer(inv -> {
             assertThat(run.getStatus()).isEqualTo(RunStatus.RUNNING);
             runService.execute(42L); // 재드레인 재현 — 이 재귀 호출은 QUEUED가 아니므로 즉시 반환해야 한다
             return claimed;
@@ -496,7 +511,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -523,7 +538,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -554,7 +569,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
 
         WorkerResult result = new WorkerResult(0, false, "완료", "sess-2",
@@ -587,7 +602,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -635,7 +650,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -666,7 +681,7 @@ class RunServiceTest {
         // QUEUED 그대로 — 킬 스위치/캡이 풀리면 다음 드레인 틱이 다시 집어간다(실패로 치지 않는다).
         assertThat(run.getStatus()).isEqualTo(RunStatus.QUEUED);
         verify(workerLauncher, never()).launch(any(), any());
-        verify(issueClaimSupport, never()).claim(anyString(), anyLong(), anyString(), anyString());
+        verify(issueClaimSupport, never()).claim(anyString(), anyLong(), any(), anyString());
         verify(runRepository, never()).save(any());
     }
 
@@ -679,7 +694,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -712,7 +727,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -726,8 +741,8 @@ class RunServiceTest {
                 new CommitLinkParser.CommitLink("NOPE-1", "ccc333", "NOPE-1: unknown project", "https://github.com/o/r/commit/ccc333"),
                 new CommitLinkParser.CommitLink("AGP-100", "ddd444", "AGP-100: known", "https://github.com/o/r/commit/ddd444")));
 
-        // alm-backend가 404를 던지면 DownstreamErrors가 ConflictException으로 감싼다(실측, 4xx 기본 매핑).
-        when(almClient.getByKey("NOPE-1", BEARER)).thenThrow(new ConflictException("이슈를 찾을 수 없습니다: NOPE-1"));
+        // alm-backend 404는 DownstreamErrors가 NotFoundException으로 옮긴다(AGP-25) — 커밋 링크는 예외 타입과 무관하게 건너뛴다.
+        when(almClient.getByKey("NOPE-1", BEARER)).thenThrow(new NotFoundException("이슈를 찾을 수 없습니다: NOPE-1"));
         IssueResponse target100 = issue(101L, "AGP-100", "todo", 1);
         when(almClient.getByKey("AGP-100", BEARER)).thenReturn(target100);
 
@@ -747,7 +762,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -782,7 +797,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -815,7 +830,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -838,7 +853,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -862,7 +877,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -889,7 +904,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -924,7 +939,7 @@ class RunServiceTest {
         // 준비 단계 실패도 사고형이다 — 설정 결함은 재시도해도 같은 이유로 또 죽는다.
         assertThat(run.getStatus()).isEqualTo(RunStatus.BLOCKED);
         assertThat(run.getError()).contains(INCIDENT + "리포 매핑 없음: NOPROJ");
-        verify(issueClaimSupport, never()).claim(anyString(), anyLong(), anyString(), anyString());
+        verify(issueClaimSupport, never()).claim(anyString(), anyLong(), any(), anyString());
         verify(workerLauncher, never()).launch(any(), any());
     }
 
@@ -950,7 +965,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -975,7 +990,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
@@ -1010,7 +1025,7 @@ class RunServiceTest {
         runService.execute(42L);
 
         verify(workerLauncher, never()).launch(any(), any());
-        verify(issueClaimSupport, never()).claim(anyString(), anyLong(), anyString(), anyString());
+        verify(issueClaimSupport, never()).claim(anyString(), anyLong(), any(), anyString());
     }
 
     // ---- cancel ----
@@ -1077,7 +1092,7 @@ class RunServiceTest {
         stubSaveReturnsArgument();
         IssueResponse issue = issue(1L, ISSUE_KEY, "inprogress", 2);
         if (claims) {
-            when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(issue);
+            when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(issue);
         }
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         org.mockito.Mockito.lenient().when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue);
@@ -1340,7 +1355,7 @@ class RunServiceTest {
         when(runRepository.findById(3L)).thenReturn(Optional.of(third));
         stubSaveReturnsArgument();
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
@@ -1358,7 +1373,7 @@ class RunServiceTest {
         when(runRepository.findById(3L)).thenReturn(Optional.of(third));
         stubSaveReturnsArgument();
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
-        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, "inprogress", BEARER)).thenReturn(claimed);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
         when(almClient.comments(1L, BEARER)).thenReturn(List.of());
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))

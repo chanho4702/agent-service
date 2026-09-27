@@ -2,6 +2,7 @@ package com.platform.agentservice.tools;
 
 import com.platform.agentservice.audit.AuditService;
 import com.platform.agentservice.audit.AuditStatus;
+import com.platform.agentservice.client.DownstreamAuthException;
 import com.platform.agentservice.pat.PatPrincipal;
 import com.platform.common.error.ServiceUnavailableException;
 import org.springframework.stereotype.Component;
@@ -51,6 +52,10 @@ public class Audited {
     }
 
     private String errorMessage(Exception e) {
+        if (e instanceof DownstreamAuthException) {
+            // ServiceUnavailableException의 하위형이라 먼저 본다 — 재시도로 풀리지 않으니 "잠시 후 재시도"로 안내하면 안 된다.
+            return "다운스트림 인증 결함 — 권한 없음이 아님, 운영자 확인 필요(재시도로 해결되지 않음): " + e.getMessage();
+        }
         if (e instanceof ServiceUnavailableException) {
             return "권한 서비스/다운스트림 일시 장애 — 권한 없음이 아님, 잠시 후 재시도하세요: " + e.getMessage();
         }

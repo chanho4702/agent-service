@@ -40,4 +40,9 @@ public class Persona {
         this.emoji = emoji;
         this.voicePrompt = voicePrompt;
     }
+
+    /** 관리자 활성/비활성 전환(AGP-29). 재부트스트랩({@link #refresh})은 이 값을 건드리지 않는다. */
+    public void changeActive(boolean active) {
+        this.active = active;
+    }
 }

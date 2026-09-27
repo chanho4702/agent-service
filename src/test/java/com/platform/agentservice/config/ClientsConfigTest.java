@@ -5,16 +5,18 @@ import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.web.client.ResourceAccessException;
 import org.springframework.web.client.RestClient;
 
-import java.io.IOException;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.net.http.HttpConnectTimeoutException;
+import java.net.http.HttpTimeoutException;
 import java.time.Duration;
-import java.time.Instant;
-import java.util.concurrent.CompletableFuture;
+import java.util.Optional;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.junit.jupiter.api.Assertions.assertTimeoutPreemptively;
 
 /**
  * I1: 다운스트림 RestClient가 무한 대기하지 않고 설정된 타임아웃 안에서 끊어지는지 증명한다.
@@ -22,8 +24,16 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  * {@link ClientsConfig#timeoutRequestFactory(Duration, Duration)}에 짧은 타임아웃을 넣어
  * 같은 메커니즘(JdkClientHttpRequestFactory + 명시적 read timeout)이 실제로 동작을
  * 강제한다는 것만 확인한다.
+ *
+ * <p>AGP-30: 예전 판정은 "경과 시간이 N초 미만"이라 부하가 걸린 전체 스위트(컨텍스트 여러 개 기동 중)에서
+ * 간헐적으로 넘쳤다. 이제는 시간 대신 <b>예외 원인</b>으로 판정한다 — read timeout이 걸렸다면 원인이
+ * {@link HttpTimeoutException}이다(타임아웃이 없었다면 가짜 서버가 끝까지 붙잡고 있어 hang → 상한 30초의
+ * {@code assertTimeoutPreemptively}가 끊는다). 연결 타임아웃은 네트워크 환경마다 TEST-NET 주소가 즉시 거부되기도
+ * 해서 행동 검증 대신 {@link java.net.http.HttpClient#connectTimeout()} 설정값으로 결정적으로 본다.
  */
 class ClientsConfigTest {
+
+    private static final Duration HANG_GUARD = Duration.ofSeconds(30);
 
     @Test
     void production_timeouts_are_the_agreed_values() {
@@ -33,43 +43,51 @@ class ClientsConfigTest {
 
     @Test
     void read_timeout_is_enforced_when_server_accepts_but_never_responds() throws Exception {
+        CountDownLatch release = new CountDownLatch(1);
         try (ServerSocket serverSocket = new ServerSocket(0)) {
             int port = serverSocket.getLocalPort();
-            // 연결은 받아주되 응답 바이트를 절대 쓰지 않는 서버 — read timeout만 순수하게 검증한다.
-            CompletableFuture<Void> acceptor = CompletableFuture.runAsync(() -> {
-                try (Socket socket = serverSocket.accept()) {
-                    TimeUnit.SECONDS.sleep(5);
-                } catch (IOException | InterruptedException ignored) {
+            // 연결은 받아주되 응답 바이트를 절대 쓰지 않고, 테스트가 끝날 때까지 소켓을 붙잡는다 —
+            // read timeout 말고는 이 호출을 끝낼 길이 없다.
+            Thread acceptor = Thread.ofVirtual().start(() -> {
+                try (Socket ignored = serverSocket.accept()) {
+                    release.await();
+                } catch (Exception ignored) {
                     // 테스트 종료 시 소켓 닫힘으로 인한 예외는 무시
                 }
             });
 
             JdkClientHttpRequestFactory requestFactory =
-                    ClientsConfig.timeoutRequestFactory(Duration.ofSeconds(2), Duration.ofSeconds(1));
+                    ClientsConfig.timeoutRequestFactory(Duration.ofSeconds(2), Duration.ofMillis(500));
             RestClient restClient = RestClient.builder()
                     .baseUrl("http://localhost:" + port)
                     .requestFactory(requestFactory)
                     .build();
 
-            // 별도 preemptive-timeout 스레드로 감싸지 않는다 — 가짜 서버가 최대 5초만 붙잡고
-            // 있으므로 이 호출 자체가 자연스럽게 유계(bounded)다. read timeout(1초)이 실제로
-            // 걸린다면 5초보다 훨씬 짧게 끝나야 한다는 것으로 강제 여부를 검증한다.
-            Instant start = Instant.now();
-            assertThatThrownBy(() -> restClient.get().uri("/never-responds").retrieve().body(String.class))
-                    .isInstanceOf(ResourceAccessException.class);
-            Duration elapsed = Duration.between(start, Instant.now());
+            assertTimeoutPreemptively(HANG_GUARD, () ->
+                    assertThatThrownBy(() -> restClient.get().uri("/never-responds").retrieve().body(String.class))
+                            .isInstanceOf(ResourceAccessException.class)
+                            .hasRootCauseInstanceOf(HttpTimeoutException.class)
+                            .rootCause().isNotInstanceOf(HttpConnectTimeoutException.class));
 
-            assertThat(elapsed)
-                    .as("read timeout(1초)이 걸리지 않으면 가짜 서버가 응답을 주는 5초까지 기다리게 된다")
-                    .isLessThan(Duration.ofSeconds(3));
-
-            acceptor.cancel(true);
+            release.countDown();
+            acceptor.join(TimeUnit.SECONDS.toMillis(5));
+        } finally {
+            release.countDown();
         }
     }
 
     @Test
-    void connect_timeout_is_enforced_against_a_non_routable_address() {
-        // TEST-NET-1(RFC 5737) — 연결 시도가 절대 성공/거부되지 않고 그냥 뭉개져야 connect timeout만 순수 검증된다.
+    void connect_timeout_is_configured_on_the_http_client() {
+        assertThat(ClientsConfig.timeoutHttpClient(Duration.ofMillis(500)).connectTimeout())
+                .isEqualTo(Optional.of(Duration.ofMillis(500)));
+        assertThat(ClientsConfig.timeoutHttpClient(ClientsConfig.CONNECT_TIMEOUT).connectTimeout())
+                .isEqualTo(Optional.of(Duration.ofSeconds(2)));
+    }
+
+    @Test
+    void connect_attempt_to_a_non_routable_address_never_hangs() {
+        // TEST-NET-1(RFC 5737) — 환경에 따라 connect timeout 또는 즉시 거부로 끝난다. 어느 쪽이든 OS 기본
+        // 연결 타임아웃(수십 초~분)까지 매달리지 않는다는 것만 본다 — 시간 경계가 아니라 hang 여부다.
         JdkClientHttpRequestFactory requestFactory =
                 ClientsConfig.timeoutRequestFactory(Duration.ofMillis(500), Duration.ofSeconds(10));
         RestClient restClient = RestClient.builder()
@@ -77,13 +95,8 @@ class ClientsConfigTest {
                 .requestFactory(requestFactory)
                 .build();
 
-        Instant start = Instant.now();
-        assertThatThrownBy(() -> restClient.get().uri("/unreachable").retrieve().body(String.class))
-                .isInstanceOf(ResourceAccessException.class);
-        Duration elapsed = Duration.between(start, Instant.now());
-
-        assertThat(elapsed)
-                .as("connect timeout(0.5초)이 걸리지 않으면 OS 기본 연결 타임아웃(수십 초)까지 기다리게 된다")
-                .isLessThan(Duration.ofSeconds(10));
+        assertTimeoutPreemptively(HANG_GUARD, () ->
+                assertThatThrownBy(() -> restClient.get().uri("/unreachable").retrieve().body(String.class))
+                        .isInstanceOf(ResourceAccessException.class));
     }
 }

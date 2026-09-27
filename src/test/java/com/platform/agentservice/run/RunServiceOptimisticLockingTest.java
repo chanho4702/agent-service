@@ -83,7 +83,7 @@ class RunServiceOptimisticLockingTest {
                 PERSONA_MEMBER_ID, 1L, null, null, null, null, null, null, List.of(), List.of(), 0L, 1, null, null, null);
         when(tokenService.bearerFor(anyLong())).thenReturn(BEARER);
         when(commitLinkParser.parse(any())).thenReturn(List.of());
-        when(issueClaimSupport.claim(anyString(), anyLong(), anyString(), anyString())).thenReturn(issue);
+        when(issueClaimSupport.claim(anyString(), anyLong(), any(), anyString())).thenReturn(issue);
         when(almClient.comments(anyLong(), anyString())).thenReturn(List.of());
         when(almClient.getByKey(anyString(), anyString())).thenReturn(issue);
         when(almClient.addComment(anyLong(), anyString(), anyString()))

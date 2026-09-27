@@ -21,9 +21,15 @@ import java.util.stream.Stream;
  * <p><b>리포가 이긴다</b>: 대상 리포 자체가 이미 같은 이름의 파일/디렉터리를 갖고 있으면
  * 절대 덮어쓰지 않는다 — 각 서비스 리포의 `CLAUDE.md`/`.claude/`가 그 리포의 최신·정확한
  * 규약이고, 플랫폼 루트 번들은 "리포에 없을 때의 기본값"일 뿐이다.
+ *
+ * <p><b>개인 로컬 설정 제외(AGP-51)</b>: 번들 어디에 있든 {@code settings.local.json}은 복사하지 않는다 —
+ * 운영자 개인의 권한 허용 목록·env·MCP 설정이 담기는 파일이라, 워커 워크스페이스에 실리면 워커가 운영자의
+ * 로컬 권한으로 돌거나 워커 커밋에 섞여 나갈 수 있다. 공유 규약은 {@code settings.json}에 둔다.
  */
 @Component
 public class HarnessMaterializer {
+
+    static final String LOCAL_SETTINGS_FILE = "settings.local.json";
 
     private final WorkerProperties properties;
 
@@ -83,6 +89,9 @@ public class HarnessMaterializer {
         try {
             if (Files.isDirectory(source)) {
                 Files.createDirectories(dest);
+                return;
+            }
+            if (LOCAL_SETTINGS_FILE.equals(source.getFileName().toString())) {
                 return;
             }
             if (Files.exists(dest)) {

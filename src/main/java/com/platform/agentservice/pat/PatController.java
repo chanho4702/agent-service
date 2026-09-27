@@ -23,7 +23,8 @@ import java.util.List;
 /**
  * PAT(개인 접근 토큰) 발급·조회·철회. 이 컨트롤러는 일반 JWT 인증 경로(SecurityConfig의
  * anyRequest().authenticated())로 보호된다 — {@code /api/agent/mcp}의 PatAuthFilter와는 무관하다.
- * 발급·철회는 관리자만, 목록 조회는 인증된 사용자 누구나(해시는 절대 노출하지 않는다).
+ * 발급·조회·철회 모두 관리자만(AGP-21 — 목록의 라벨·페르소나 슬러그·사용 시각도 운영 정보라
+ * 일반 사용자에게 열어 둘 이유가 없다). 해시는 어느 응답에도 노출하지 않는다.
  */
 @RestController
 @RequestMapping("/api/agent/tokens")
@@ -40,6 +41,7 @@ public class PatController {
     }
 
     @GetMapping
+    @PreAuthorize("hasRole('ADMIN')")
     public List<PatSummaryResponse> list() {
         return patService.list();
     }

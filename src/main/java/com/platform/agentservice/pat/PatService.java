@@ -8,6 +8,7 @@ import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.common.error.ConflictException;
 import com.platform.common.error.NotFoundException;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -29,6 +30,7 @@ import java.util.Optional;
  * <p>평문 토큰은 {@link #issue}의 반환값에만 존재한다 — 저장은 SHA-256 해시(64 hex)로만
  * 하므로 이후로는 절대 재조회할 수 없다.
  */
+@Slf4j
 @Service
 @RequiredArgsConstructor
 public class PatService {
@@ -82,22 +84,51 @@ public class PatService {
     }
 
     /**
-     * PatAuthFilter 전용. 유효(미철회·미만료·존재)하면 lastUsedAt을 스로틀 갱신하고
+     * PatAuthFilter 전용. 유효(미철회·미만료·존재·페르소나 활성)하면 lastUsedAt을 스로틀 갱신하고
      * {@link PatPrincipal}을 반환한다. 그 외에는 {@link Optional#empty()} — 필터가 401로 끝낸다.
+     *
+     * <p>거부 사유는 warn으로 남긴다(AGP-23 — 401만 보고는 만료·철회·오타·비활성을 구분할 수 없다).
+     * 토큰 원문은 절대 싣지 않는다: 해시 불일치는 앞 8자(접두 + 4자)만, 나머지는 토큰 id만 쓴다.
+     *
+     * <p><b>비활성 페르소나(AGP-29)</b>: 사람용 PAT은 거부한다 — 이게 없으면 비활성화가 장식이다.
+     * run 토큰({@link PatToken#isRunToken()})은 예외로 통과시킨다: 비활성화는 "새 인증"만 막고, 이미
+     * 도는 워커는 자연 종료되게 둔다(즉시 멈춰야 하면 킬 스위치·run 취소가 그 수단이다). 새 run 토큰은
+     * {@link #issue}가 비활성 페르소나에 발급을 거부하므로 새 run은 시작되지 않는다.
      */
     @Transactional
     public Optional<PatPrincipal> validate(String rawToken) {
-        return patTokenRepository.findByTokenHash(sha256Hex(rawToken))
-                .filter(t -> !t.isRevoked())
-                .filter(t -> !t.isExpired(Instant.now()))
-                .flatMap(this::toPrincipal);
+        Optional<PatToken> found = patTokenRepository.findByTokenHash(sha256Hex(rawToken));
+        if (found.isEmpty()) {
+            log.warn("PAT 거부 — 일치하는 토큰 없음(해시 불일치): prefix={}", safePrefix(rawToken));
+            return Optional.empty();
+        }
+        PatToken token = found.get();
+        if (token.isRevoked()) {
+            log.warn("PAT 거부 — 철회된 토큰: id={}", token.getId());
+            return Optional.empty();
+        }
+        if (token.isExpired(Instant.now())) {
+            log.warn("PAT 거부 — 만료된 토큰: id={} expiresAt={}", token.getId(), token.getExpiresAt());
+            return Optional.empty();
+        }
+        Optional<Persona> persona = personaRepository.findById(token.getPersonaId());
+        if (persona.isEmpty()) {
+            log.warn("PAT 거부 — 페르소나 없음: id={} personaId={}", token.getId(), token.getPersonaId());
+            return Optional.empty();
+        }
+        if (!persona.get().isActive() && !token.isRunToken()) {
+            log.warn("PAT 거부 — 비활성 페르소나: id={} persona={}", token.getId(), persona.get().getSlug());
+            return Optional.empty();
+        }
+        touchIfStale(token);
+        return Optional.of(new PatPrincipal(token.getOwnerMemberId(), token.getPersonaId(), persona.get().getMemberId()));
     }
 
-    private Optional<PatPrincipal> toPrincipal(PatToken token) {
-        return personaRepository.findById(token.getPersonaId()).map(persona -> {
-            touchIfStale(token);
-            return new PatPrincipal(token.getOwnerMemberId(), token.getPersonaId(), persona.getMemberId());
-        });
+    private static String safePrefix(String rawToken) {
+        if (rawToken == null) {
+            return "";
+        }
+        return rawToken.length() <= 8 ? "(짧음)" : rawToken.substring(0, 8) + "…";
     }
 
     private void touchIfStale(PatToken token) {

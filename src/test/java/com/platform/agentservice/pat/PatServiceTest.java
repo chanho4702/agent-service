@@ -9,6 +9,9 @@ import com.platform.common.error.ConflictException;
 import com.platform.common.error.NotFoundException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -28,6 +31,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
  */
 @DataJpaTest
 @ActiveProfiles("test")
+@ExtendWith(OutputCaptureExtension.class)
 class PatServiceTest {
 
     @Autowired PatTokenRepository patTokenRepository;
@@ -126,6 +130,48 @@ class PatServiceTest {
         patService.revoke(response.id());
 
         assertThat(patService.validate(response.token())).isEmpty();
+    }
+
+    @Test
+    void validate_rejects_human_pat_of_inactive_persona() {
+        PatCreatedResponse response = patService.issue(new PatCreateRequest("t", "qa-bot", null), 42L);
+        persona.changeActive(false);
+        personaRepository.saveAndFlush(persona);
+
+        assertThat(patService.validate(response.token())).isEmpty();
+    }
+
+    @Test
+    void validate_keeps_run_token_of_inactive_persona_so_inflight_run_finishes() {
+        PatCreatedResponse response = patService.issue(
+                new PatCreateRequest(PatToken.RUN_LABEL_PREFIX + "7", "qa-bot", null), PatToken.SYSTEM_OWNER_MEMBER_ID);
+        persona.changeActive(false);
+        personaRepository.saveAndFlush(persona);
+
+        assertThat(patService.validate(response.token())).isPresent();
+    }
+
+    @Test
+    void validate_does_not_treat_human_pat_labelled_run_as_run_token() {
+        PatCreatedResponse response = patService.issue(
+                new PatCreateRequest(PatToken.RUN_LABEL_PREFIX + "fake", "qa-bot", null), 42L);
+        persona.changeActive(false);
+        personaRepository.saveAndFlush(persona);
+
+        assertThat(patService.validate(response.token())).isEmpty();
+    }
+
+    @Test
+    void validate_rejections_are_logged_without_raw_token(CapturedOutput output) {
+        String unknown = "agp_abcdSECRETSECRETSECRET";
+        patService.validate(unknown);
+        PatCreatedResponse revoked = patService.issue(new PatCreateRequest("t", "qa-bot", null), 1L);
+        patService.revoke(revoked.id());
+        patService.validate(revoked.token());
+
+        assertThat(output).contains("PAT 거부 — 일치하는 토큰 없음(해시 불일치): prefix=agp_abcd…");
+        assertThat(output).contains("PAT 거부 — 철회된 토큰: id=" + revoked.id());
+        assertThat(output).doesNotContain("SECRETSECRET").doesNotContain(revoked.token());
     }
 
     @Test

@@ -1,5 +1,6 @@
 package com.platform.agentservice.persona;
 
+import com.platform.agentservice.persona.dto.PersonaActiveRequest;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.agentservice.persona.dto.PersonaResponse;
 import jakarta.validation.Valid;
@@ -9,6 +10,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PatchMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestHeader;
@@ -37,6 +40,13 @@ public class PersonaController {
         PersonaService.BootstrapResult result = personaService.bootstrap(request, authorization);
         HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
         return ResponseEntity.status(status).body(result.persona());
+    }
+
+    /** 활성/비활성 전환(AGP-29) — 비활성 페르소나의 사람용 PAT은 즉시 401이 된다(진행 중 run 토큰은 예외). */
+    @PatchMapping("/{id}/active")
+    @PreAuthorize("hasRole('ADMIN')")
+    public PersonaResponse changeActive(@PathVariable long id, @Valid @RequestBody PersonaActiveRequest request) {
+        return personaService.changeActive(id, request.active());
     }
 
     @GetMapping

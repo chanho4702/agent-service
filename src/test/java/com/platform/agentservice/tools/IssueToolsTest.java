@@ -11,6 +11,7 @@ import com.platform.agentservice.client.dto.CommentResponse;
 import com.platform.agentservice.client.dto.IssueCreateRequest;
 import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.client.dto.IssueUpdateRequest;
+import com.platform.agentservice.client.dto.ProjectSettingsResponse;
 import com.platform.agentservice.client.dto.WebLinkResponse;
 import com.platform.agentservice.pat.PatPrincipal;
 import com.platform.agentservice.persona.Persona;
@@ -96,7 +97,7 @@ class IssueToolsTest {
         IssueResponse updated = issue(1L, "PROJ-1", "inprogress", PERSONA_MEMBER_ID, 3);
         when(almClient.update(1L, expectedRequest, BEARER)).thenReturn(updated);
 
-        String result = issueTools.claimIssue("PROJ-1");
+        String result = issueTools.claimIssue("PROJ-1", null);
 
         assertThat(result).contains("PROJ-1").contains("inprogress");
         verify(almClient, times(1)).update(eq(1L), eq(expectedRequest), eq(BEARER));
@@ -122,7 +123,7 @@ class IssueToolsTest {
                 .thenThrow(new AlmClient.VersionConflictException("버전 충돌"));
         when(almClient.update(1L, secondAttempt, BEARER)).thenReturn(updated);
 
-        String result = issueTools.claimIssue("PROJ-1");
+        String result = issueTools.claimIssue("PROJ-1", null);
 
         assertThat(result).contains("PROJ-1").contains("inprogress");
         verify(almClient, times(2)).getByKey(eq("PROJ-1"), eq(BEARER));
@@ -138,12 +139,58 @@ class IssueToolsTest {
         when(almClient.update(eq(1L), org.mockito.ArgumentMatchers.any(), eq(BEARER)))
                 .thenThrow(new AlmClient.VersionConflictException("버전 충돌"));
 
-        String result = issueTools.claimIssue("PROJ-1");
+        String result = issueTools.claimIssue("PROJ-1", null);
 
         assertThat(result).startsWith("오류:").contains("버전 충돌");
         // 최초 시도 + 재시도 1회 = 정확히 2번
         verify(almClient, times(2)).update(eq(1L), org.mockito.ArgumentMatchers.any(), eq(BEARER));
         verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("claim_issue"), org.mockito.ArgumentMatchers.anyString(), eq(AuditStatus.ERROR));
+    }
+
+    @Test
+    void claim_issue_without_status_resolves_active_category_status_from_scheme() {
+        IssueResponse fetched = issue(1L, "PROJ-1", "todo", null, 2);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(fetched);
+        when(almClient.getProjectSettings(9L, BEARER)).thenReturn(settings(
+                new ProjectSettingsResponse.StatusEntry("backlog", "new", 0),
+                new ProjectSettingsResponse.StatusEntry("review", "active", 2),
+                new ProjectSettingsResponse.StatusEntry("develop", "active", 1),
+                new ProjectSettingsResponse.StatusEntry("closed", "complete", 3)));
+        IssueUpdateRequest expected = new IssueUpdateRequest(
+                fetched.title(), fetched.description(), fetched.type(), "develop", fetched.priority(),
+                PERSONA_MEMBER_ID, null, 2, null);
+        when(almClient.update(1L, expected, BEARER)).thenReturn(issue(1L, "PROJ-1", "develop", PERSONA_MEMBER_ID, 3));
+
+        String result = issueTools.claimIssue("PROJ-1", null);
+
+        assertThat(result).contains("develop");
+    }
+
+    @Test
+    void claim_issue_with_explicit_status_skips_scheme_lookup() {
+        IssueResponse fetched = issue(1L, "PROJ-1", "todo", null, 2);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(fetched);
+        IssueUpdateRequest expected = new IssueUpdateRequest(
+                fetched.title(), fetched.description(), fetched.type(), "review", fetched.priority(),
+                PERSONA_MEMBER_ID, null, 2, null);
+        when(almClient.update(1L, expected, BEARER)).thenReturn(issue(1L, "PROJ-1", "review", PERSONA_MEMBER_ID, 3));
+
+        String result = issueTools.claimIssue("PROJ-1", " review ");
+
+        assertThat(result).contains("review");
+        verify(almClient, never()).getProjectSettings(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyString());
+    }
+
+    @Test
+    void claim_issue_with_status_outside_scheme_surfaces_alm_400_as_plain_text() {
+        IssueResponse fetched = issue(1L, "PROJ-1", "todo", null, 2);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(fetched);
+        when(almClient.update(eq(1L), org.mockito.ArgumentMatchers.any(), eq(BEARER)))
+                .thenThrow(new com.platform.common.error.ConflictException("스킴에 없는 상태입니다: nope"));
+
+        String result = issueTools.claimIssue("PROJ-1", "nope");
+
+        assertThat(result).isEqualTo("오류: 스킴에 없는 상태입니다: nope");
     }
 
     // ---- update_issue_status: 재시도는 최신 담당자를 보존 ----
@@ -289,6 +336,14 @@ class IssueToolsTest {
     }
 
     @Test
+    void toTipTapHtml_escapes_markup_characters_in_plain_text() {
+        assertThat(IssueTools.toTipTapHtml("a < b & c > d")).isEqualTo("<p>a &lt; b &amp; c &gt; d</p>");
+        assertThat(IssueTools.toTipTapHtml("List<String>\n\n<script>는 문단 중간이라 텍스트다"))
+                .isEqualTo("<p>List&lt;String&gt;</p><p>&lt;script&gt;는 문단 중간이라 텍스트다</p>");
+        assertThat(IssueTools.toTipTapHtml("&lt; 이미 엔티티")).isEqualTo("<p>&amp;lt; 이미 엔티티</p>");
+    }
+
+    @Test
     void create_issue_wraps_plain_text_description_before_sending() {
         IssueResponse created = issue(99L, "PROJ-99", "todo", null, 0);
         when(almClient.create(eq(9L), org.mockito.ArgumentMatchers.any(), eq(BEARER))).thenReturn(created);
@@ -376,6 +431,24 @@ class IssueToolsTest {
     // ---- 503 구분 메시지 ----
 
     @Test
+    void downstream_401_produces_auth_defect_message_distinct_from_transient_outage() {
+        when(almClient.getByKey("PROJ-1", BEARER)).thenThrow(new com.platform.agentservice.client.DownstreamAuthException(
+                "이슈 조회 실패: 다운스트림 인증 거부(401) — 서비스 토큰·내부 인증 설정을 확인하세요"));
+
+        String result = issueTools.getIssue("PROJ-1");
+
+        assertThat(result).isEqualTo("다운스트림 인증 결함 — 권한 없음이 아님, 운영자 확인 필요(재시도로 해결되지 않음): "
+                + "이슈 조회 실패: 다운스트림 인증 거부(401) — 서비스 토큰·내부 인증 설정을 확인하세요");
+    }
+
+    @Test
+    void downstream_404_keeps_plain_error_text_with_alm_message() {
+        when(almClient.getByKey("PROJ-404", BEARER)).thenThrow(new com.platform.common.error.NotFoundException("이슈를 찾을 수 없습니다: PROJ-404"));
+
+        assertThat(issueTools.getIssue("PROJ-404")).isEqualTo("오류: 이슈를 찾을 수 없습니다: PROJ-404");
+    }
+
+    @Test
     void service_unavailable_produces_distinct_message_not_confused_with_forbidden() {
         when(almClient.getByKey("PROJ-1", BEARER)).thenThrow(new ServiceUnavailableException("org-service 다운"));
 
@@ -434,6 +507,11 @@ class IssueToolsTest {
         return new IssueResponse(11L, "AGP-2", 9L, "원래 제목", "<p>원래 설명</p>", "story", "inprogress", "medium",
                 PERSONA_MEMBER_ID, 1L, 3L, 4L, LocalDate.of(2026, 10, 1), new BigDecimal("3"), null, 6L,
                 List.of("auto", "backend"), List.of(7L), 0L, version, null, null, null);
+    }
+
+    private static ProjectSettingsResponse settings(ProjectSettingsResponse.StatusEntry... statuses) {
+        return new ProjectSettingsResponse(new ProjectSettingsResponse.SettingsBody(
+                List.of(statuses), List.of(), List.of(), List.of(), "medium", List.of(), java.util.Map.of()));
     }
 
     private static IssueResponse issue(long id, String key, String status, Long assigneeId, int version) {

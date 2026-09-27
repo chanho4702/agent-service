@@ -90,8 +90,21 @@ curl -s -X POST $GATEWAY/api/agent/tokens \
   -d '{"label":"my-claude-code","personaSlug":"jiho"}'
 ```
 
-PAT 관리: `GET /api/agent/tokens`(인증된 누구나, 해시는 노출 안 함) · `DELETE /api/agent/tokens/{id}`
-(관리자만). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자 누구나 — JWT 필요, 슬러그/역할/emoji만 노출).
+PAT 관리: `GET /api/agent/tokens`(관리자만 — AGP-21, 라벨·페르소나·사용 시각도 운영 정보라 일반 사용자에게 닫았다. 해시는
+어느 응답에도 노출 안 함) · `DELETE /api/agent/tokens/{id}`(관리자만). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자
+누구나 — JWT 필요, 슬러그/역할/emoji/active만 노출).
+
+페르소나 활성/비활성(AGP-29): `PATCH /api/agent/personas/{id}/active`(관리자만, body `{"active": true|false}` → 200
+`PersonaResponse`, 없는 id 404, `active` 누락 400). 비활성 페르소나의 **사람용 PAT은 다음 요청부터 401**(`PatService.validate`
+— 기존 "유효하지 않은 토큰" 계약 그대로), 새 PAT·새 run 토큰 발급은 409(기존), 디스패처는 기본 페르소나가 비활성이면 픽업을
+건너뛰고(warn), USER run 생성은 400이다. **진행 중인 run은 끊지 않는다** — run 토큰(`PatToken.isRunToken()`: 발급자=시스템
+센티널 0 + label `run:`)은 비활성이어도 run이 끝나 철회될 때까지 통과한다. 즉시 멈춰야 하면 킬 스위치(§5.2)·run 취소(§5.5)를
+쓴다. 비활성화는 토큰을 철회하지 않으므로 다시 활성화하면 기존 PAT이 살아난다(영구 차단은 토큰 철회). 재부트스트랩
+(`POST /api/agent/personas` 같은 slug)은 active를 건드리지 않는다.
+
+PAT 거부 로그(AGP-23): 401의 사유(해시 불일치·철회·만료·페르소나 없음·비활성)를 `PatService`가 warn으로 남긴다 — 토큰 원문은
+싣지 않고 해시 불일치는 앞 8자(`agp_` + 4자), 나머지는 토큰 id만. 서비스 토큰 발급(`/internal/service-tokens`) 실패도
+`AuthTokenClient`가 memberId·HTTP 상태만 warn으로 남긴다(시크릿 미설정 포함).
 
 ### 2. Claude Code에 MCP 서버 등록
 
@@ -114,6 +127,13 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
 1. 작업 시작 전 `get_project_context(projectId)`로 스킴(상태/타입/우선순위)과 멤버 명단을 먼저
    확인한다 — `create_issue`의 스킴 400을 예방한다.
 2. 이슈를 집으면 `claim_issue` → 진행 코멘트는 `add_comment` → 시간은 `log_work`.
+   `claim_issue(issueKey, status?)`(AGP-27): `status`를 생략하면 그 이슈 프로젝트의 유효 스킴(`GET /api/alm/projects/{id}/settings`
+   — `get_project_context`와 같은 경로)에서 카테고리 의미 `kind=active`인 상태를 고른다 — 기본 스킴 id `inprogress`가 그중에
+   있으면 그것, 없으면 `order`가 가장 앞선 것. 스킴 조회 실패·active 상태 없음이면 `inprogress`로 폴백한다(그 상태가 스킴에
+   없으면 alm 400 → 오류 텍스트, 기존과 같은 실패 모양). 전이 규칙은 보지 않는다(판정은 alm PUT). 스킴에 없는 `status`를
+   넘기면 alm 400이 그대로 전파된다. 디스패처 자동 claim(`RunService.buildJob`)도 같은 해석을 쓴다
+   (`IssueClaimSupport.resolveInProgressStatus` — 예전 `CLAIM_STATUS="inprogress"` 고정 제거). 한계: 진행 중 상태가 여럿인
+   스킴에서 "착수" 상태는 스킴이 말해 주지 않아 순서로 정한다.
 3. 결정·설계·작업 내용은 위키에 `create_page`/`append_to_page`로 페르소나 명의 작업 보고서를
    남기고, `add_comment`로 이슈에 보고서를 링크한다 — **보고서 없는 완료는 금지**.
 4. PR은 `link_pr`로 이슈에 연결한다.
@@ -131,6 +151,31 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
    PUT, 409면 재조회·재머지 1회 재시도)를 거친다 — alm PUT이 full-replace라 필드 매핑을 도구마다 따로
    두면 담당자(`assigneeId` null=해제)가 조용히 지워진다. `details`는 항상 null(확장 필드 보존),
    `mentionedUserIds`도 null(되쓰기마다 멘션 알림 재발송 방지).
+8. `create_issue`/`update_issue`의 `description`이 일반 텍스트면(첫 글자가 `<`가 아니면) `& < >`를 이스케이프한 뒤 `<p>`로
+   감싼다(AGP-26, `IssueTools.toTipTapHtml`) — `List<String>`·"a < b" 같은 본문이 태그로 먹히지 않는다. `<`로 시작하면 HTML로
+   보고 그대로 보낸다.
+9. **입력 인코딩 방어(AGP-38)**: 모든 도구 인자(중첩 목록·객체 포함)에 깨진 서로게이트·제어문자(개행·탭·CR 제외)·U+FFFD(비UTF-8
+   디코딩 흔적)가 있으면 도구를 실행하지 않고 `오류: 입력 인코딩 거부 — 파라미터 '<경로>': <사유>`로 거부한다. 단일 지점은
+   `ToolInputGuard`(서버에 주입되는 `List<SyncToolSpecification>` 빈의 핸들러를 감싸는 BeanPostProcessor — 새 도구도 자동
+   적용). 거부도 감사 행(ERROR, summary `입력 거부: <파라미터>` — 값은 안 싣는다)을 남긴다. 정상 한글·이모지는 통과.
+10. **도구 오류 문구(AGP-25)**: 다운스트림 404는 `오류: <다운스트림 메시지>`(문구 형식 불변 — 예외 타입만 NotFound),
+    401은 `다운스트림 인증 결함 — 권한 없음이 아님, 운영자 확인 필요(재시도로 해결되지 않음): …`, 5xx·연결 실패는 기존
+    `권한 서비스/다운스트림 일시 장애 — …잠시 후 재시도하세요: …`. 전체 매핑은 아래 "다운스트림 오류 매핑" 참고.
+
+**다운스트림 오류 매핑(`DownstreamErrors`, AGP-25 — alm/wiki/org/auth 호출 공통)**
+
+| 다운스트림 | 예외 | REST 응답 | 비고 |
+|---|---|---|---|
+| 401 | `DownstreamAuthException`(`ServiceUnavailableException` 하위) | 503 | 이 서비스가 보낸 자격증명 거부 = 서비스 간 인증 결함. 예전엔 409 |
+| 403 | `ForbiddenException` | 403 | 다운스트림 메시지 그대로(불변) |
+| 404 | `NotFoundException` | 404 | 다운스트림 메시지 그대로. 예전엔 409 |
+| 409(낙관적 락) | `VersionConflictException`(alm·wiki update만) → 재시도 1회 | 409 | 불변 |
+| 그 밖 4xx(400 스킴 위반 등) | `ConflictException` | 409 | 불변 |
+| 5xx·연결 실패 | `ServiceUnavailableException` | 503 | 불변 |
+
+예외: 서비스 토큰 발급(`AuthTokenClient.mint`)의 404는 호출자가 찾던 대상(이슈 등)이 없다는 뜻이 아니라서 404가 아니라
+503으로 바꿔 던진다. best-effort 경로(커밋 링크 파서·서버 코멘트·알림)는 `Exception` 전체를 삼키므로 예외 타입이 바뀌어도
+계속 삼킨다.
 
 전체 도구 22종(P1 18종 + P2a run 보고 3종 + AGP-37 `update_issue`, 아래 §5 참고): `whoami`,
 `list_projects`, `get_project_context`, `search_issues`, `get_issue`, `create_issue`, `claim_issue`,
@@ -238,6 +283,10 @@ USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.proje
 `{"on": true|false}`)로 즉시 전체 차단·해제. **킬 스위치는 인메모리다 — 재기동하면 이 값과
 무관하게 항상 꺼진 상태(off)로 시작한다**. BLOCKED 알림(메일)은 §5.11 — 예산·킬 스위치 자체의 알림은 아직 없다.
 
+`BudgetGuard`의 실구현은 `BudgetService`다 — `BudgetGuardConfig`의 permissive 기본값은 `@ConditionalOnMissingBean`으로
+밀려나는데, 이것이 자동구성이 아닌 일반 설정이라 빈 등록 순서에 기댄다. `BudgetGuardWiringTest`(AGP-50)가 실 컨텍스트에서
+BudgetGuard 빈이 `BudgetService` 하나뿐이고 `RunService`가 그것을 쓰는지 고정한다 — 깨지면 킬 스위치·캡이 조용히 "항상 허용"이 된다.
+
 킬 스위치/예산 캡(`BudgetGuard.allow`)은 `RunService.execute` 진입점 자체에서 확인한다(최종
 리뷰 I3) — 새 이슈 픽업뿐 아니라 QUEUED continuation 드레인, 게이트 승인, BLOCKED/FAILED
 사람 재개까지 **전부** 이 지점을 거치므로 어느 경로로 실행이 트리거되든 예외 없이 차단된다.
@@ -291,9 +340,10 @@ run을 띄운다.
 - 응답: 201 + `RunSummaryResponse`(id·issueKey·status=QUEUED·personaId·attempt·model·startedAt·endedAt·
   type·trigger·parentRunId — 목록 API와 같은 요약. 뒤 셋은 P3a에서 추가). 저장되는 run은 TASK·trigger=USER다.
 - 페르소나: 지정 슬러그 > `SCHEDULER_PERSONA`(기본 슬러그). 못 찾으면 404 — 스케줄러처럼 조용히
-  건너뛰지 않는다.
+  건너뛰지 않는다. 비활성 페르소나는 400("비활성 페르소나입니다: <slug>", AGP-29 — 큐에 넣어도 run 토큰 발급이 막혀
+  사고형 BLOCKED로 끝나므로 요청 시점에 거부).
 - 이슈는 그 페르소나 bearer로 ALM에서 확인하고 run에는 ALM이 돌려준 정본 키를 쓴다. 없는 이슈는
-  현재 409(기존 `DownstreamErrors` 매핑 그대로 — 404로 세분화는 AGP-25).
+  **404**(alm 메시지 그대로 — AGP-25로 409에서 바뀜, 아래 §3 "다운스트림 오류 매핑").
 - 같은 이슈에 활성 run(QUEUED/RUNNING/WAITING_APPROVAL/BLOCKED)이 있으면 409.
 - `instruction`은 앞뒤 공백을 자른 뒤 저장되고, 워커 프롬프트에 `<사용자-지시>` 경계 섹션으로
   실린다(§5.6). 게이트 승인·재개·반려-fix continuation과 REVIEW run까지 승계된다 — 리뷰어도
@@ -310,7 +360,9 @@ run을 띄운다.
   --output-format json --max-turns N [--model M]`.
 - 일반 TASK run(사람 재개 포함)은 run마다 새 워크스페이스(`AGENT_WORK_DIR/run-{id}`)를 만들어
   `git clone` 후, 하네스(`.claude/` 번들 + 루트 `CLAUDE.md`/`AGENTS.md`)를 그 워크스페이스에
-  실체화한다(`HarnessMaterializer`) — 워커가 플랫폼 협업 규약을 그대로 보고 작업하게 하기 위함.
+  실체화한다(`HarnessMaterializer`) — 워커가 플랫폼 협업 규약을 그대로 보고 작업하게 하기 위함. 번들 안의
+  `settings.local.json`(운영자 개인 권한 허용 목록·env·MCP 설정)은 어느 깊이에 있든 복사하지 않는다(AGP-51) — 워커가
+  운영자 로컬 권한으로 돌거나 워커 커밋에 섞여 나가는 것을 막는다. 공유 설정은 `settings.json`에 둔다.
 - **예외 — 계보 run(P2c)**: REVIEW run, 반려-fix run, 그리고 이 둘의 재개는 원 TASK run의
   워크스페이스를 **승계**한다(`Run.isWorkspaceLineage()` — REVIEW 전부 + `parentRunId`가 있는
   TASK). 워커 커밋은 푸시되지 않고 그 워크스페이스에만 있으므로(`CommitLinkParser`가
@@ -483,12 +535,12 @@ P2c~P3c의 "attempt가 `SCHEDULER_RETRY_MAX_ATTEMPTS`를 넘으면 반려 BLOCKE
   계획=PLANNER·DESIGNER·FRONTEND·BACKEND, 회고=전원, 에스컬레이션=그 이슈에서 run을 돌린 페르소나(회의 run 제외)+REVIEWER
   (관련 run이 없으면 PLANNER+REVIEWER)를 롤 순서(PLANNER→DESIGNER→FRONTEND→BACKEND→OPS→REVIEWER)·id 순으로 세운다.
   진행자가 run 소유 페르소나다(run 토큰·기록 명의). 참석자 id는 `run.attendee_persona_ids`에 저장돼 continuation까지 승계된다.
-- `agendaIssueKey`가 있으면 진행자 bearer로 ALM에서 확인(없으면 기존 `DownstreamErrors` 매핑)하고 다른 프로젝트 이슈면 400,
+- `agendaIssueKey`가 있으면 진행자 bearer로 ALM에서 확인(없는 이슈 404 — AGP-25 이전엔 409)하고 다른 프로젝트 이슈면 400,
   run.issueKey는 ALM 정본 키. 없으면 **`PROJECT-<projectId>`** 대표 키(`Run.projectIssueKey`) — 이 run은
   `hasAgendaIssue()=false`라 서버 코멘트·`report_progress`/`report_result`/`request_gate` 코멘트를 전부 건너뛴다.
   알려진 판정 한계(수용): ALM 프로젝트 키를 문자 그대로 `PROJECT`로 만든 설치에서 이슈 번호가 projectId와 우연히 같은
   안건(`PROJECT-<projectId>`)을 지정하면 합성 키로 오판해 그 회의의 이슈 코멘트가 생략된다 — 프로젝트 키 `PROJECT`를 피하라.
-- `projectId`는 ALM `getProject`로 확인하고 그 키로 모델 정책(§5.1)을 푼다. MEETING·ESCALATION은 `agendaIssueKey`·`agenda`
+- `projectId`는 ALM `getProject`로 확인하고(없는 프로젝트 404 — AGP-25 이전엔 409) 그 키로 모델 정책(§5.1)을 푼다. MEETING·ESCALATION은 `agendaIssueKey`·`agenda`
   둘 다 없으면 400(빈 회의 방지). `agenda`는 `run.instruction`에 들어가 `<사용자-지시>` 경계로 프롬프트에 실린다.
 - 같은 프로젝트에 활성(QUEUED/RUNNING/WAITING_APPROVAL/BLOCKED) 회의 run이 있으면 409. 이슈 단위 중복 가드는 쓰지 않는다.
   단, 안건 이슈가 있는 회의 run은 활성인 동안 그 이슈의 TASK 생성·픽업을 막는다(`existsByIssueKeyAndStatusIn`이 타입 무관).

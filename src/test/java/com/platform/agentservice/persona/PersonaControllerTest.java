@@ -18,6 +18,7 @@ import static org.mockito.BDDMockito.given;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.patch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -140,5 +141,45 @@ class PersonaControllerTest {
         mvc.perform(get("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].slug").value("qa-bot"));
+    }
+
+    @Test
+    void admin_deactivates_persona_returns_200_with_active_false() throws Exception {
+        given(personaService.changeActive(1L, false)).willReturn(
+                new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", false));
+
+        mvc.perform(patch("/api/agent/personas/1/active").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"active\":false}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.active").value(false));
+    }
+
+    @Test
+    void non_admin_cannot_change_persona_active() throws Exception {
+        mvc.perform(patch("/api/agent/personas/1/active").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"active\":false}"))
+                .andExpect(status().isForbidden());
+
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never())
+                .changeActive(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.anyBoolean());
+    }
+
+    @Test
+    void missing_active_value_returns_400_with_korean_error() throws Exception {
+        mvc.perform(patch("/api/agent/personas/1/active").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.error").value("active 값이 필요합니다"));
+    }
+
+    @Test
+    void unknown_persona_active_change_is_404() throws Exception {
+        given(personaService.changeActive(99L, true))
+                .willThrow(new com.platform.common.error.NotFoundException("페르소나를 찾을 수 없습니다: 99"));
+
+        mvc.perform(patch("/api/agent/personas/99/active").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"active\":true}"))
+                .andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.error").value("페르소나를 찾을 수 없습니다: 99"));
     }
 }

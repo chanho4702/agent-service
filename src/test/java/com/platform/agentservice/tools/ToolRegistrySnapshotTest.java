@@ -1,12 +1,17 @@
 package com.platform.agentservice.tools;
 
+import com.platform.agentservice.pat.PatPrincipal;
 import io.modelcontextprotocol.server.McpServerFeatures;
+import io.modelcontextprotocol.spec.McpSchema;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.context.ActiveProfiles;
 
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -69,5 +74,23 @@ class ToolRegistrySnapshotTest {
                 "report_progress",
                 "request_gate",
                 "report_result");
+    }
+
+    /** AGP-38 — 서버에 주입되는 실제 도구 목록이 {@link ToolInputGuard}로 감싸졌는지(도구 실행 전 거부). */
+    @Test
+    void registered_tools_reject_broken_input_before_execution() {
+        McpServerFeatures.SyncToolSpecification addComment = toolSpecs.stream()
+                .filter(spec -> spec.tool().name().equals("add_comment")).findFirst().orElseThrow();
+        SecurityContextHolder.getContext().setAuthentication(
+                new UsernamePasswordAuthenticationToken(new PatPrincipal(1L, 1L, 1L), null, List.of()));
+        try {
+            McpSchema.CallToolResult result = addComment.callHandler().apply(null, new McpSchema.CallToolRequest(
+                    "add_comment", Map.of("issueKey", "AGP-1", "body", "깨진\uD800본문")));
+
+            assertThat(((McpSchema.TextContent) result.content().get(0)).text())
+                    .startsWith("오류: 입력 인코딩 거부 — 파라미터 'body': 깨진 서로게이트 U+D800");
+        } finally {
+            SecurityContextHolder.clearContext();
+        }
     }
 }

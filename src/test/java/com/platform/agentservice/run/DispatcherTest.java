@@ -452,4 +452,18 @@ class DispatcherTest {
         verify(almClient, never()).search(any(), any(), any(), any(), any(), any(), anyString());
         verify(runService, never()).createQueuedForIssue(any(), any(), any());
     }
+
+    @Test
+    void inactive_default_persona_skips_pickup_without_touching_alm() {
+        when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
+        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        Persona inactive = persona();
+        inactive.changeActive(false);
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(inactive));
+
+        dispatcher(enabledProperties(2, 1)).tick();
+
+        verify(almClient, never()).search(any(), any(), any(), any(), any(), any(), anyString());
+        verify(runService, never()).createQueuedForIssue(any(), any(), any());
+    }
 }

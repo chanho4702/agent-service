@@ -193,7 +193,9 @@ class AlmClientTest {
                 .andExpect(header(HttpHeaders.AUTHORIZATION, BEARER))
                 .andRespond(withSuccess("""
                         {"body":{
-                          "statuses":[{"id":"todo"},{"id":"inprogress"},{"id":"done"}],
+                          "statuses":[{"id":"todo","name":"할 일","category":"todo","order":0,"kind":"new","color":"neutral","icon":"circle"},
+                                      {"id":"inprogress","name":"진행 중","category":"inprogress","order":1,"kind":"active","color":"blue","icon":"clock"},
+                                      {"id":"done","name":"완료","category":"done","order":2,"kind":"complete","color":"green","icon":"check"}],
                           "transitions":[],
                           "enabledTypes":["task","bug"],
                           "enabledPriorities":["highest","high","medium","low","lowest"],
@@ -209,6 +211,9 @@ class AlmClientTest {
 
         assertThat(settings.body().statuses()).extracting(ProjectSettingsResponse.StatusEntry::id)
                 .containsExactly("todo", "inprogress", "done");
+        assertThat(settings.body().statuses()).extracting(ProjectSettingsResponse.StatusEntry::kind)
+                .containsExactly("new", "active", "complete");
+        assertThat(settings.body().statuses().get(1).order()).isEqualTo(1);
         assertThat(settings.body().enabledTypes()).containsExactly("task", "bug");
         assertThat(settings.body().defaultPriority()).isEqualTo("medium");
         assertThat(settings.body().fields()).extracting(ProjectSettingsResponse.FieldConfigEntry::id)

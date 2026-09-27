@@ -132,12 +132,21 @@ public class IssueTools {
         });
     }
 
-    @McpTool(name = "claim_issue", description = "이슈를 현재 페르소나에게 배정하고 진행중 상태로 전환한다.")
-    public String claimIssue(@McpToolParam(description = "이슈 키", required = true) String issueKey) {
+    /**
+     * AGP-27: status를 생략하면 프로젝트 스킴의 "진행 중" 카테고리 상태로 전환한다
+     * ({@link IssueClaimSupport#resolveInProgressStatus}). 지정한 상태가 스킴에 없으면 alm 400이 오류 텍스트로 전파된다.
+     */
+    @McpTool(name = "claim_issue", description = "이슈를 현재 페르소나에게 배정하고 진행 중 상태로 전환한다"
+            + "(status 생략 시 프로젝트 스킴의 진행 중 카테고리 상태).")
+    public String claimIssue(
+            @McpToolParam(description = "이슈 키", required = true) String issueKey,
+            @McpToolParam(description = "전환할 상태 id(선택, 생략 시 스킴의 진행 중 상태 — get_project_context로 확인)",
+                    required = false) String status) {
         PatPrincipal actor = ToolActor.current();
-        return audited.run("claim_issue", "claim " + issueKey, () -> {
+        String summary = "claim " + issueKey + (status == null || status.isBlank() ? "" : " -> " + status);
+        return audited.run("claim_issue", summary, () -> {
             String bearer = tokenService.bearerFor(actor.personaMemberId());
-            IssueResponse updated = issueClaimSupport.claim(issueKey, actor.personaMemberId(), "inprogress", bearer);
+            IssueResponse updated = issueClaimSupport.claim(issueKey, actor.personaMemberId(), status, bearer);
             return "이슈 " + updated.key() + " 담당자 지정 완료 (상태: " + updated.status() + ")";
         });
     }
@@ -259,6 +268,10 @@ public class IssueTools {
      * 일반 텍스트를 TipTap이 기대하는 최소 HTML로 감싼다(alm-backend description 계약, S10).
      * 이미 {@code <}로 시작하면(이미 HTML로 판단) 그대로 둔다. 문단은 빈 줄({@code \n\n})로
      * 나누고, 문단 내부 줄바꿈은 {@code <br/>}로 바꾼다.
+     *
+     * <p>일반 텍스트 경로는 {@code & < >}를 먼저 이스케이프한다(AGP-26) — "a < b"나 "{@code List<String>}"
+     * 같은 본문이 태그로 파싱돼 잘려 나가거나, 워커가 옮겨 적은 사용자 입력이 마크업으로 살아나지 않게.
+     * {@code &}를 가장 먼저 바꿔야 뒤에서 만든 {@code &lt;}가 이중 이스케이프되지 않는다.
      */
     static String toTipTapHtml(String text) {
         if (text == null) {
@@ -267,8 +280,9 @@ public class IssueTools {
         if (text.stripLeading().startsWith("<")) {
             return text;
         }
+        String escaped = text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
         StringBuilder html = new StringBuilder();
-        for (String paragraph : text.split("\n\n")) {
+        for (String paragraph : escaped.split("\n\n")) {
             html.append("<p>").append(paragraph.replace("\n", "<br/>")).append("</p>");
         }
         return html.toString();

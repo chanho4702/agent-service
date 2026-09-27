@@ -1,6 +1,7 @@
 package com.platform.agentservice.run;
 
 import com.platform.agentservice.pat.PatService;
+import com.platform.agentservice.pat.PatToken;
 import com.platform.agentservice.pat.dto.PatCreateRequest;
 import com.platform.agentservice.pat.dto.PatCreatedResponse;
 import com.platform.agentservice.persona.Persona;
@@ -34,7 +35,7 @@ import org.springframework.stereotype.Service;
 public class RunTokenService {
 
     /** run 토큰 발급자로 기록되는 시스템 센티널 — 실제 관리자 memberId가 아니다. */
-    public static final long SYSTEM_MEMBER_ID = 0L;
+    public static final long SYSTEM_MEMBER_ID = PatToken.SYSTEM_OWNER_MEMBER_ID;
 
     private final PatService patService;
     private final PersonaRepository personaRepository;
@@ -51,7 +52,7 @@ public class RunTokenService {
         Persona persona = personaRepository.findById(run.getPersonaId())
                 .orElseThrow(() -> new NotFoundException("run의 페르소나를 찾을 수 없습니다: " + run.getPersonaId()));
         PatCreatedResponse response = patService.issue(
-                new PatCreateRequest("run:" + run.getId(), persona.getSlug(), null), SYSTEM_MEMBER_ID);
+                new PatCreateRequest(PatToken.RUN_LABEL_PREFIX + run.getId(), persona.getSlug(), null), SYSTEM_MEMBER_ID);
         return new IssuedRunToken(response.id(), response.token());
     }
 

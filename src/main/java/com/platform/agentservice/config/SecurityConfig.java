@@ -1,5 +1,6 @@
 package com.platform.agentservice.config;
 
+import com.platform.agentservice.pat.McpPaths;
 import com.platform.agentservice.pat.PatAuthFilter;
 import com.platform.agentservice.pat.PatService;
 import org.springframework.context.annotation.Bean;
@@ -28,8 +29,6 @@ import org.springframework.security.web.access.intercept.AuthorizationFilter;
 @EnableMethodSecurity
 public class SecurityConfig {
 
-    private static final String MCP_PATH = "/api/agent/mcp";
-    private static final String MCP_SUBPATHS = "/api/agent/mcp/**";
     private static final String[] ACTUATOR_PUBLIC = {"/actuator/health", "/actuator/info"};
 
     /**
@@ -57,7 +56,7 @@ public class SecurityConfig {
     SecurityFilterChain mcpFilterChain(HttpSecurity http, PatService patService) throws Exception {
         PatAuthFilter patAuthFilter = new PatAuthFilter(patService);
         http
-                .securityMatcher(MCP_PATH, MCP_SUBPATHS)
+                .securityMatcher(McpPaths.MCP_PATH, McpPaths.MCP_SUBPATHS)
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .csrf(csrf -> csrf.disable())
                 .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())

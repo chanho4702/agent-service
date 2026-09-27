@@ -361,10 +361,11 @@ class MeetingServiceTest {
     @Test
     void missing_agenda_issue_propagates_alm_error_and_saves_nothing() {
         stubProject();
-        when(almClient.getByKey(eq("AGP-404"), anyString())).thenThrow(new ConflictException("이슈 없음"));
+        // AGP-25: alm 404는 NotFoundException(→ 소집 API 404)으로 온다 — 예전엔 409였다.
+        when(almClient.getByKey(eq("AGP-404"), anyString())).thenThrow(new NotFoundException("이슈 없음"));
 
         assertThatThrownBy(() -> service(props(false)).createMeeting(RunType.MEETING, PROJECT_ID, "AGP-404", null, null))
-                .isInstanceOf(ConflictException.class);
+                .isInstanceOf(NotFoundException.class);
         verify(runRepository, never()).save(any());
     }
 

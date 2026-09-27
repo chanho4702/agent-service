@@ -195,4 +195,25 @@ class PersonaServiceTest {
         assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER))
                 .isInstanceOf(ServiceUnavailableException.class);
     }
+
+    @Test
+    void changeActive_toggles_flag_and_bootstrap_refresh_keeps_it() {
+        Persona saved = personaRepository.save(Persona.of(9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null));
+
+        assertThat(personaService.changeActive(saved.getId(), false).active()).isFalse();
+        assertThat(personaRepository.findById(saved.getId()).orElseThrow().isActive()).isFalse();
+
+        // 같은 slug 재부트스트랩은 표시 필드만 갱신한다 — 관리자가 끈 것을 되살리면 안 된다.
+        personaService.bootstrap(new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot v2", null, null, null, null),
+                ADMIN_BEARER);
+        assertThat(personaRepository.findById(saved.getId()).orElseThrow().isActive()).isFalse();
+
+        assertThat(personaService.changeActive(saved.getId(), true).active()).isTrue();
+    }
+
+    @Test
+    void changeActive_unknown_id_is_not_found() {
+        assertThatThrownBy(() -> personaService.changeActive(999_999L, false))
+                .isInstanceOf(com.platform.common.error.NotFoundException.class);
+    }
 }

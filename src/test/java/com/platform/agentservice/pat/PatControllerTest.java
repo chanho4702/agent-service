@@ -105,15 +105,24 @@ class PatControllerTest {
     }
 
     @Test
-    void authenticated_user_can_list_tokens_without_hash() throws Exception {
+    void admin_can_list_tokens_without_hash() throws Exception {
         given(patService.list()).willReturn(List.of(
                 new PatSummaryResponse(10L, "ci-token", "qa-bot", Instant.now(), null, null, false)));
 
-        mvc.perform(get("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob"))))
+        mvc.perform(get("/api/agent/tokens").with(authentication(TestAuth.admin(1L, "Admin"))))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$[0].id").value(10))
                 .andExpect(jsonPath("$[0].personaSlug").value("qa-bot"))
-                .andExpect(jsonPath("$[0].revoked").value(false));
+                .andExpect(jsonPath("$[0].revoked").value(false))
+                .andExpect(jsonPath("$[0].tokenHash").doesNotExist());
+    }
+
+    @Test
+    void non_admin_cannot_list_tokens() throws Exception {
+        mvc.perform(get("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden());
+
+        verify(patService, org.mockito.Mockito.never()).list();
     }
 
     @Test

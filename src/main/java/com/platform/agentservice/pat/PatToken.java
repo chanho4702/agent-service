@@ -13,6 +13,10 @@ import java.time.Instant;
 @Getter
 @NoArgsConstructor(access = AccessLevel.PROTECTED)
 public class PatToken {
+    /** run 토큰(워커용 임시 PAT) 식별 규약 — 발급자 센티널 + label 접두. {@code RunTokenService}가 이 값으로 발급한다. */
+    public static final long SYSTEM_OWNER_MEMBER_ID = 0L;
+    public static final String RUN_LABEL_PREFIX = "run:";
+
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
     @Column(nullable = false, unique = true, length = 64) private String tokenHash;
@@ -48,6 +52,15 @@ public class PatToken {
 
     public boolean isRevoked() {
         return revokedAt != null;
+    }
+
+    /**
+     * 시스템이 run에 묶어 발급한 토큰인가. 발급자 센티널까지 같이 보는 이유: 관리자가 label을
+     * "run:"으로 지어 발급한 사람용 PAT이 run 토큰 취급(비활성 페르소나 예외)을 받으면 안 된다.
+     */
+    public boolean isRunToken() {
+        return ownerMemberId != null && ownerMemberId == SYSTEM_OWNER_MEMBER_ID
+                && label != null && label.startsWith(RUN_LABEL_PREFIX);
     }
 
     public boolean isExpired(Instant now) {

@@ -24,8 +24,15 @@ public record ProjectSettingsResponse(SettingsBody body) {
     ) {
     }
 
-    /** {@code name/category/order/kind/color/icon}은 스킴 편집 UI 전용이라 컨텍스트 요약에는 id만 쓴다. */
-    public record StatusEntry(String id) {
+    /**
+     * {@code name/category/color/icon}은 스킴 편집 UI 전용이라 옮기지 않는다. {@code kind}(카테고리 의미 —
+     * new/active/complete, alm이 레지스트리에서 파생해 채운다)와 {@code order}는 claim의 "진행 중" 상태 해석
+     * (AGP-27, {@code IssueClaimSupport})에 쓴다. 컨텍스트 요약({@code get_project_context})은 여전히 id만 싣는다.
+     */
+    public record StatusEntry(String id, String kind, Integer order) {
+        public StatusEntry(String id) {
+            this(id, null, null);
+        }
     }
 
     public record TransitionEntry(String id, String name, List<String> from, String to) {

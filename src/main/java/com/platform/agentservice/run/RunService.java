@@ -78,7 +78,6 @@ public class RunService {
     static final String PENDING_WORKSPACE = "pending";
     /** {@code harnessRef}는 현재 전역 하네스 번들 하나뿐이다(T3) — run별 선택지가 없어 상수로 둔다. */
     static final String DEFAULT_HARNESS_REF = "harness://default";
-    private static final String CLAIM_STATUS = "inprogress";
     private static final int RECENT_COMMENTS_LIMIT = 10;
     private static final int SUMMARY_MAX_LENGTH = 500;
 
@@ -161,8 +160,13 @@ public class RunService {
         if (isBlank(slug)) {
             throw new NotFoundException("기본 페르소나가 설정되지 않았습니다 — personaSlug를 지정하세요");
         }
-        return personaRepository.findBySlug(slug)
+        Persona persona = personaRepository.findBySlug(slug)
                 .orElseThrow(() -> new NotFoundException("페르소나를 찾을 수 없습니다: " + slug));
+        if (!persona.isActive()) {
+            // 큐에 넣어 봐야 run 토큰 발급이 거부돼 사고형 BLOCKED로 끝난다 — 요청 시점에 원인을 돌려준다(회의 소집과 같은 400).
+            throw new IllegalArgumentException("비활성 페르소나입니다: " + slug);
+        }
+        return persona;
     }
 
     private void requireNoActiveRun(String issueKey) {
@@ -252,7 +256,8 @@ public class RunService {
     // ---- 내부 ----
 
     /**
-     * 리포 매핑 해석 → 이슈 claim(담당자=페르소나, 상태=inprogress) → 최근 코멘트 조회 순.
+     * 리포 매핑 해석 → 이슈 claim(담당자=페르소나, 상태=프로젝트 스킴의 진행 중 상태 — AGP-27,
+     * {@link IssueClaimSupport#resolveInProgressStatus}) → 최근 코멘트 조회 순.
      * 리포 매핑이 없으면 ALM을 건드리지 않고 바로 실패시킨다(claim으로 이슈 상태를
      * 바꿔놓고 워커를 못 띄우는 상황을 피한다).
      */
@@ -272,7 +277,7 @@ public class RunService {
         // 리뷰어는 claim하지 않는다 — 담당자가 리뷰어로 바뀌면 작업자 귀속이 사라지고, 이슈는 이미 inprogress다.
         IssueResponse claimed = run.getType() == RunType.REVIEW
                 ? almClient.getByKey(run.getIssueKey(), bearer)
-                : issueClaimSupport.claim(run.getIssueKey(), persona.getMemberId(), CLAIM_STATUS, bearer);
+                : issueClaimSupport.claim(run.getIssueKey(), persona.getMemberId(), null, bearer);
         List<CommentResponse> comments = almClient.comments(claimed.id(), bearer);
         List<String> recentComments = comments.stream()
                 .skip(Math.max(0, comments.size() - RECENT_COMMENTS_LIMIT))
@@ -459,8 +464,8 @@ public class RunService {
      * commentBestEffort}와 동급의 best-effort 부가 단계이기 때문에, 어느 단계에서 예외가
      * 나도(예: {@code tokenService.bearerFor}가 던지는 경우) run이 RUNNING에 발이 묶이는 일
      * 없이 조용히 삼켜야 한다. 이슈 키 하나하나는 그 안에서 다시 독립적으로 최선노력이다 —
-     * 알 수 없는 키(alm-backend 404 — {@link AlmClient}가 {@code ConflictException}으로
-     * 감싼다)나 웹링크 등록 실패가 있어도 나머지 커밋 처리를 막지 않는다. URL을 정규화하지
+     * 알 수 없는 키(alm-backend 404 — {@link AlmClient}가 {@code NotFoundException}으로
+     * 옮긴다, AGP-25)나 웹링크 등록 실패가 있어도 나머지 커밋 처리를 막지 않는다. URL을 정규화하지
      * 못한 링크(예: 원격이 없거나 파싱 불가)는 HTTP 호출 자체를 걸지 않고 건너뛴다(fix round
      * 1, I2 — alm-backend가 blank URL을 400으로 거부하는 걸 매번 유발할 필요가 없다).
      * {@code Audited.note} 감사 패턴은 MCP 도구 호출({@link

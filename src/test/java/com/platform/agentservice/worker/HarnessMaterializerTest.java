@@ -66,6 +66,22 @@ class HarnessMaterializerTest {
         assertThat(result.skippedExisting()).isEmpty();
     }
 
+    /** AGP-51 — 개인 로컬 설정은 어느 깊이에 있든 워크스페이스로 새지 않는다. 공유 settings.json은 그대로 간다. */
+    @Test
+    void settings_local_json_is_never_copied_but_shared_settings_is() throws IOException {
+        Files.writeString(bundleDir.resolve("settings.local.json"), "{\"permissions\":{\"allow\":[\"Bash(*)\"]}}");
+        Files.writeString(bundleDir.resolve("settings.json"), "{}");
+        Files.writeString(bundleDir.resolve("skills/code-review/settings.local.json"), "{}");
+
+        HarnessMaterializer.MaterializeResult result = materializerWith(bundleDir, List.of()).materialize(workspace);
+
+        assertThat(workspace.resolve(".claude/settings.local.json")).doesNotExist();
+        assertThat(workspace.resolve(".claude/skills/code-review/settings.local.json")).doesNotExist();
+        assertThat(workspace.resolve(".claude/settings.json")).exists();
+        assertThat(result.copied()).noneMatch(path -> path.endsWith("settings.local.json"));
+        assertThat(result.skippedExisting()).noneMatch(path -> path.endsWith("settings.local.json"));
+    }
+
     @Test
     void repo_wins_does_not_overwrite_existing_files() throws IOException {
         // 리포가 이미 자기 CLAUDE.md와 .claude/agents/backend-engineer.md를 가진 상태를 흉내낸다.

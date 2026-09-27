@@ -100,6 +100,11 @@ public class Dispatcher {
             log.warn("기본 페르소나를 찾을 수 없어 자동 픽업을 건너뜁니다: slug={}", properties.defaultPersonaSlug());
             return;
         }
+        if (!persona.isActive()) {
+            // 비활성 페르소나에는 run 토큰이 발급되지 않는다 — 픽업하면 매 틱 이슈 하나씩 사고형 BLOCKED + 알림이 쌓인다.
+            log.warn("기본 페르소나가 비활성이라 자동 픽업을 건너뜁니다: slug={}", properties.defaultPersonaSlug());
+            return;
+        }
 
         String bearer = tokenService.bearerFor(persona.getMemberId());
         for (int pageNo = 0; pageNo < properties.maxPickPages(); pageNo++) {

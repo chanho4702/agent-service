@@ -4,6 +4,7 @@ import com.platform.agentservice.client.AuthTokenClient;
 import com.platform.agentservice.client.OrgClient;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.agentservice.persona.dto.PersonaResponse;
+import com.platform.common.error.NotFoundException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -64,6 +65,19 @@ public class PersonaService {
         Persona saved = personaRepository.save(
                 Persona.of(memberId, req.slug(), req.role(), req.name(), req.emoji(), req.voicePrompt()));
         return new BootstrapResult(PersonaResponse.from(saved), true);
+    }
+
+    /**
+     * 활성/비활성 전환(AGP-29). 비활성화는 새 인증만 막는다 — 사람용 PAT은 {@code PatService.validate}가
+     * 거부하고 새 run 토큰 발급도 막히지만, 이미 발급된 run 토큰은 run이 끝날 때까지 유효하다. 토큰을
+     * 철회하지 않으므로 다시 활성화하면 기존 PAT이 그대로 살아난다(영구 차단은 토큰 철회로).
+     */
+    @Transactional
+    public PersonaResponse changeActive(long id, boolean active) {
+        Persona persona = personaRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("페르소나를 찾을 수 없습니다: " + id));
+        persona.changeActive(active);
+        return PersonaResponse.from(persona);
     }
 
     @Transactional(readOnly = true)
