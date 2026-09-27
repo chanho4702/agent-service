@@ -18,7 +18,7 @@ import java.util.List;
 
 /**
  * 게이트 승인 대기열 감독 API(P2a T5). 목록 조회는 인증된 사용자 누구나(RunController와
- * 같은 패턴), 결정(승인/거절)은 관리자만 — 결정자 id는 {@link Jwt#getSubject()}(사람
+ * 같은 패턴), 결정(승인/거절)은 전역 관리자 또는 run 프로젝트의 관리자(P3f) — 결정자 id는 {@link Jwt#getSubject()}(사람
  * member id)를 그대로 쓴다(PatController의 발급자 id 기록 패턴과 동일).
  */
 @RestController
@@ -40,14 +40,14 @@ public class GateController {
     }
 
     @PostMapping("/{id}/approve")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("@agentAuthz.canManageGate(authentication, #id)")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void approve(@PathVariable long id, @AuthenticationPrincipal Jwt jwt) {
         gateService.approve(id, Long.parseLong(jwt.getSubject()));
     }
 
     @PostMapping("/{id}/reject")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("@agentAuthz.canManageGate(authentication, #id)")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void reject(@PathVariable long id, @AuthenticationPrincipal Jwt jwt) {
         gateService.reject(id, Long.parseLong(jwt.getSubject()));

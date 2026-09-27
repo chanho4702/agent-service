@@ -63,7 +63,7 @@ public class PersonaService {
         }
 
         Persona saved = personaRepository.save(
-                Persona.of(memberId, req.slug(), req.role(), req.name(), req.emoji(), req.voicePrompt()));
+                Persona.of(memberId, req.slug(), req.role(), req.name(), req.emoji(), req.voicePrompt(), req.projectId()));
         return new BootstrapResult(PersonaResponse.from(saved), true);
     }
 

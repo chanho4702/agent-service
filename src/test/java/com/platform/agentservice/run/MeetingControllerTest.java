@@ -1,6 +1,9 @@
 package com.platform.agentservice.run;
 
 import com.platform.agentservice.TestAuth;
+import com.platform.agentservice.authz.PermissionClient;
+import com.platform.agentservice.authz.PermissionDecision;
+import com.platform.proto.org.v1.ResourceType;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRole;
 import com.platform.common.error.ConflictException;
@@ -33,7 +36,7 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-/** {@link MeetingController} — 인가(ADMIN)·요청 검증·응답 shape·{"error"} 매핑만 본다. 소집 규칙은 {@link MeetingServiceTest}. */
+/** {@link MeetingController} — 인가(전역 관리자 또는 요청 프로젝트 관리자, P3f)·요청 검증·응답 shape·{"error"} 매핑만 본다. 소집 규칙은 {@link MeetingServiceTest}. */
 @SpringBootTest
 @ActiveProfiles("test")
 class MeetingControllerTest {
@@ -41,12 +44,16 @@ class MeetingControllerTest {
     @Autowired WebApplicationContext context;
     @MockitoBean MeetingService meetingService;
     @MockitoBean RunService runService;
+    @MockitoBean PermissionClient permissionClient;
 
     MockMvc mvc;
 
     @BeforeEach
     void setUp() {
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+        // 목 기본값(null)이 판정 NPE로 새지 않게 — 테스트가 명시한 자원 외에는 org가 거부한다고 둔다.
+        given(permissionClient.checkAdmin(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).willReturn(PermissionDecision.deny("NO_GRANT"));
     }
 
     private static Persona persona(long id, String slug, PersonaRole role, String emoji) {
@@ -134,12 +141,29 @@ class MeetingControllerTest {
 
     @Test
     void non_admin_is_forbidden() throws Exception {
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "1")).willReturn(PermissionDecision.deny("NO_GRANT"));
+
         mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.user(2L, "Bob")))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"RETRO\",\"projectId\":1}"))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
 
         verify(meetingService, never()).createMeeting(any(), anyLong(), any(), any(), any());
+    }
+
+    /** P3f — 프로젝트 관리자는 자기 프로젝트 회의를 소집할 수 있다(생성자는 alm이 PROJECT ADMIN을 자동 부여). */
+    @Test
+    void project_admin_convenes_meeting_of_own_project() throws Exception {
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "1")).willReturn(PermissionDecision.allow());
+        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null)).willReturn(created(96L));
+
+        mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"RETRO\",\"projectId\":1}"))
+                .andExpect(status().isCreated());
+
+        verify(runService).execute(96L);
     }
 
     @Test

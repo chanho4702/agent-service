@@ -202,13 +202,26 @@ class PatServiceTest {
     void list_maps_persona_slug_and_revoked_flag_without_exposing_hash() {
         PatCreatedResponse issued = patService.issue(new PatCreateRequest("ci", "qa-bot", null), 1L);
 
-        List<com.platform.agentservice.pat.dto.PatSummaryResponse> list = patService.list();
+        List<com.platform.agentservice.pat.dto.PatSummaryResponse> list = patService.list(null);
 
         assertThat(list).hasSize(1);
         var summary = list.get(0);
         assertThat(summary.id()).isEqualTo(issued.id());
         assertThat(summary.personaSlug()).isEqualTo("qa-bot");
         assertThat(summary.revoked()).isFalse();
+    }
+
+    /** P3f — projectId 필터는 그 프로젝트 소속 페르소나의 토큰만 남긴다(공용 페르소나 토큰은 빠진다). */
+    @Test
+    void list_with_project_filter_keeps_only_that_project_persona_tokens() {
+        personaRepository.save(Persona.of(9007L, "p7-bot", PersonaRole.BACKEND, "P7", null, null, 7L));
+        personaRepository.save(Persona.of(9008L, "p8-bot", PersonaRole.BACKEND, "P8", null, null, 8L));
+        patService.issue(new PatCreateRequest("shared", "qa-bot", null), 1L);
+        PatCreatedResponse p7 = patService.issue(new PatCreateRequest("p7", "p7-bot", null), 1L);
+        patService.issue(new PatCreateRequest("p8", "p8-bot", null), 1L);
+
+        assertThat(patService.list(7L)).extracting(t -> t.id()).containsExactly(p7.id());
+        assertThat(patService.list(null)).hasSize(3);
     }
 
     @Test

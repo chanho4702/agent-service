@@ -1,6 +1,9 @@
 package com.platform.agentservice.persona;
 
 import com.platform.agentservice.TestAuth;
+import com.platform.agentservice.authz.PermissionClient;
+import com.platform.agentservice.authz.PermissionDecision;
+import com.platform.proto.org.v1.ResourceType;
 import com.platform.agentservice.persona.dto.PersonaResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -24,7 +27,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * 컨트롤러의 인가 계약(ROLE_ADMIN)과 상태 코드(생성=201/기존 갱신=200)만 본다 —
+ * 컨트롤러의 인가 계약(전역 관리자 또는 소속 프로젝트 관리자 + 부여 상한, P3f)과 상태 코드(생성=201/기존 갱신=200)만 본다 —
  * auth-server·org-service 연동 자체는 {@link PersonaServiceTest}(MockRestServiceServer)가 본다.
  */
 @SpringBootTest
@@ -33,17 +36,22 @@ class PersonaControllerTest {
 
     @Autowired WebApplicationContext context;
     @MockitoBean PersonaService personaService;
+    @MockitoBean PermissionClient permissionClient;
+    @Autowired PersonaRepository personaRepository;
 
     MockMvc mvc;
 
     @BeforeEach
     void setUp() {
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+        // 목 기본값(null)이 판정 NPE로 새지 않게 — 테스트가 명시한 자원 외에는 org가 거부한다고 둔다.
+        given(permissionClient.checkAdmin(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).willReturn(PermissionDecision.deny("NO_GRANT"));
     }
 
     @Test
     void admin_creates_persona_returns_201() throws Exception {
-        PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", true);
+        PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", true, null);
         given(personaService.bootstrap(any(), any()))
                 .willReturn(new PersonaService.BootstrapResult(response, true));
 
@@ -61,7 +69,7 @@ class PersonaControllerTest {
 
     @Test
     void admin_refresh_of_existing_slug_returns_200() throws Exception {
-        PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot v2", "🤖", true);
+        PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot v2", "🤖", true, null);
         given(personaService.bootstrap(any(), any()))
                 .willReturn(new PersonaService.BootstrapResult(response, false));
 
@@ -107,7 +115,7 @@ class PersonaControllerTest {
     /** 경계값 — 정확히 컬럼폭까지는 통과해야 한다(80자 name, 16자 emoji). */
     @Test
     void name_and_emoji_at_exact_column_width_are_accepted() throws Exception {
-        PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "n", "e", true);
+        PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "n", "e", true, null);
         given(personaService.bootstrap(any(), any()))
                 .willReturn(new PersonaService.BootstrapResult(response, true));
 
@@ -133,10 +141,121 @@ class PersonaControllerTest {
                 .andExpect(status().isForbidden());
     }
 
+    // ---- P3f: 프로젝트 관리자 ----
+
+    private static final String PROJECT_PERSONA_BODY = """
+            {"slug":"%s","role":"BACKEND","name":"P Bot","projectId":7,"grants":[%s]}
+            """;
+
+    private void projectAdminOf7() {
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.allow());
+    }
+
+    @Test
+    void project_admin_creates_persona_in_own_project_with_grant_on_managed_resource() throws Exception {
+        projectAdminOf7();
+        given(personaService.bootstrap(any(), any())).willReturn(new PersonaService.BootstrapResult(
+                new PersonaResponse(5L, 9005L, "p7-bot", PersonaRole.BACKEND, "P Bot", null, true, 7L), true));
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob")))
+                        .header("Authorization", "AdminSession bob")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(PROJECT_PERSONA_BODY.formatted("p7-bot",
+                                "{\"resourceType\":\"PROJECT\",\"resourceId\":\"7\",\"role\":\"EDITOR\"}")))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.projectId").value(7));
+    }
+
+    @Test
+    void other_project_admin_cannot_create_persona_in_project() throws Exception {
+        given(permissionClient.checkAdmin(3L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.deny("NO_GRANT"));
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.user(3L, "Carol")))
+                        .header("Authorization", "AdminSession carol")
+                        .contentType(MediaType.APPLICATION_JSON).content(PROJECT_PERSONA_BODY.formatted("p7-carol", "")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
+
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any());
+    }
+
+    @Test
+    void shared_persona_creation_is_global_admin_only() throws Exception {
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob")))
+                        .header("Authorization", "AdminSession bob")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"slug\":\"shared-x\",\"role\":\"BACKEND\",\"name\":\"S\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("전사 공용 페르소나는 전역 관리자만 관리할 수 있습니다"));
+
+        org.mockito.Mockito.verifyNoInteractions(permissionClient);
+    }
+
+    /** D-P3f-4 — 관리하지 않는 스페이스 권한을 페르소나에 실어 우회하지 못한다. */
+    @Test
+    void project_admin_cannot_grant_unmanaged_space() throws Exception {
+        projectAdminOf7();
+        given(permissionClient.checkAdmin(2L, ResourceType.SPACE, "3")).willReturn(PermissionDecision.deny("INSUFFICIENT_ROLE"));
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob")))
+                        .header("Authorization", "AdminSession bob")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(PROJECT_PERSONA_BODY.formatted("p7-space",
+                                "{\"resourceType\":\"SPACE\",\"resourceId\":\"3\",\"role\":\"EDITOR\"}")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("관리하지 않는 자원 권한은 부여할 수 없습니다"));
+
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any());
+    }
+
+    @Test
+    void project_admin_cannot_grant_global() throws Exception {
+        projectAdminOf7();
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob")))
+                        .header("Authorization", "AdminSession bob")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(PROJECT_PERSONA_BODY.formatted("p7-global",
+                                "{\"resourceType\":\"GLOBAL\",\"resourceId\":\"-\",\"role\":\"ADMIN\"}")))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("GLOBAL 권한은 전역 관리자만 부여할 수 있습니다"));
+    }
+
+    @Test
+    void project_admin_toggles_own_project_persona_but_not_shared_one() throws Exception {
+        projectAdminOf7();
+        Persona own = personaRepository.save(Persona.of(9701L, "toggle-own", PersonaRole.BACKEND, "O", null, null, 7L));
+        Persona shared = personaRepository.save(Persona.of(9702L, "toggle-shared", PersonaRole.BACKEND, "S", null, null));
+        given(personaService.changeActive(own.getId(), false)).willReturn(PersonaResponse.from(own));
+
+        mvc.perform(patch("/api/agent/personas/" + own.getId() + "/active").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"active\":false}"))
+                .andExpect(status().isOk());
+        mvc.perform(patch("/api/agent/personas/" + shared.getId() + "/active").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"active\":false}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("전사 공용 페르소나는 전역 관리자만 관리할 수 있습니다"));
+    }
+
+    /** 기존 슬러그 재호출은 요청 projectId가 아니라 그 페르소나의 소속으로 판정한다 — 남의 페르소나를 덮어쓰지 못하게. */
+    @Test
+    void project_admin_cannot_refresh_persona_of_other_project_by_slug() throws Exception {
+        projectAdminOf7();
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "8")).willReturn(PermissionDecision.deny("NO_GRANT"));
+        personaRepository.save(Persona.of(9801L, "p8-owned", PersonaRole.BACKEND, "E", null, null, 8L));
+
+        mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob")))
+                        .header("Authorization", "AdminSession bob")
+                        .contentType(MediaType.APPLICATION_JSON).content(PROJECT_PERSONA_BODY.formatted("p8-owned", "")))
+                .andExpect(status().isForbidden());
+
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any());
+    }
+
     @Test
     void authenticated_user_can_list_personas() throws Exception {
         given(personaService.list()).willReturn(java.util.List.of(
-                new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", true)));
+                new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", true, null)));
 
         mvc.perform(get("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())
@@ -146,7 +265,7 @@ class PersonaControllerTest {
     @Test
     void admin_deactivates_persona_returns_200_with_active_false() throws Exception {
         given(personaService.changeActive(1L, false)).willReturn(
-                new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", false));
+                new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", false, null));
 
         mvc.perform(patch("/api/agent/personas/1/active").with(authentication(TestAuth.admin(1L, "Admin")))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"active\":false}"))

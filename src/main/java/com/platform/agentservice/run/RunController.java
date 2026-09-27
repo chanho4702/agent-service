@@ -1,5 +1,7 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.authz.AgentAuthz;
+import com.platform.agentservice.authz.AgentCaller;
 import com.platform.agentservice.run.dto.RunSummaryResponse;
 import com.platform.agentservice.run.dto.UserRunCreateRequest;
 import jakarta.validation.Valid;
@@ -8,6 +10,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -20,7 +23,7 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 /**
- * run 감독 API 최소 세트(P2a T4). 취소는 관리자만 — 실행 중인 워커 OS 프로세스를 강제로
+ * run 감독 API 최소 세트(P2a T4). 생성·취소·재개는 전역 관리자 또는 run 프로젝트의 관리자(P3f) — 실행 중인 워커 OS 프로세스를 강제로
  * 죽이지는 않는다({@link RunService#cancel} 참고, P2a 범위 밖). 목록 조회는 인증된
  * 사용자 누구나(일반 JWT 체인 — {@code SecurityConfig}의 {@code anyRequest().authenticated()}).
  *
@@ -38,18 +41,20 @@ public class RunController {
 
     private final RunService runService;
     private final RunResumeService runResumeService;
+    private final AgentAuthz agentAuthz;
 
     /**
-     * USER run 생성(AGP-42) — 예산을 소모하는 행위라 cancel/resume과 같이 관리자만(D-P2c-6).
+     * USER run 생성(AGP-42) — 예산을 소모하는 행위라 cancel/resume과 같이 관리자만(D-P2c-6). 대상 프로젝트는 이슈를
+     * 조회해야 알 수 있어 메서드 보안이 아니라 {@link RunService#createUserRun}이 조회 뒤에 판정한다(P3f).
      * 실행 제출을 여기서 하는 이유는 {@link RunService#createUserRun} 참고({@code @Async} 자기 호출 회피).
      * 스레드풀 포화로 제출이 거부돼도 run은 이미 QUEUED로 커밋됐으므로 201을 돌려준다 — 다음 드레인 틱이 집어간다.
      */
     @PostMapping
-    @PreAuthorize("hasRole('ADMIN')")
     @ResponseStatus(HttpStatus.CREATED)
-    public RunSummaryResponse create(@Valid @RequestBody UserRunCreateRequest request) {
+    public RunSummaryResponse create(@Valid @RequestBody UserRunCreateRequest request, Authentication authentication) {
+        AgentCaller caller = AgentCaller.from(authentication);
         Run run = runService.createUserRun(request.issueKey(), request.instruction(), request.model(),
-                request.personaSlug());
+                request.personaSlug(), projectId -> agentAuthz.requireManageProject(caller, projectId));
         try {
             runService.execute(run.getId());
         } catch (TaskRejectedException e) {
@@ -60,7 +65,7 @@ public class RunController {
     }
 
     @PostMapping("/{id}/cancel")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("@agentAuthz.canManageRun(authentication, #id)")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void cancel(@PathVariable long id) {
         runService.cancel(id);
@@ -68,7 +73,7 @@ public class RunController {
 
     /** BLOCKED·FAILED run만 대상 — 그 외 상태면 {@link RunResumeService#resume}이 409를 던진다. */
     @PostMapping("/{id}/resume")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("@agentAuthz.canManageRun(authentication, #id)")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void resume(@PathVariable long id) {
         runResumeService.resume(id);

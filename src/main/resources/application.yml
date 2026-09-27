@@ -57,6 +57,11 @@ platform:
     # auth-server 자체 AT의 issuer/audience — common-starter가 이 두 값으로 검증기를 만든다.
     issuer: ${PLATFORM_ISSUER:http://localhost:9000}
     audience: ${PLATFORM_AUDIENCE:platform-api}
+  # org PermissionService gRPC(P3f) — 프로젝트 ADMIN 판정. alm·wiki와 같은 env 이름. 판정 실패는 거부(fail-closed).
+  org-grpc:
+    host: ${ORG_GRPC_HOST:localhost}
+    port: ${ORG_GRPC_PORT:9131}
+    deadline-seconds: ${ORG_GRPC_DEADLINE_SECONDS:5}
   agent:
     auth-base-url: ${AUTH_BASE_URL:http://localhost:9000}
     alm-base-url: ${ALM_BASE_URL:http://localhost:9120}

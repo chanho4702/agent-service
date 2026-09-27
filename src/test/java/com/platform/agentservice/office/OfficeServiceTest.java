@@ -255,6 +255,20 @@ class OfficeServiceTest {
         assertThat(res.pendingGates()).isEmpty();
     }
 
+    /** P3f(D-P3f-3) — 프로젝트 필터 시 페르소나는 그 프로젝트 소속 + 공용. 다른 프로젝트 소속은 이 프로젝트 run이 있을 때만. */
+    @Test
+    void projectId를_주면_페르소나는_그_프로젝트_소속과_공용만_나온다() {
+        Persona shared = persona(1L, "shared", PersonaRole.BACKEND);
+        Persona own = personas.save(Persona.of(2L, "own", PersonaRole.BACKEND, "own이름", "🤖", null, 1L));
+        personas.save(Persona.of(3L, "other", PersonaRole.BACKEND, "other이름", "🤖", null, 2L));
+        Persona visiting = personas.save(Persona.of(4L, "visiting", PersonaRole.BACKEND, "visiting이름", "🤖", null, 2L));
+        run(visiting, 1L, "AGP-5", RunStatus.RUNNING);
+
+        assertThat(service.office(1L).personas()).extracting(p -> p.slug())
+                .containsExactly(shared.getSlug(), own.getSlug(), visiting.getSlug());
+        assertThat(service.office(null).personas()).hasSize(4);
+    }
+
     @Test
     void 미결_게이트는_개수_전체와_최신_5건_요약을_준다() {
         Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);

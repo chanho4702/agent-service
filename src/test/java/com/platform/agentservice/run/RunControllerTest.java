@@ -1,6 +1,9 @@
 package com.platform.agentservice.run;
 
 import com.platform.agentservice.TestAuth;
+import com.platform.agentservice.authz.PermissionClient;
+import com.platform.agentservice.authz.PermissionDecision;
+import com.platform.proto.org.v1.ResourceType;
 import com.platform.agentservice.run.dto.RunSummaryResponse;
 import com.platform.common.error.ConflictException;
 import com.platform.common.error.NotFoundException;
@@ -19,6 +22,7 @@ import org.springframework.web.context.WebApplicationContext;
 
 import java.time.Instant;
 import java.util.List;
+import java.util.function.LongConsumer;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -28,6 +32,7 @@ import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.willThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.authentication;
 import static org.springframework.security.test.web.servlet.setup.SecurityMockMvcConfigurers.springSecurity;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -36,7 +41,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * {@link RunController} — 인가 계약(생성·취소·재개=ROLE_ADMIN, 목록=인증 사용자 누구나)·요청 검증과 상태 코드만
+ * {@link RunController} — 인가 계약(생성·취소·재개=전역 관리자 또는 run 프로젝트 관리자(P3f), 목록=인증 사용자 누구나)·요청 검증과 상태 코드만
  * 본다(PersonaControllerTest와 같은 패턴). 오케스트레이션 자체는 {@link RunServiceTest}가 본다.
  */
 @SpringBootTest
@@ -46,12 +51,17 @@ class RunControllerTest {
     @Autowired WebApplicationContext context;
     @MockitoBean RunService runService;
     @MockitoBean RunResumeService runResumeService;
+    @MockitoBean PermissionClient permissionClient;
+    @Autowired RunRepository runRepository;
 
     MockMvc mvc;
 
     @BeforeEach
     void setUp() {
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+        // 목 기본값(null)이 판정 NPE로 새지 않게 — 테스트가 명시한 자원 외에는 org가 거부한다고 둔다.
+        given(permissionClient.checkAdmin(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).willReturn(PermissionDecision.deny("NO_GRANT"));
     }
 
     private Run queuedUserRun(long id) {
@@ -62,7 +72,7 @@ class RunControllerTest {
 
     @Test
     void admin_create_user_run_returns_201_with_summary_and_submits_execution() throws Exception {
-        given(runService.createUserRun("AGP-9", "테스트부터", "claude-sonnet-5", "jiho")).willReturn(queuedUserRun(77L));
+        given(runService.createUserRun(eq("AGP-9"), eq("테스트부터"), eq("claude-sonnet-5"), eq("jiho"), any())).willReturn(queuedUserRun(77L));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -82,19 +92,19 @@ class RunControllerTest {
 
     @Test
     void create_user_run_with_only_issue_key_passes_nulls_for_optional_fields() throws Exception {
-        given(runService.createUserRun("AGP-9", null, null, null)).willReturn(queuedUserRun(78L));
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any())).willReturn(queuedUserRun(78L));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"issueKey\":\"AGP-9\"}"))
                 .andExpect(status().isCreated());
 
-        verify(runService).createUserRun("AGP-9", null, null, null);
+        verify(runService).createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any());
     }
 
     @Test
     void create_user_run_still_returns_201_when_execution_submission_is_rejected() throws Exception {
-        given(runService.createUserRun("AGP-9", null, null, null)).willReturn(queuedUserRun(79L));
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any())).willReturn(queuedUserRun(79L));
         willThrow(new TaskRejectedException("pool full")).given(runService).execute(79L);
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
@@ -104,14 +114,84 @@ class RunControllerTest {
                 .andExpect(jsonPath("$.status").value("QUEUED"));
     }
 
+    /** 서비스가 이슈로 프로젝트를 확정한 뒤 가드를 부르는 것을 흉내 낸다 — 가드가 던지면 run은 만들어지지 않는다. */
+    private void stubUserRunResolvingProject(long projectId, long runId) {
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any())).willAnswer(inv -> {
+            ((LongConsumer) inv.getArgument(4)).accept(projectId);
+            return queuedUserRun(runId);
+        });
+    }
+
     @Test
     void non_admin_create_user_run_is_forbidden() throws Exception {
+        stubUserRunResolvingProject(1L, 80L);
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "1")).willReturn(PermissionDecision.deny("NO_GRANT"));
+
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.user(2L, "Bob")))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"issueKey\":\"AGP-9\"}"))
-                .andExpect(status().isForbidden());
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
 
-        verify(runService, never()).createUserRun(any(), any(), any(), any());
+        verify(runService, never()).execute(anyLong());
+    }
+
+    @Test
+    void project_admin_create_user_run_is_allowed() throws Exception {
+        stubUserRunResolvingProject(1L, 81L);
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "1")).willReturn(PermissionDecision.allow());
+
+        mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"issueKey\":\"AGP-9\"}"))
+                .andExpect(status().isCreated());
+
+        verify(runService).execute(81L);
+    }
+
+    @Test
+    void global_admin_create_user_run_does_not_ask_org() throws Exception {
+        stubUserRunResolvingProject(1L, 82L);
+
+        mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"issueKey\":\"AGP-9\"}"))
+                .andExpect(status().isCreated());
+
+        verifyNoInteractions(permissionClient);
+    }
+
+    @Test
+    void project_admin_can_cancel_and_resume_run_of_own_project_only() throws Exception {
+        Run own = runRepository.save(Run.queuedUser("AGP-10", 11L, 5L, "harness://default", null, null));
+        Run other = runRepository.save(Run.queuedUser("OTH-1", 12L, 5L, "harness://default", null, null));
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "11")).willReturn(PermissionDecision.allow());
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "12")).willReturn(PermissionDecision.deny("NO_GRANT"));
+
+        mvc.perform(post("/api/agent/runs/" + own.getId() + "/cancel").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/agent/runs/" + own.getId() + "/resume").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/agent/runs/" + other.getId() + "/cancel").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
+
+        verify(runService).cancel(own.getId());
+        verify(runResumeService).resume(own.getId());
+        verify(runService, never()).cancel(other.getId());
+    }
+
+    /** org 장애는 거부(fail-closed, D-P3f-2) — 사유는 "권한 없음"이 아니라 연결 실패로 말한다. */
+    @Test
+    void org_failure_denies_project_admin_with_403() throws Exception {
+        Run own = runRepository.save(Run.queuedUser("AGP-11", 13L, 5L, "harness://default", null, null));
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "13")).willReturn(PermissionDecision.orgFailure());
+
+        mvc.perform(post("/api/agent/runs/" + own.getId() + "/cancel").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"));
+
+        verify(runService, never()).cancel(anyLong());
     }
 
     @Test
@@ -122,7 +202,7 @@ class RunControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").exists());
 
-        verify(runService, never()).createUserRun(any(), any(), any(), any());
+        verify(runService, never()).createUserRun(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -132,7 +212,7 @@ class RunControllerTest {
                         .content("{\"issueKey\":\"AGP-9\",\"model\":\"" + "m".repeat(61) + "\"}"))
                 .andExpect(status().isBadRequest());
 
-        verify(runService, never()).createUserRun(any(), any(), any(), any());
+        verify(runService, never()).createUserRun(any(), any(), any(), any(), any());
     }
 
     @Test
@@ -142,12 +222,12 @@ class RunControllerTest {
                         .content("{\"issueKey\":\"AGP-9\",\"instruction\":\"" + "가".repeat(4001) + "\"}"))
                 .andExpect(status().isBadRequest());
 
-        verify(runService, never()).createUserRun(any(), any(), any(), any());
+        verify(runService, never()).createUserRun(any(), any(), any(), any(), any());
     }
 
     @Test
     void create_user_run_unknown_persona_maps_to_404_error_body() throws Exception {
-        given(runService.createUserRun("AGP-9", null, null, "ghost"))
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), eq("ghost"), any()))
                 .willThrow(new NotFoundException("페르소나를 찾을 수 없습니다: ghost"));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
@@ -161,7 +241,7 @@ class RunControllerTest {
 
     @Test
     void create_user_run_duplicate_active_run_maps_to_409() throws Exception {
-        given(runService.createUserRun("AGP-9", null, null, null))
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any()))
                 .willThrow(new ConflictException("이미 진행 중인 run이 있습니다: AGP-9"));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))

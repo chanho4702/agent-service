@@ -24,3 +24,8 @@ platform:
   jwt:
     issuer: http://localhost:9000
     audience: platform-api
+  # 권한 판정을 목으로 바꾸지 않은 테스트가 실수로 org를 부르면 오래 기다리지 않고 바로 fail-closed가 나게 한다
+  org-grpc:
+    host: localhost
+    port: 1
+    deadline-seconds: 1

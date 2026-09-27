@@ -99,7 +99,7 @@ class PersonaServiceTest {
                         """));
 
         var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", "너는 리뷰어다", null,
-                List.of(new PersonaCreateRequest.GrantRequest("PROJECT", "P1", "EDITOR")));
+                List.of(new PersonaCreateRequest.GrantRequest("PROJECT", "P1", "EDITOR")), 7L);
 
         PersonaService.BootstrapResult result = personaService.bootstrap(req, ADMIN_BEARER);
 
@@ -111,6 +111,8 @@ class PersonaServiceTest {
 
         assertThat(personaRepository.findBySlug("qa-bot")).isPresent();
         assertThat(personaRepository.findBySlug("qa-bot").get().getMemberId()).isEqualTo(9001L);
+        assertThat(personaRepository.findBySlug("qa-bot").get().getProjectId()).isEqualTo(7L);
+        assertThat(result.persona().projectId()).isEqualTo(7L);
     }
 
     @Test
@@ -126,7 +128,7 @@ class PersonaServiceTest {
                         {"id":9001,"displayName":"QA Bot","email":"agents+qa-bot@platform.local","status":"ACTIVE","kind":"AGENT"}
                         """, MediaType.APPLICATION_JSON));
 
-        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null);
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
         personaService.bootstrap(req, ADMIN_BEARER);
 
         authServer.verify();
@@ -137,7 +139,7 @@ class PersonaServiceTest {
     void bootstrap_is_idempotent_for_existing_slug_and_skips_downstream_calls() {
         personaRepository.save(Persona.of(9001L, "qa-bot", PersonaRole.REVIEWER, "Old Name", "🙂", "old prompt"));
 
-        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", "new prompt", null, null);
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", "new prompt", null, null, null);
         PersonaService.BootstrapResult result = personaService.bootstrap(req, ADMIN_BEARER);
 
         assertThat(result.created()).isFalse();
@@ -158,7 +160,7 @@ class PersonaServiceTest {
                 .andRespond(withStatus(HttpStatus.FORBIDDEN).contentType(MediaType.APPLICATION_JSON)
                         .body("{\"error\":\"관리자 권한이 필요합니다\"}"));
 
-        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null);
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
 
         assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER))
                 .isInstanceOf(ForbiddenException.class)
@@ -175,7 +177,7 @@ class PersonaServiceTest {
                 .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)
                         .body("{\"error\":\"요청 값이 올바르지 않습니다\"}"));
 
-        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null);
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
 
         assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER))
                 .isInstanceOf(ConflictException.class);
@@ -190,7 +192,7 @@ class PersonaServiceTest {
         orgServer.expect(requestTo("http://org-service/api/org/members/agents"))
                 .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
 
-        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null);
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
 
         assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER))
                 .isInstanceOf(ServiceUnavailableException.class);
@@ -204,7 +206,7 @@ class PersonaServiceTest {
         assertThat(personaRepository.findById(saved.getId()).orElseThrow().isActive()).isFalse();
 
         // 같은 slug 재부트스트랩은 표시 필드만 갱신한다 — 관리자가 끈 것을 되살리면 안 된다.
-        personaService.bootstrap(new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot v2", null, null, null, null),
+        personaService.bootstrap(new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot v2", null, null, null, null, null),
                 ADMIN_BEARER);
         assertThat(personaRepository.findById(saved.getId()).orElseThrow().isActive()).isFalse();
 

@@ -21,9 +21,9 @@ import org.springframework.web.bind.annotation.RestController;
 import java.util.List;
 
 /**
- * 페르소나 부트스트랩 — 관리자만 호출한다. auth-server 사용자 생성·org-service grant
- * 부여 모두 관리자 권한을 요구해 어차피 다운스트림에서 403이 나지만, 실패 흔적을 줄이려고
- * 이 진입점도 ROLE_ADMIN으로 미리 막아 둔다.
+ * 페르소나 부트스트랩·활성 토글 — 전역 관리자 또는 소속 프로젝트 관리자(P3f, {@link com.platform.agentservice.authz.AgentAuthz}).
+ * 공용 페르소나(projectId 없음)는 전역 관리자만. 새 페르소나의 grant는 호출자가 ADMIN인 자원만 줄 수 있다(D-P3f-4).
+ * auth-server 사용자 등록·org 멤버 등록은 여전히 다운스트림이 ROLE_ADMIN을 요구한다(CLAUDE.md 권한 절).
  */
 @RestController
 @RequestMapping("/api/agent/personas")
@@ -34,7 +34,7 @@ public class PersonaController {
 
     /** 기존 슬러그를 갱신한 경우 200, 새로 만든 경우 201. */
     @PostMapping
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("@agentAuthz.canBootstrapPersona(authentication, #request)")
     public ResponseEntity<PersonaResponse> create(@RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
                                                    @Valid @RequestBody PersonaCreateRequest request) {
         PersonaService.BootstrapResult result = personaService.bootstrap(request, authorization);
@@ -44,7 +44,7 @@ public class PersonaController {
 
     /** 활성/비활성 전환(AGP-29) — 비활성 페르소나의 사람용 PAT은 즉시 401이 된다(진행 중 run 토큰은 예외). */
     @PatchMapping("/{id}/active")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("@agentAuthz.canManagePersona(authentication, #id)")
     public PersonaResponse changeActive(@PathVariable long id, @Valid @RequestBody PersonaActiveRequest request) {
         return personaService.changeActive(id, request.active());
     }

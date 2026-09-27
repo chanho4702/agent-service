@@ -16,7 +16,7 @@ import org.springframework.web.bind.annotation.ResponseStatus;
 import org.springframework.web.bind.annotation.RestController;
 
 /**
- * 회의 소집(P3b, D-P3b-4①) — 예산을 쓰는 행위라 USER run 생성과 같이 관리자만. 실행 제출을 여기서 하는 이유는
+ * 회의 소집(P3b, D-P3b-4①) — 예산을 쓰는 행위라 USER run 생성과 같이 관리자만(P3f: 전역 관리자 또는 요청 프로젝트의 관리자). 실행 제출을 여기서 하는 이유는
  * {@link RunController#create}와 같다({@code @Async} 자기호출 회피). 제출이 거부돼도 run은 QUEUED로 커밋됐으므로 201.
  */
 @Slf4j
@@ -29,7 +29,7 @@ public class MeetingController {
     private final RunService runService;
 
     @PostMapping
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("@agentAuthz.canManageProject(authentication, #request.projectId())")
     @ResponseStatus(HttpStatus.CREATED)
     public MeetingCreatedResponse create(@Valid @RequestBody MeetingCreateRequest request) {
         MeetingService.MeetingCreated created = meetingService.createMeeting(request.type(), request.projectId(),

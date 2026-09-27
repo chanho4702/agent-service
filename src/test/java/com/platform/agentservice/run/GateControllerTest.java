@@ -1,6 +1,9 @@
 package com.platform.agentservice.run;
 
 import com.platform.agentservice.TestAuth;
+import com.platform.agentservice.authz.PermissionClient;
+import com.platform.agentservice.authz.PermissionDecision;
+import com.platform.proto.org.v1.ResourceType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -25,7 +28,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * {@link GateController} — 인가 계약(승인/거절=ROLE_ADMIN, 목록=인증 사용자 누구나)과
+ * {@link GateController} — 인가 계약(승인/거절=전역 관리자 또는 run 프로젝트 관리자(P3f), 목록=인증 사용자 누구나)과
  * pending 필터·응답 shape만 본다(RunControllerTest와 같은 패턴). 결정 오케스트레이션 자체는
  * {@link GateServiceTest}가 본다.
  */
@@ -37,12 +40,16 @@ class GateControllerTest {
     @MockitoBean GateRepository gateRepository;
     @MockitoBean RunRepository runRepository;
     @MockitoBean GateService gateService;
+    @MockitoBean PermissionClient permissionClient;
 
     MockMvc mvc;
 
     @BeforeEach
     void setUp() {
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+        // 목 기본값(null)이 판정 NPE로 새지 않게 — 테스트가 명시한 자원 외에는 org가 거부한다고 둔다.
+        given(permissionClient.checkAdmin(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).willReturn(PermissionDecision.deny("NO_GRANT"));
     }
 
     private Gate gate(long id, long runId) {
@@ -98,6 +105,25 @@ class GateControllerTest {
                 .andExpect(status().isNoContent());
 
         verify(gateService).approve(100L, 1L);
+    }
+
+    /** P3f — 게이트의 대상 프로젝트는 run.projectId다(run(...)은 프로젝트 1). */
+    @Test
+    void project_admin_decides_gate_of_own_project_only() throws Exception {
+        given(gateRepository.findById(200L)).willReturn(Optional.of(gate(200L, 70L)));
+        given(runRepository.findById(70L)).willReturn(Optional.of(run(70L, "AGP-70")));
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "1")).willReturn(PermissionDecision.allow());
+        given(permissionClient.checkAdmin(3L, ResourceType.PROJECT, "1")).willReturn(PermissionDecision.deny("NO_GRANT"));
+
+        mvc.perform(post("/api/agent/gates/200/approve").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isNoContent());
+        mvc.perform(post("/api/agent/gates/200/reject").with(authentication(TestAuth.user(3L, "Carol"))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
+
+        verify(gateService).approve(200L, 2L);
+        verify(gateService, org.mockito.Mockito.never()).reject(org.mockito.ArgumentMatchers.anyLong(),
+                org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test

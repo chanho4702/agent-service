@@ -91,10 +91,11 @@ curl -s -X POST $GATEWAY/api/agent/tokens \
 ```
 
 PAT 관리: `GET /api/agent/tokens`(관리자만 — AGP-21, 라벨·페르소나·사용 시각도 운영 정보라 일반 사용자에게 닫았다. 해시는
-어느 응답에도 노출 안 함) · `DELETE /api/agent/tokens/{id}`(관리자만). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자
-누구나 — JWT 필요, 슬러그/역할/emoji/active만 노출).
+어느 응답에도 노출 안 함. P3f: 전역 관리자는 전체, 프로젝트 관리자는 `?projectId=`로 자기 프로젝트 페르소나 토큰만) ·
+`DELETE /api/agent/tokens/{id}`(관리자만 — 페르소나 소속 기준). "관리자"의 정의는 §7(P3f). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자
+누구나 — JWT 필요, 슬러그/역할/emoji/active/projectId만 노출).
 
-페르소나 활성/비활성(AGP-29): `PATCH /api/agent/personas/{id}/active`(관리자만, body `{"active": true|false}` → 200
+페르소나 활성/비활성(AGP-29): `PATCH /api/agent/personas/{id}/active`(관리자만 — §7, 페르소나 소속 프로젝트 기준, body `{"active": true|false}` → 200
 `PersonaResponse`, 없는 id 404, `active` 누락 400). 비활성 페르소나의 **사람용 PAT은 다음 요청부터 401**(`PatService.validate`
 — 기존 "유효하지 않은 토큰" 계약 그대로), 새 PAT·새 run 토큰 발급은 409(기존), 디스패처는 기본 페르소나가 비활성이면 픽업을
 건너뛰고(warn), USER run 생성은 400이다. **진행 중인 run은 끊지 않는다** — run 토큰(`PatToken.isRunToken()`: 발급자=시스템
@@ -279,7 +280,7 @@ USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.proje
 `BUDGET_MONTHLY_USD`(기본 100, 캘린더 월 UTC 누적 — 플랫폼 전체·프로젝트별에 P2a는 같은 값)
 · `BUDGET_PER_RUN_USD`(기본 5 — 넘어도 run을 되돌리지 않고 이슈에 경고 코멘트만 남긴다).
 `GET /api/agent/budget`(인증된 누구나)로 현재 월 사용량·캡·킬스위치 상태 조회.
-`GET /api/agent/kill-switch`(누구나) / `POST /api/agent/kill-switch`(ADMIN, body
+`GET /api/agent/kill-switch`(누구나) / `POST /api/agent/kill-switch`(전역 ADMIN만 — §7에서도 전역 유지, body
 `{"on": true|false}`)로 즉시 전체 차단·해제. **킬 스위치는 인메모리다 — 재기동하면 이 값과
 무관하게 항상 꺼진 상태(off)로 시작한다**. BLOCKED 알림(메일)은 §5.11 — 예산·킬 스위치 자체의 알림은 아직 없다.
 
@@ -299,7 +300,7 @@ BudgetGuard 빈이 `BudgetService` 하나뿐이고 `RunService`가 그것을 쓰
 워커가 `request_gate(runId, kind, request)`를 부르면 그 run이 `WAITING_APPROVAL`로 전환되고
 `Gate` 행이 생긴다(kind: `MERGE`|`ESCALATION`|`PLAN`). `GET /api/agent/gates?pending=true`
 (누구나 — 생략/`false`면 요청순 최신 50건)로 대기열을 본 뒤 `POST /api/agent/gates/{id}/approve`
-| `reject`(ADMIN)로 결정한다. 승인은 원 run 행을 되돌리지 않고 **continuation run(attempt+1)을
+| `reject`(관리자 — §7, run 프로젝트 기준)로 결정한다. 승인은 원 run 행을 되돌리지 않고 **continuation run(attempt+1)을
 새로 만들어** 큐잉·비동기 실행하고, 원 run은 CANCELLED로 닫는다(D9 — WAITING_APPROVAL에 그대로
 두면 다음 디스패처 픽업의 "활성 run 중복" 가드와 동시성 집계에 계속 걸린다). 거절은 원 run을
 CANCELLED로 닫고 재개하지 않는다.
@@ -308,7 +309,7 @@ CANCELLED로 닫고 재개하지 않는다.
 
 사고형 즉시 중단(§5.1)·반려 한도 소진(§5.8)·반려 계보 결함으로 `BLOCKED`가 된 run은 게이트와는 별개 경로로 사람이 재개한다
 (알림 메일 본문에도 이 경로가 적힌다, §5.11):
-`POST /api/agent/runs/{id}/resume`(ADMIN) — `Gate` 행 없이 continuation run(attempt+1)을 만들어
+`POST /api/agent/runs/{id}/resume`(관리자 — §7, run 프로젝트 기준) — `Gate` 행 없이 continuation run(attempt+1)을 만들어
 재실행한다(§5.3 승인과 동일 패턴, 다만 사람이 먼저 승인을 요청받은 게 아니라 시스템이 스스로
 멈춘 것이므로 게이트 엔티티가 없다). `FAILED`도 재개 대상이다(최종 리뷰 I1) — 정상 경로에서는
 워커가 스스로 `report_result(FAILED)`로 종결해도 `RunService`가 곧바로 BLOCKED로
@@ -326,11 +327,11 @@ run은 원인을 고친 뒤 재개한다 — 고치지 않고 재개하면 같�
 ### 5.5 run 감독 REST
 
 `GET /api/agent/runs?status=`(인증된 누구나, `status` 생략 시 전체) ·
-`POST /api/agent/runs/{id}/cancel`(ADMIN — DB 상태만 CANCELLED로 옮긴다. 실행 중인 워커 OS
+`POST /api/agent/runs/{id}/cancel`(관리자 — §7, run 프로젝트 기준. DB 상태만 CANCELLED로 옮긴다. 실행 중인 워커 OS
 프로세스를 강제로 죽이지는 않는다, Windows 프로세스 트리 관리는 P2a 범위 밖).
 
-**USER run 생성(P2c, AGP-42)** — `POST /api/agent/runs`(ADMIN — 예산을 소모하는 행위라
-cancel/resume과 같은 권한). 라벨 `auto`·상태 `todo` 조건과 무관하게 사람이 이슈 하나를 지정해
+**USER run 생성(P2c, AGP-42)** — `POST /api/agent/runs`(관리자 — 예산을 소모하는 행위라
+cancel/resume과 같은 권한. §7: 이슈의 프로젝트 기준이라 이슈 조회 뒤 서비스에서 판정한다). 라벨 `auto`·상태 `todo` 조건과 무관하게 사람이 이슈 하나를 지정해
 run을 띄운다.
 
 ```json
@@ -524,7 +525,7 @@ P2c~P3c의 "attempt가 `SCHEDULER_RETRY_MAX_ATTEMPTS`를 넘으면 반려 BLOCKE
 | `auto-escalation` | `MEETING_AUTO_ESCALATION` | `false` | BLOCKED 승격 시 ESCALATION run 자동 생성(비용 때문에 기본 off) |
 | `auto-issue` | `MEETING_AUTO_ISSUE` | `true` | 결정→이슈를 워커가 `create_issue`로 직접. false면 PLAN 게이트 경유 |
 
-**소집 API — `POST /api/agent/meetings`(ADMIN)**
+**소집 API — `POST /api/agent/meetings`(관리자 — §7, 요청 `projectId` 기준)**
 
 ```json
 {"type": "MEETING|RETRO|ESCALATION|MANAGER", "projectId": 1, "agendaIssueKey": "선택, 40자", "agenda": "선택, 4000자", "personaSlugs": ["선택, 20명 이하"]}
@@ -697,7 +698,8 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
   - 최근 종결 = DONE·FAILED·CANCELLED·BLOCKED, `updatedAt` 최신순(BLOCKED는 endedAt이 비어 있어서). BLOCKED는
     `currentRun`에도 나온다.
   - `lastActivity`: 그 페르소나 최근 감사 1건, **5분 이내일 때만**(아니면 null).
-  - projectId는 run 축(현재 run·최근 run·게이트·비용)만 좁힌다. 감사에는 프로젝트 축이 없어 말풍선은 전체 활동 기준.
+  - projectId는 run 축(현재 run·최근 run·게이트·비용)과 페르소나 목록(P3f — 그 프로젝트 소속 + 전사 공용, 다른 프로젝트 소속이라도
+    이 프로젝트 활성 run이 있으면 포함)을 좁힌다. 감사에는 프로젝트 축이 없어 말풍선은 전체 활동 기준.
 - `GET /api/agent/personas/{id}/activity`: `runs[]`(최근 20) · `todayAudits[]`(오늘 최대 50, id·tool·status·
   summary·createdAt) · `todayCostUsd`. 없는 페르소나는 404.
 - **비용 축**: 원장에 페르소나 축이 없어 `usage_ledger`×`run` 조인으로 페르소나별 합산한다. 한 run 비용이
@@ -712,3 +714,57 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
   누구나에게 전문을 주는 것과 같은 노출 수준이라 가림을 거치지 않는다.
 - 인덱스(V5): `tool_call_audit(created_at)`(말풍선 5분 창), `run(persona_id, id DESC)`(개인 오피스),
   `gate(id) WHERE decision IS NULL`(미결 게이트 부분 인덱스).
+
+## 7. P3f: AI 팀 권한 모델 (2026-09-27, AGP-64 — 프로젝트 ADMIN 기반 관리)
+
+"페르소나 생성은 권한 있는 사람이, 프로젝트 안에서도, 프로젝트 생성자는 무조건"(사용자 지시). 그 전에는 관리 API 12곳이
+전부 `hasRole('ADMIN')`(JWT realm 역할 — 전역 관리자만)이었다.
+
+**규칙(D-P3f-1)** — 관리 행위 허용 = **전역 관리자(JWT `ROLE_ADMIN`, 유지)** 또는 **대상 프로젝트의 ADMIN**
+(org gRPC `CheckPermission(PROJECT, <id>, ADMIN)`). alm이 프로젝트 생성 시 생성자에게 PROJECT ADMIN grant를 자동 부여하므로
+(`ProjectService.create` → `grantProjectAdmin`) "생성자는 무조건"과 위임(다른 사람에게 PROJECT ADMIN grant)이 이 판정 하나로
+충족된다. 판정 단일 지점은 `authz.AgentAuthz`(`@agentAuthz`) — 컨트롤러는 `@PreAuthorize("@agentAuthz.canXxx(authentication, …)")`,
+대상 프로젝트를 조회해야 아는 USER run만 서비스가 조회 뒤 가드(`RunService.createUserRun`의 `projectGuard`)를 부른다.
+거부는 common-starter `ForbiddenException` → 403 `{"error": 사유}`.
+
+| 엔드포인트 | 이전 | 이후(대상 프로젝트) |
+|---|---|---|
+| `POST /api/agent/personas` | ADMIN | 새 페르소나: 요청 `projectId`(null=공용→전역만) + 부여 상한. 기존 슬러그 갱신: 그 페르소나의 소속 |
+| `PATCH /api/agent/personas/{id}/active` | ADMIN | `persona.project_id`(null→전역만) |
+| `POST /api/agent/tokens` | ADMIN | `personaSlug`의 페르소나 소속(null→전역만) |
+| `GET /api/agent/tokens` | ADMIN | `projectId` 없으면 전역만(전체), 있으면 그 프로젝트 관리자 — 그 프로젝트 소속 페르소나 토큰만 |
+| `DELETE /api/agent/tokens/{id}` | ADMIN | 토큰 페르소나 소속(null·없는 id→전역만) |
+| `POST /api/agent/runs` | ADMIN | 이슈의 프로젝트(ALM 조회 뒤) |
+| `POST /api/agent/runs/{id}/cancel`·`/resume` | ADMIN | `run.project_id`(없는 id→전역만) |
+| `POST /api/agent/gates/{id}/approve`·`/reject` | ADMIN | 게이트 run의 `project_id`(없는 id→전역만) |
+| `POST /api/agent/meetings` | ADMIN | 요청 `projectId` |
+| `POST /api/agent/kill-switch` | ADMIN | **전역만 유지** |
+| `GET /api/agent/permissions?projectId=` | — (신설) | 인증 사용자 누구나 → `{canManage, isGlobalAdmin}` |
+
+조회 API(`GET` personas·runs·gates·office·budget·kill-switch)는 기존대로 인증 사용자 누구나다. 대상이 없는 id는 전역 관리자만
+통과시킨다 — 프로젝트 관리자에게 "없음(404)"과 "남의 것(403)"을 구분해 주지 않는다(전역 관리자는 서비스의 404를 본다).
+
+**프로젝트 소속 페르소나(D-P3f-3)** — `persona.project_id BIGINT NULL`(V8, FK 없음 — alm 프로젝트 id). null = 전사 공용이고
+생성·관리는 전역 관리자만. 기존 행은 전부 null(공용). 생성 후 불변(재부트스트랩은 표시 필드만 갱신하고 `projectId`를 무시).
+응답(`PersonaResponse`)에 `projectId`가 실린다. 사무실 `projectId` 필터는 그 프로젝트 소속 + 공용 페르소나(§6).
+
+**부여 상한(D-P3f-4)** — 전역 관리자가 아닌 호출자가 새 페르소나를 만들 때 `grants` 각 항목마다 호출자가 그 자원의 ADMIN인지
+`CheckPermission(PROJECT|SPACE, id, ADMIN)`으로 본다 — 아니면 403 "관리하지 않는 자원 권한은 부여할 수 없습니다". `GLOBAL`
+grant는 403 "GLOBAL 권한은 전역 관리자만 부여할 수 있습니다", 모르는 자원 종류도 거부. 자기 권한 이상을 페르소나에 실어
+우회하는 경로를 막는다(org `POST /api/org/grants`도 자원 ADMIN을 요구하지만 부트스트랩 중간에 실패하면 auth·org에 고아
+계정이 남으므로 앞에서 끊는다).
+
+**fail-closed(D-P3f-2)** — org 판정 실패(UNAVAILABLE·DEADLINE_EXCEEDED·그 밖의 gRPC 오류)는 **403 거부**다(alm·wiki는 503 —
+여기서는 계획 결정으로 거부). 사유는 "권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"로 "권한 없음"과
+구분하고, 계정 상태 거부(PENDING·SUSPENDED·DEACTIVATED)도 그 사실을 말한다. 전역 관리자는 org를 부르지 않으므로 org 장애 중에도
+운영이 멈추지 않는다. 판정 캐시는 alm과 같은 30초(grant 회수·계정 정지 반영이 최대 30초 늦다)이고, **판정 실패는 캐시하지
+않는다**(org 복구 직후에도 막히지 않게). 권한 조회 API는 실패 시 403 대신 `canManage=false`로 답한다(화면이 깨지지 않게).
+
+**org gRPC 설정** — alm·wiki와 같은 env: `ORG_GRPC_HOST`(기본 localhost) · `ORG_GRPC_PORT`(기본 9131) ·
+`ORG_GRPC_DEADLINE_SECONDS`(기본 5). 컨테이너에서는 `ORG_GRPC_HOST=org-service`가 필요하다(infra compose — 이 리포 밖).
+공유 아티팩트는 다른 서비스와 같은 `common-proto`/`common-starter` 0.16.0.
+
+**알려진 한계(다운스트림)** — 새 페르소나 부트스트랩은 호출자 JWT를 그대로 auth-server `POST /api/auth/agents`와 org
+`POST /api/org/members/agents`에 넘기는데, 두 곳 모두 아직 `ROLE_ADMIN`만 받는다. 그래서 **프로젝트 관리자의 새 페르소나 생성은
+agent-service 인가를 통과해도 다운스트림에서 403으로 막힌다**(기존 슬러그 갱신·활성 토글·PAT·run·게이트·회의는 다운스트림을
+관리자 JWT로 부르지 않아 영향 없음). 해소는 auth·org 쪽 변경(프로젝트 ADMIN 허용 또는 내부 경로) — 이 리포 밖.

@@ -46,8 +46,8 @@ import java.util.stream.Collectors;
  * AI 사무실 감독 집계(P3a D-P3a-1) — 읽기 전용. 페르소나 수가 적다(≤20)는 전제로 페르소나 목록을 기준 축으로 두고,
  * run·감사·비용은 각각 한 번씩만 조회해 페르소나 id로 붙인다(페르소나별 쿼리 없음).
  *
- * <p>projectId 필터는 run 축(현재 run·최근 run·게이트·비용)에만 걸린다. 감사 로그에는 프로젝트 축이 없어
- * 말풍선(lastActivity)은 페르소나 전체 활동 기준이다.
+ * <p>projectId 필터는 run 축(현재 run·최근 run·게이트·비용)과 페르소나 소속(P3f — 그 프로젝트 + 공용)에 걸린다.
+ * 감사 로그에는 프로젝트 축이 없어 말풍선(lastActivity)은 페르소나 전체 활동 기준이다.
  */
 @Service
 @Transactional(readOnly = true)
@@ -115,7 +115,11 @@ public class OfficeService {
         Map<Long, BigDecimal> costs = costRows.stream()
                 .collect(Collectors.toMap(PersonaCost::personaId, PersonaCost::costUsd, BigDecimal::add));
 
+        // projectId 필터(P3f, D-P3f-3): 그 프로젝트 소속 + 전사 공용. 다른 프로젝트 소속이라도 이 프로젝트에서 도는 run이 있으면
+        // 보여 준다 — 일하는 중인 캐릭터가 사무실에서 사라지면 감독 화면이 거짓말을 한다.
         List<OfficeResponse.OfficePersona> personas = personaRepository.findAll(Sort.by("id")).stream()
+                .filter(p -> projectId == null || p.getProjectId() == null || projectId.equals(p.getProjectId())
+                        || currentRuns.containsKey(p.getId()))
                 .map(p -> new OfficeResponse.OfficePersona(p.getId(), p.getSlug(), p.getName(), p.getEmoji(),
                         p.getRole(), p.isActive(), toCurrent(currentRuns.get(p.getId())), bubbles.get(p.getId()),
                         costs.getOrDefault(p.getId(), BigDecimal.ZERO)))

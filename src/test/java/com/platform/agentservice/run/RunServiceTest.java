@@ -35,6 +35,7 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.function.LongConsumer;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -142,6 +143,24 @@ class RunServiceTest {
 
     // ---- createUserRun (P2c T2, AGP-42) ----
 
+    private static final LongConsumer NO_GUARD = projectId -> {};
+
+    /** P3f — 권한 가드는 이슈가 확정한 프로젝트로 불리고, 가드가 던지면 run을 저장하지 않는다. */
+    @Test
+    void createUserRun_guard_receives_issue_project_and_blocks_save_when_denied() {
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        java.util.List<Long> guarded = new java.util.ArrayList<>();
+
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, null, projectId -> {
+            guarded.add(projectId);
+            throw new com.platform.common.error.ForbiddenException("이 프로젝트의 관리자만 할 수 있습니다");
+        })).isInstanceOf(com.platform.common.error.ForbiddenException.class);
+
+        assertThat(guarded).containsExactly(PROJECT_ID);
+        verify(runRepository, never()).save(any());
+    }
+
     private static final long OTHER_PERSONA_ID = 6L;
     private static final long OTHER_PERSONA_MEMBER_ID = 43L;
     private static final String OTHER_BEARER = "Bearer other-token";
@@ -167,7 +186,7 @@ class RunServiceTest {
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
         stubSaveReturnsArgument();
 
-        Run run = runService.createUserRun(ISSUE_KEY, "로그인 버그부터", null, null);
+        Run run = runService.createUserRun(ISSUE_KEY, "로그인 버그부터", null, null, NO_GUARD);
 
         assertThat(run.getTrigger()).isEqualTo(RunTrigger.USER);
         assertThat(run.getType()).isEqualTo(RunType.TASK);
@@ -189,7 +208,7 @@ class RunServiceTest {
         when(almClient.getByKey(ISSUE_KEY, OTHER_BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
         stubSaveReturnsArgument();
 
-        Run run = runService.createUserRun(ISSUE_KEY, null, null, "mina");
+        Run run = runService.createUserRun(ISSUE_KEY, null, null, "mina", NO_GUARD);
 
         assertThat(run.getPersonaId()).isEqualTo(OTHER_PERSONA_ID);
         verify(personaRepository, never()).findBySlug("jiho");
@@ -199,7 +218,7 @@ class RunServiceTest {
     void createUserRun_unknown_persona_slug_is_404_without_touching_alm() {
         when(personaRepository.findBySlug("ghost")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, "ghost"))
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, "ghost", NO_GUARD))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessageContaining("ghost");
 
@@ -211,7 +230,7 @@ class RunServiceTest {
     void createUserRun_missing_default_persona_is_404_not_silently_skipped() {
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.empty());
 
-        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, null))
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, null, NO_GUARD))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessageContaining("jiho");
 
@@ -224,7 +243,7 @@ class RunServiceTest {
         inactive.changeActive(false);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(inactive));
 
-        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, null))
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, null, null, null, NO_GUARD))
                 .isInstanceOf(IllegalArgumentException.class)
                 .hasMessage("비활성 페르소나입니다: jiho");
 
@@ -236,7 +255,7 @@ class RunServiceTest {
     void createUserRun_unset_default_persona_slug_is_404() {
         RunService service = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, null, 3));
 
-        assertThatThrownBy(() -> service.createUserRun(ISSUE_KEY, null, null, "  "))
+        assertThatThrownBy(() -> service.createUserRun(ISSUE_KEY, null, null, "  ", NO_GUARD))
                 .isInstanceOf(NotFoundException.class);
 
         verify(personaRepository, never()).findBySlug(any());
@@ -248,7 +267,7 @@ class RunServiceTest {
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
         when(runRepository.existsByIssueKeyAndStatusIn(ISSUE_KEY, RunService.ACTIVE_STATUSES)).thenReturn(true);
 
-        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, "지시", null, null))
+        assertThatThrownBy(() -> runService.createUserRun(ISSUE_KEY, "지시", null, null, NO_GUARD))
                 .isInstanceOf(ConflictException.class);
 
         verify(runRepository, never()).save(any());
@@ -260,7 +279,7 @@ class RunServiceTest {
         // AGP-25: alm 404는 DownstreamErrors가 NotFoundException으로 옮긴다 — 컨트롤러 응답도 409가 아니라 404다.
         when(almClient.getByKey("AGP-404", BEARER)).thenThrow(new NotFoundException("이슈를 찾을 수 없습니다"));
 
-        assertThatThrownBy(() -> runService.createUserRun("AGP-404", null, null, null))
+        assertThatThrownBy(() -> runService.createUserRun("AGP-404", null, null, null, NO_GUARD))
                 .isInstanceOf(NotFoundException.class)
                 .hasMessageContaining("이슈를 찾을 수 없습니다");
 
@@ -273,7 +292,7 @@ class RunServiceTest {
         when(almClient.getByKey("AGP-9", BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
         stubSaveReturnsArgument();
 
-        Run run = runService.createUserRun("  AGP-9 ", null, null, null);
+        Run run = runService.createUserRun("  AGP-9 ", null, null, null, NO_GUARD);
 
         assertThat(run.getIssueKey()).isEqualTo(ISSUE_KEY);
         verify(runRepository).existsByIssueKeyAndStatusIn(ISSUE_KEY, RunService.ACTIVE_STATUSES);
@@ -287,7 +306,7 @@ class RunServiceTest {
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
         stubSaveReturnsArgument();
 
-        Run run = service.createUserRun(ISSUE_KEY, null, "claude-user", null);
+        Run run = service.createUserRun(ISSUE_KEY, null, "claude-user", null, NO_GUARD);
 
         assertThat(run.getModel()).isEqualTo("claude-user");
     }
@@ -300,11 +319,11 @@ class RunServiceTest {
 
         RunService projectMapped = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
                 "claude-global", Map.of("agp", "claude-project")));
-        assertThat(projectMapped.createUserRun(ISSUE_KEY, null, "  ", null).getModel()).isEqualTo("claude-project");
+        assertThat(projectMapped.createUserRun(ISSUE_KEY, null, "  ", null, NO_GUARD).getModel()).isEqualTo("claude-project");
 
         RunService globalOnly = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
                 "claude-global", Map.of("OTHER", "claude-other")));
-        assertThat(globalOnly.createUserRun(ISSUE_KEY, null, null, null).getModel()).isEqualTo("claude-global");
+        assertThat(globalOnly.createUserRun(ISSUE_KEY, null, null, null, NO_GUARD).getModel()).isEqualTo("claude-global");
     }
 
     @Test
@@ -313,7 +332,7 @@ class RunServiceTest {
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
         stubSaveReturnsArgument();
 
-        assertThat(runService.createUserRun(ISSUE_KEY, "   ", null, null).getInstruction()).isNull();
+        assertThat(runService.createUserRun(ISSUE_KEY, "   ", null, null, NO_GUARD).getInstruction()).isNull();
     }
 
     @Test

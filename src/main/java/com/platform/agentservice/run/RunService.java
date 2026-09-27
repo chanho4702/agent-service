@@ -30,6 +30,7 @@ import java.nio.file.Path;
 import java.util.EnumSet;
 import java.util.List;
 import java.util.Set;
+import java.util.function.LongConsumer;
 
 /**
  * run 생성·실행·종결 오케스트레이션(P2a T4) — {@link Dispatcher}가 소비하고, T5(예산·게이트
@@ -142,11 +143,16 @@ public class RunService {
      *
      * <p>실행 제출은 호출자 몫이다 — {@link #execute}는 {@code @Async}인데 같은 빈 안에서 부르면 프록시를
      * 거치지 않아 요청 스레드에서 워커가 끝날 때까지 블로킹된다({@link Dispatcher}와 같은 생성→실행 순서).
+     *
+     * <p>{@code projectGuard}(P3f): 대상 프로젝트는 이슈를 조회해야 확정되므로 관리 권한 판정을 여기서 받는다 —
+     * 권한이 없으면 가드가 403을 던져 run이 만들어지지 않는다.
      */
-    public Run createUserRun(String issueKey, String instruction, String model, String personaSlug) {
+    public Run createUserRun(String issueKey, String instruction, String model, String personaSlug,
+                             LongConsumer projectGuard) {
         Persona persona = resolveUserRunPersona(personaSlug);
         String bearer = tokenService.bearerFor(persona.getMemberId());
         IssueResponse issue = almClient.getByKey(issueKey.trim(), bearer);
+        projectGuard.accept(issue.projectId());
 
         requireNoActiveRun(issue.key());
         String resolvedModel = isBlank(model) ? schedulerProperties.modelFor(projectKeyOf(issue.key())) : model.trim();

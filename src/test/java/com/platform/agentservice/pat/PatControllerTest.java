@@ -1,6 +1,12 @@
 package com.platform.agentservice.pat;
 
 import com.platform.agentservice.TestAuth;
+import com.platform.agentservice.authz.PermissionClient;
+import com.platform.agentservice.authz.PermissionDecision;
+import com.platform.agentservice.persona.Persona;
+import com.platform.agentservice.persona.PersonaRepository;
+import com.platform.agentservice.persona.PersonaRole;
+import com.platform.proto.org.v1.ResourceType;
 import com.platform.agentservice.pat.dto.PatCreatedResponse;
 import com.platform.agentservice.pat.dto.PatSummaryResponse;
 import org.junit.jupiter.api.BeforeEach;
@@ -30,7 +36,7 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 /**
- * 인가 계약(발급/철회=ROLE_ADMIN, 목록=인증만)과 응답 shape만 본다 — 실제 발급/검증 로직은
+ * 인가 계약(발급/목록/철회=전역 관리자 또는 페르소나 소속 프로젝트 관리자, P3f)과 응답 shape만 본다 — 실제 발급/검증 로직은
  * {@link PatServiceTest}가 본다.
  */
 @SpringBootTest
@@ -39,12 +45,18 @@ class PatControllerTest {
 
     @Autowired WebApplicationContext context;
     @MockitoBean PatService patService;
+    @MockitoBean PermissionClient permissionClient;
+    @Autowired PersonaRepository personaRepository;
+    @Autowired PatTokenRepository patTokenRepository;
 
     MockMvc mvc;
 
     @BeforeEach
     void setUp() {
         mvc = MockMvcBuilders.webAppContextSetup(context).apply(springSecurity()).build();
+        // 목 기본값(null)이 판정 NPE로 새지 않게 — 테스트가 명시한 자원 외에는 org가 거부한다고 둔다.
+        given(permissionClient.checkAdmin(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.any())).willReturn(PermissionDecision.deny("NO_GRANT"));
     }
 
     @Test
@@ -106,7 +118,7 @@ class PatControllerTest {
 
     @Test
     void admin_can_list_tokens_without_hash() throws Exception {
-        given(patService.list()).willReturn(List.of(
+        given(patService.list(null)).willReturn(List.of(
                 new PatSummaryResponse(10L, "ci-token", "qa-bot", Instant.now(), null, null, false)));
 
         mvc.perform(get("/api/agent/tokens").with(authentication(TestAuth.admin(1L, "Admin"))))
@@ -122,7 +134,59 @@ class PatControllerTest {
         mvc.perform(get("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isForbidden());
 
-        verify(patService, org.mockito.Mockito.never()).list();
+        verify(patService, org.mockito.Mockito.never()).list(any());
+    }
+
+    // ---- P3f: 프로젝트 관리자 ----
+
+    @Test
+    void project_admin_issues_token_for_own_project_persona_but_not_shared() throws Exception {
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.allow());
+        personaRepository.save(Persona.of(9711L, "pat-own", PersonaRole.BACKEND, "O", null, null, 7L));
+        personaRepository.save(Persona.of(9712L, "pat-shared", PersonaRole.BACKEND, "S", null, null));
+        given(patService.issue(any(), eq(2L))).willReturn(new PatCreatedResponse("agp_x", 11L, "l", "pat-own"));
+
+        mvc.perform(post("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"label\":\"l\",\"personaSlug\":\"pat-own\"}"))
+                .andExpect(status().isCreated());
+        mvc.perform(post("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"label\":\"l\",\"personaSlug\":\"pat-shared\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("전사 공용 페르소나는 전역 관리자만 관리할 수 있습니다"));
+    }
+
+    @Test
+    void project_admin_lists_tokens_only_with_managed_project_filter() throws Exception {
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.allow());
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "8")).willReturn(PermissionDecision.deny("NO_GRANT"));
+        given(patService.list(7L)).willReturn(List.of());
+
+        mvc.perform(get("/api/agent/tokens").param("projectId", "7").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isOk());
+        mvc.perform(get("/api/agent/tokens").param("projectId", "8").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("전역 관리자만 할 수 있습니다"));
+
+        verify(patService).list(7L);
+    }
+
+    @Test
+    void project_admin_revokes_token_of_own_project_persona_only() throws Exception {
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.allow());
+        Persona own = personaRepository.save(Persona.of(9721L, "rev-own", PersonaRole.BACKEND, "O", null, null, 7L));
+        Persona shared = personaRepository.save(Persona.of(9722L, "rev-shared", PersonaRole.BACKEND, "S", null, null));
+        PatToken ownToken = patTokenRepository.save(PatToken.of("a".repeat(64), "own", 1L, own.getId(), null));
+        PatToken sharedToken = patTokenRepository.save(PatToken.of("b".repeat(64), "shared", 1L, shared.getId(), null));
+
+        mvc.perform(delete("/api/agent/tokens/" + ownToken.getId()).with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isNoContent());
+        mvc.perform(delete("/api/agent/tokens/" + sharedToken.getId()).with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden());
+
+        verify(patService).revoke(ownToken.getId());
+        verify(patService, org.mockito.Mockito.never()).revoke(sharedToken.getId());
     }
 
     @Test

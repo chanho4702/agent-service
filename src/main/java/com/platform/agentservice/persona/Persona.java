@@ -24,13 +24,20 @@ public class Persona {
     @Column(length = 16) private String emoji;
     @Column(columnDefinition = "text") private String voicePrompt;
     @Column(nullable = false) private boolean active = true;
+    /** 소속 ALM 프로젝트 — null이면 전사 공용(전역 관리자만 관리, D-P3f-3). 생성 후 불변이다. */
+    private Long projectId;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
     @UpdateTimestamp @Column(nullable = false) private Instant updatedAt;
 
     public static Persona of(Long memberId, String slug, PersonaRole role, String name, String emoji, String voicePrompt) {
+        return of(memberId, slug, role, name, emoji, voicePrompt, null);
+    }
+
+    public static Persona of(Long memberId, String slug, PersonaRole role, String name, String emoji, String voicePrompt,
+                             Long projectId) {
         Persona p = new Persona();
         p.memberId = memberId; p.slug = slug; p.role = role; p.name = name;
-        p.emoji = emoji; p.voicePrompt = voicePrompt;
+        p.emoji = emoji; p.voicePrompt = voicePrompt; p.projectId = projectId;
         return p;
     }
 

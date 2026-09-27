@@ -22,7 +22,10 @@ import java.time.temporal.ChronoUnit;
 import java.util.Base64;
 import java.util.HexFormat;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
 /**
  * PAT(개인 접근 토큰) 발급·조회·철회 + {@code /api/agent/mcp} 필터가 쓰는 검증.
@@ -63,13 +66,18 @@ public class PatService {
         return new PatCreatedResponse(rawToken, saved.getId(), saved.getLabel(), persona.getSlug());
     }
 
+    /** projectId가 있으면 그 프로젝트 소속 페르소나의 토큰만(P3f — 공용 페르소나 토큰은 빠진다). 권한 판정은 컨트롤러 몫. */
     @Transactional(readOnly = true)
-    public List<PatSummaryResponse> list() {
+    public List<PatSummaryResponse> list(Long projectId) {
+        Map<Long, Persona> personas = personaRepository.findAll().stream()
+                .collect(Collectors.toMap(Persona::getId, Function.identity()));
         return patTokenRepository.findAll().stream()
+                .filter(t -> projectId == null || Optional.ofNullable(personas.get(t.getPersonaId()))
+                        .map(p -> projectId.equals(p.getProjectId())).orElse(false))
                 .map(t -> new PatSummaryResponse(
                         t.getId(),
                         t.getLabel(),
-                        personaSlugOf(t.getPersonaId()),
+                        Optional.ofNullable(personas.get(t.getPersonaId())).map(Persona::getSlug).orElse(null),
                         t.getCreatedAt(),
                         t.getExpiresAt(),
                         t.getLastUsedAt(),
@@ -137,10 +145,6 @@ public class PatService {
         if (lastUsed == null || Duration.between(lastUsed, now).compareTo(LAST_USED_THROTTLE) > 0) {
             token.touch(now);
         }
-    }
-
-    private String personaSlugOf(Long personaId) {
-        return personaRepository.findById(personaId).map(Persona::getSlug).orElse(null);
     }
 
     private String generateToken() {

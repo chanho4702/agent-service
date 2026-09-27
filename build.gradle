@@ -33,10 +33,15 @@ dependencyManagement {
     }
 }
 
-def sharedVersion = providers.gradleProperty('commonProtoVersion').getOrElse('0.15.0')
+// 공유 아티팩트 버전은 하나 — wiki·alm·board·migration과 같은 발행본을 본다(common-proto·common-starter 같은 태그).
+def sharedVersion = providers.gradleProperty('commonProtoVersion').getOrElse('0.16.0')
+def grpcVersion = '1.69.0'
 
 dependencies {
     implementation "com.platform:common-starter:${sharedVersion}"
+    // org PermissionService(CheckPermission) — 프로젝트 ADMIN 판정(P3f)
+    implementation "com.platform:common-proto:${sharedVersion}"
+    implementation "io.grpc:grpc-netty-shaded:${grpcVersion}"
     implementation 'org.springframework.ai:spring-ai-starter-mcp-server-webmvc'
     implementation 'org.springframework.cloud:spring-cloud-starter-netflix-eureka-client'
     implementation 'org.springframework.boot:spring-boot-starter-web'
@@ -62,6 +67,7 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-testcontainers'
     testImplementation 'org.testcontainers:postgresql'
     testImplementation 'org.testcontainers:junit-jupiter'
+    testImplementation "io.grpc:grpc-inprocess:${grpcVersion}"
     testRuntimeOnly 'com.h2database:h2'
 }
 // /actuator/info의 build.version — 대시보드가 배포된 버전을 읽는다
