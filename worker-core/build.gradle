@@ -1,0 +1,27 @@
+// 워커 실행부(AGP-69 T3) — WorkSpec → 워크스페이스 준비·하네스 실체화·claude -p 실행·결과 파싱·커밋 링크 파싱.
+// 서비스(인프로세스 실행)와 러너 jar가 같은 코드를 쓴다. 런타임에 Spring·DB 의존이 없어야 한다:
+// @Component·@ConfigurationProperties는 compileOnly라 서비스에서는 빈으로 잡히고, 러너에서는 애너테이션 클래스가 없어 무시된다.
+plugins {
+    id 'java-library'
+    id 'io.spring.dependency-management'
+}
+group = 'com.platform'
+version = rootProject.version
+java { toolchain { languageVersion = JavaLanguageVersion.of(24) } }
+tasks.withType(JavaCompile).configureEach { options.compilerArgs << '-parameters' }
+
+repositories { mavenCentral() }
+
+// 버전은 서비스와 같은 Spring Boot BOM에서 — 러너와 서비스가 같은 jackson·slf4j를 본다.
+dependencyManagement {
+    imports { mavenBom org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES }
+}
+
+dependencies {
+    api 'com.fasterxml.jackson.core:jackson-databind'
+    api 'org.slf4j:slf4j-api'
+    compileOnly 'org.springframework.boot:spring-boot'
+    compileOnly 'org.springframework:spring-context'
+    compileOnly 'org.projectlombok:lombok:1.18.46'
+    annotationProcessor 'org.projectlombok:lombok:1.18.46'
+}

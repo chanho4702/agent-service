@@ -20,7 +20,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * 워커 실행의 "로컬에서 프로세스를 돌리는" 부분(P4a AGP-69 — {@link WorkerLauncher}에서 분리). {@link WorkSpec} 하나를 받아
+ * 워커 실행의 "로컬에서 프로세스를 돌리는" 부분(P4a AGP-69 — {@code WorkerLauncher}에서 분리). {@link WorkSpec} 하나를 받아
  * 워크스페이스 준비(승계·회의·clone) → 하네스·페르소나 스킬 실체화 → 인증 획득({@link Authorizer}) → mcp-config 파일 → {@code claude -p}
  * 실행 → stdout JSON 파싱까지 한다. DB·Spring 빈·run 엔티티를 모른다 — 서버 인프로세스 실행과 러너 프로그램(AGP-69 T3)이 같은
  * 코드를 쓰게 하려는 경계다. run 토큰 발급·철회, LLM 키 해석, run 상태 전이는 호출자 몫이다.
@@ -28,7 +28,7 @@ import java.util.Map;
  * <p>인증은 워크스페이스 준비 뒤에 {@link Authorizer}로 받는다 — clone 실패처럼 준비 단계에서 끝나면 토큰을 발급하지 않는다
  * (P2a T3 이래의 순서 그대로: 발급 전 실패는 철회할 것이 없다).
  *
- * <p>mcp-config를 파일로, 클론 트리 밖 형제 디렉터리에 두는 이유(F1·I4)는 {@link WorkerLauncher} 문서 참고 — 이 클래스가 그 규칙의
+ * <p>mcp-config를 파일로, 클론 트리 밖 형제 디렉터리에 두는 이유(F1·I4)는 {@code WorkerLauncher} 문서 참고 — 이 클래스가 그 규칙의
  * 구현이다. 파일에는 run 토큰이 담기므로 로그로 남기지 않고 {@code finally}에서 디렉터리째 지운다.
  */
 @Slf4j

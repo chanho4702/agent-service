@@ -37,6 +37,25 @@ claude mcp add --transport http platform https://<호스트>/api/agent/mcp \
 - 환경변수: `AGENT_DB_URL`·`AGENT_DB_USERNAME`·`AGENT_DB_PASSWORD`, `AUTH_JWKS_URI`, `AGENT_INTERNAL_SECRET`(auth-server와 공유, 없으면 fail-closed).
 - 빌드·테스트: `./gradlew test`, 이미지: `Dockerfile`. 배포는 infra-settings의 compose(`agent-service` + `agent-db-init`)로 합니다.
 
+## 로컬 러너 실행
+
+플랫폼이 시킨 작업(run)을 **내 PC에서, 내 Claude 구독으로** 돌리려면 로컬 러너를 띄웁니다. PC가 켜져 있는 동안만 일을 받습니다.
+
+1. 준비: Java 24, Git, [Claude Code](https://docs.claude.com/claude-code)(Windows는 네이티브 설치 권장 — `claude.exe`). `claude`를 한 번 실행해 로그인합니다.
+2. AI 팀 설정 → 러너에서 러너를 발급받아 토큰(`agr_…`)을 복사합니다(한 번만 보입니다).
+3. 러너 jar를 받습니다: https://github.com/chanho4702/agent-service/releases/download/runner-latest/agent-runner.jar
+4. 실행:
+
+```powershell
+$env:RUNNER_TOKEN = "agr_…"
+java -jar agent-runner.jar --server https://<플랫폼 주소>
+```
+
+- 작업 폴더는 기본 `~/agent-runner`(`--work-dir`로 변경). 리뷰·수정 run이 같은 워크스페이스를 이어 쓰므로 7일간 보존합니다(`--retention-days`).
+- 동시에 여러 run: `--concurrency 2`(최대 8). 옵션 전체는 `java -jar agent-runner.jar --help`.
+- `Ctrl+C`로 끝냅니다. 로컬 러너는 플랫폼의 LLM 키를 받지 않습니다 — 비용은 이 PC의 Claude 로그인(또는 직접 둔 `ANTHROPIC_API_KEY`)으로 나갑니다.
+- 서버 쪽 실행(24시간)은 같은 프로그램을 담은 컨테이너 `ghcr.io/chanho4702/agent-runner`가 맡습니다. 상세는 `CLAUDE.md` §13.
+
 ## 로드맵
 
 - P1(완료): 기록 계층 + MCP 도구 + 페르소나·토큰.

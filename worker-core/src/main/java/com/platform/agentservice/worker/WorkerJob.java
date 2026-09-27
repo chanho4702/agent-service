@@ -5,7 +5,7 @@ import com.platform.agentservice.persona.PersonaSkills;
 import java.util.List;
 
 /**
- * {@link WorkerLauncher#launch}에 넘기는 이슈 컨텍스트 — 호출자(T4 디스패처)가 조립한다.
+ * {@code WorkerLauncher#launch}에 넘기는 이슈 컨텍스트 — 호출자(T4 디스패처)가 조립한다.
  * {@code repoUrl}은 이슈의 프로젝트/라벨을 {@code platform.agent.worker.repos} 매핑으로
  * 해석한 결과다(해석 로직 자체는 이 타입의 책임이 아니다). 이슈 키는 {@code Run.issueKey}에
  * 이미 있으므로 여기 중복해 담지 않는다.

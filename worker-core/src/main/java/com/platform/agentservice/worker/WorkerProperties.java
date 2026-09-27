@@ -21,7 +21,7 @@ import java.util.Map;
  * var(소문자로 접힘) 세 경로 어느 쪽으로 주입해도 안전하다.
  *
  * <p>{@link #requireApiKey()}(AGP-68): 서버(컨테이너) 실행 모드 — 구독 세션 파일이 없는 환경이라 LLM API 키가
- * 해석되지 않으면 {@link WorkerLauncher}가 워커를 띄우기 전에 거부한다. 로컬 dev(구독 세션 재사용)는 기본값 false.
+ * 해석되지 않으면 {@code WorkerLauncher}가 워커를 띄우기 전에 거부한다. 로컬 dev(구독 세션 재사용)는 기본값 false.
  */
 @ConfigurationProperties(prefix = "platform.agent.worker")
 public record WorkerProperties(

@@ -1,7 +1,7 @@
 package com.platform.agentservice.worker;
 
 /**
- * 워커 한 번 실행에 필요한 전부(P4a AGP-69) — {@link WorkerLauncher#buildSpec}이 run·이슈 컨텍스트에서 만들고 {@link WorkerExecution}이
+ * 워커 한 번 실행에 필요한 전부(P4a AGP-69) — {@code WorkerLauncher#buildSpec}이 run·이슈 컨텍스트에서 만들고 {@link WorkerExecution}이
  * 그대로 실행한다. DB·Spring을 모르는 순수 값이라 서버 인프로세스 실행과 러너(로컬·플랫폼) 실행이 같은 명세를 쓴다 — 러너는 claim
  * 응답으로 이 값을 받는다.
  *

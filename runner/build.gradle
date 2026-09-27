@@ -1,0 +1,50 @@
+// 러너 프로그램(AGP-69 T3) — 서버에서 run을 claim해 worker-core로 실행하고 결과를 보고한다. CLAUDE.md §13.
+// 산출물은 실행 가능한 jar 하나(agent-runner.jar): Java 24 + JDK HttpClient + Jackson + slf4j(JUL 연결). Spring Boot 없음.
+plugins {
+    id 'java'
+    id 'io.spring.dependency-management'
+}
+group = 'com.platform'
+version = rootProject.version
+java { toolchain { languageVersion = JavaLanguageVersion.of(24) } }
+tasks.withType(JavaCompile).configureEach { options.compilerArgs << '-parameters' }
+
+repositories { mavenCentral() }
+
+dependencyManagement {
+    imports { mavenBom org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES }
+}
+
+dependencies {
+    implementation project(':worker-core')
+    // worker-core의 slf4j 로그와 러너 로그를 JUL 한 곳(RunnerLogging 포매터 — 텍스트/JSON)으로 모은다
+    runtimeOnly 'org.slf4j:slf4j-jdk14'
+
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testImplementation 'org.assertj:assertj-core'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    testRuntimeOnly 'org.slf4j:slf4j-jdk14'
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+    jvmArgs '-Dstdout.encoding=UTF-8', '-Dstderr.encoding=UTF-8'
+}
+
+// 의존성을 풀어 넣은 단일 실행 jar — 사용자는 `java -jar agent-runner.jar`만 한다(설치 절차 없음).
+tasks.named('jar', Jar) {
+    archiveFileName = 'agent-runner.jar'
+    dependsOn configurations.runtimeClasspath
+    manifest {
+        attributes(
+                'Main-Class': 'com.platform.agentrunner.RunnerMain',
+                'Implementation-Title': 'agent-runner',
+                'Implementation-Version': project.version,
+                // jackson은 멀티릴리스 jar다 — 풀어 넣은 META-INF/versions/* 를 그대로 쓰게 한다
+                'Multi-Release': 'true')
+    }
+    from { configurations.runtimeClasspath.collect { it.isDirectory() ? it : zipTree(it) } }
+    duplicatesStrategy = DuplicatesStrategy.EXCLUDE
+    exclude 'META-INF/*.SF', 'META-INF/*.DSA', 'META-INF/*.RSA', 'META-INF/*.EC', '**/module-info.class',
+            'META-INF/maven/**', 'META-INF/INDEX.LIST'
+}

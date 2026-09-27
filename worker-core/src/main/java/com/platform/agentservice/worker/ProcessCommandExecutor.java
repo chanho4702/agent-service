@@ -29,7 +29,7 @@ import java.util.concurrent.TimeUnit;
  * 프로세스라, 호스트 env의 자격증명(GH 토큰·DB 비밀번호 등)이 거기로 새면 프롬프트 인젝션
  * 한 번에 유출된다. 모든 자식(git clone·워커·커밋 수확 git)이 이 한 지점을 지나므로 여기서
  * 일괄로 친다. 인증 키(CLAUDE_CODE_OAUTH_TOKEN 등)는 워커에만 필요하므로 이 목록에 넣지 않고
- * {@link WorkerLauncher}가 워커 호출에만 extraEnv로 싣는다. 프로세스 격리는 아니다 —
+ * {@code WorkerLauncher}가 워커 호출에만 extraEnv로 싣는다. 프로세스 격리는 아니다 —
  * 파일시스템·네트워크는 여전히 공유한다(컨테이너 격리는 P2b).
  *
  * <p>Windows에서 {@code claude}는 흔히 {@code claude.cmd}다 — 이 클래스는 커맨드 문자열을
@@ -99,7 +99,15 @@ public class ProcessCommandExecutor implements CommandExecutor {
         } catch (IOException e) {
             throw new UncheckedIOException("프로세스 시작 실패: " + command, e);
         }
+        started(process);
+        try {
+            return await(process, timeout);
+        } finally {
+            finished(process);
+        }
+    }
 
+    private ExecResult await(Process process, Duration timeout) {
         StringBuilder stdout = new StringBuilder();
         StringBuilder stderr = new StringBuilder();
         Thread stdoutDrain = startDrain(process.getInputStream(), stdout);
@@ -110,14 +118,14 @@ public class ProcessCommandExecutor implements CommandExecutor {
             finished = process.waitFor(timeout.toMillis(), TimeUnit.MILLISECONDS);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            process.destroyForcibly();
+            destroy(process);
             joinQuietly(stdoutDrain);
             joinQuietly(stderrDrain);
             return new ExecResult(-1, stdout.toString(), stderr.toString(), true);
         }
 
         if (!finished) {
-            process.destroyForcibly();
+            destroy(process);
             joinQuietly(stdoutDrain);
             joinQuietly(stderrDrain);
             return new ExecResult(-1, stdout.toString(), stderr.toString(), true);
@@ -126,6 +134,24 @@ public class ProcessCommandExecutor implements CommandExecutor {
         joinQuietly(stdoutDrain);
         joinQuietly(stderrDrain);
         return new ExecResult(process.exitValue(), stdout.toString(), stderr.toString(), false);
+    }
+
+    /**
+     * 프로세스 시작·종료 훅(AGP-69 T3 — 러너가 run별 워커 프로세스를 추적해 서버의 중단 요청({@code stopRunIds})에 죽이려고 쓴다).
+     * 기본은 아무것도 하지 않는다. {@code finished}는 정상·타임아웃·인터럽트 어느 경로로 끝나도 불린다.
+     */
+    protected void started(Process process) {
+    }
+
+    protected void finished(Process process) {
+    }
+
+    /**
+     * 타임아웃·인터럽트 때 프로세스를 죽인다. 기본은 그 프로세스만 강제 종료한다(인프로세스 동작 그대로) — 러너는 자손 프로세스
+     * (gradle·node 등)까지 죽이도록 바꾼다.
+     */
+    protected void destroy(Process process) {
+        process.destroyForcibly();
     }
 
     /** 자식 env를 비우고 허용 키만 부모에서 옮긴 뒤 extraEnv를 덧씌운다 — 호출부 명시값이 항상 이긴다. */

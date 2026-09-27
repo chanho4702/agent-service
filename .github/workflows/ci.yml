@@ -5,7 +5,7 @@ on:
     branches: [main]
 
 permissions:
-  contents: read
+  contents: write   # 러너 jar 롤링 릴리스(runner-latest) 태그·자산 갱신
   packages: write   # GHCR 이미지 push
 
 jobs:
@@ -25,10 +25,18 @@ jobs:
       - name: Version stamp
         id: ver
         run: echo "app=${GITHUB_SHA::7}-$(date -u +%Y%m%d)" >> "$GITHUB_OUTPUT"
+      # 서비스 + worker-core + runner 전 모듈 빌드·테스트. 러너 jar(runner/build/libs/agent-runner.jar)의 Implementation-Version도 이 스탬프다.
       - run: ./gradlew build --no-daemon -PappVersion=${{ steps.ver.outputs.app }}
         env:
           GITHUB_ACTOR: chanho4702
           GITHUB_TOKEN: ${{ secrets.GH_PACKAGES_TOKEN }}
+
+      - name: Upload runner jar artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-runner-${{ steps.ver.outputs.app }}
+          path: runner/build/libs/agent-runner.jar
+          if-no-files-found: error
 
       - name: Login GHCR
         if: github.ref == 'refs/heads/main'
@@ -49,11 +57,47 @@ jobs:
         with:
           context: .
           push: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # 서비스 이미지와 러너 이미지의 캐시가 서로 밀어내지 않게 scope를 나눈다
+          cache-from: type=gha,scope=agent-service
+          cache-to: type=gha,mode=max,scope=agent-service
           tags: |
             ghcr.io/chanho4702/agent-service:latest
             ghcr.io/chanho4702/agent-service:sha-${{ github.sha }}
+
+      # 플랫폼 러너 이미지(AGP-69 T3 — 비밀 없는 서버 실행기, CLAUDE.md §12·§13). node·claude·apt 층은 버전 고정이라 캐시로 재사용된다.
+      - name: Build & push runner image
+        if: github.ref == 'refs/heads/main'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: runner/Dockerfile
+          push: true
+          cache-from: type=gha,scope=agent-runner
+          cache-to: type=gha,mode=max,scope=agent-runner
+          tags: |
+            ghcr.io/chanho4702/agent-runner:latest
+            ghcr.io/chanho4702/agent-runner:sha-${{ github.sha }}
+
+      # 사용자 PC용 러너 jar — 고정 URL(설정 화면이 링크한다):
+      #   https://github.com/chanho4702/agent-service/releases/download/runner-latest/agent-runner.jar
+      # 롤링 릴리스: 태그를 이 커밋으로 옮기고 자산을 덮어쓴다.
+      - name: Publish runner jar (rolling release runner-latest)
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          APP_VERSION: ${{ steps.ver.outputs.app }}
+        run: |
+          cd runner/build/libs
+          sha256sum agent-runner.jar > agent-runner.jar.sha256
+          git tag -f runner-latest "$GITHUB_SHA"
+          git push -f origin refs/tags/runner-latest
+          NOTES="agent-runner ${APP_VERSION} (commit ${GITHUB_SHA}) — 실행: java -jar agent-runner.jar --server <플랫폼 주소> (토큰은 RUNNER_TOKEN env). Java 24 필요."
+          if gh release view runner-latest >/dev/null 2>&1; then
+            gh release upload runner-latest agent-runner.jar agent-runner.jar.sha256 --clobber
+            gh release edit runner-latest --title "agent-runner (latest)" --notes "$NOTES"
+          else
+            gh release create runner-latest agent-runner.jar agent-runner.jar.sha256 --title "agent-runner (latest)" --notes "$NOTES" --latest
+          fi
 
       - name: Dispatch deploy
         if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'

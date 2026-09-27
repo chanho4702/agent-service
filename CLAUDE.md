@@ -35,6 +35,12 @@ $env:JAVA_HOME = "C:\Program Files\Java\jdk-24"
 .\gradlew.bat bootJar --no-daemon
 ```
 
+Gradle 멀티 프로젝트(AGP-69 T3): 루트 = 서비스(Spring Boot, `build/libs/app.jar`), `worker-core` = DB·Spring을 모르는 워커 실행부
+(`WorkSpec`·`WorkerExecution`·`WorkerResult`·`CommandExecutor`·`ProcessCommandExecutor`·`HarnessMaterializer`·`CommitLinkParser`·`WorkerJob`·
+`WorkerProperties`·`PersonaSkills` — 패키지는 그대로 `com.platform.agentservice.*`), `runner` = 러너 프로그램(`runner/build/libs/agent-runner.jar`, §13).
+`.\gradlew.bat build`가 세 모듈을 모두 빌드·테스트한다. worker-core의 `@Component`·`@ConfigurationProperties`는 compileOnly라 서비스에서는 빈으로 잡히고
+러너(Spring 없음)에서는 무시된다 — worker-core에 Spring·DB 런타임 의존을 넣지 말 것(러너 jar가 깨진다).
+
 GitHub Packages(`com.platform:common-starter`) 인증은 `GITHUB_TOKEN` env 또는
 `~/.gradle/gradle.properties`의 `gpr.token`.
 
@@ -1103,8 +1109,8 @@ compose), ③ LOCAL 러너(사용자 PC가 claim — 그 PC의 구독·자기 �
 | `DISABLE_AUTOUPDATER=1` | 고정 버전 유지 | 커튼을 넘기려면 `WORKER_EXTRA_ENV_KEYS`에 이름을 넣는다 |
 
 시안 크기 약 971MB(claude 네이티브 바이너리 약 241MB·node 127MB·JDK·git). 시안 Dockerfile은 팀 리드 보관(러너 이미지 출발점).
-러너 쪽 배선 메모: 계보 워크스페이스는 재생성에도 남는 볼륨, 하네스는 infra-settings의 `.claude/agents`·`.claude/skills`·루트
-`CLAUDE.md`·`AGENTS.md`만 읽기 전용 마운트(`.claude` 통째 금지 — 운영자 개인 `settings.local.json`이 워커 경로에 오지 않게).
+러너 쪽 배선 메모: 계보 워크스페이스는 재생성에도 남는 볼륨(`/work`). 하네스는 마운트하지 않는다 — 러너가 서버 harness 엔드포인트(§13)에서
+받는다(서버 쪽 번들이 `settings.local.json`·`worktrees/`를 뺀다). 실제 이미지는 `runner/Dockerfile`(§13 "러너 프로그램").
 
 **CLI 버전 고정·갱신 절차(러너 이미지)** — `ARG CLAUDE_CODE_VERSION`(시안 기준 **2.1.283**). latest 금지: 같은 커밋의 이미지가 빌드 시점마다
 다른 CLI를 싣고, `--output-format json` shape가 바뀌면 `WorkerLauncher.toWorkerResult` 파싱이 조용히 깨진다. 갱신: ① 로컬에서 새 버전으로 헤드리스
@@ -1240,7 +1246,7 @@ JSON 파싱). 인증(run 토큰·워커 env)은 워크스페이스 준비 **뒤*
 인프로세스 `launch`는 콜백에서 LLM 키 해석 + run 토큰 발급, `finally`에서 철회(분리 전과 같은 순서·같은 테스트). 러너(T3)는 claim 응답의
 `spec`·`runToken`·`llmApiKey`로 같은 `WorkerExecution`을 돌리고, `CommitLinkParser`로 커밋 링크를 뽑아 결과와 함께 보낸다. 러너 모듈이 이 클래스들
 (`WorkSpec`·`WorkerExecution`·`WorkerResult`·`CommandExecutor`·`ProcessCommandExecutor`·`HarnessMaterializer`·`CommitLinkParser`·`WorkerJob.Expertise`)을
-의존할 수 있게 Spring 빈·DB 의존이 없다(현재 단일 모듈 — 서브모듈 분리는 T3 몫).
+의존할 수 있게 Spring 빈·DB 의존이 없다 — T3에서 `worker-core` 서브프로젝트로 분리했다(아래 "러너 프로그램", 빌드/테스트 절).
 
 **설정**
 
@@ -1267,4 +1273,77 @@ run 종료 시 철회). V13 `pat_token.expiry_warned_at`·`owner_email`.
   infra 몫(AGP-68·T3). in-process=false인데 PLATFORM 러너가 없으면 SERVER run은 전부 "러너 대기"로 멈춘다.
 - 러너 철회 시 그 러너에 고정된 QUEUED 계보 run은 자동으로 풀리지 않는다(다른 러너는 워크스페이스가 없어 어차피 실패한다) — 사람이 취소한다.
 - 러너 run의 OS 프로세스 강제 종료는 러너 몫이다(서버는 `stopRunIds`로 알리기만 한다).
-- 러너 수동 E2E(실 PC → 서버)는 T3 러너 jar 이후. 이 태스크는 단위·통합 테스트(원자성은 실 PostgreSQL)까지.
+- 러너 수동 E2E(실 PC → 서버)는 아직이다 — T2·T3는 단위·통합 테스트(원자성은 실 PostgreSQL, 러너 루프는 스텁 서버)까지.
+
+### 러너 프로그램 (AGP-69 T3, 2026-09-28)
+
+`runner` 모듈 — Java 24 실행 jar 하나(`agent-runner.jar`, 약 2.5MB: JDK HttpClient + Jackson + slf4j→JUL, Spring 없음). 위 프로토콜로 run을 claim해
+`worker-core`의 `WorkerExecution`(서버 인프로세스와 같은 코드)으로 실행하고 결과를 보고한다.
+
+**받기** — 사용자 PC: `https://github.com/chanho4702/agent-service/releases/download/runner-latest/agent-runner.jar`(CI가 main마다 롤링 릴리스
+`runner-latest`의 자산을 덮어쓴다, 옆에 `agent-runner.jar.sha256`). CI 워크플로 아티팩트 `agent-runner-<스탬프>`에도 있다. 플랫폼 러너 컨테이너:
+`ghcr.io/chanho4702/agent-runner:latest`·`:sha-<커밋>`.
+
+**실행**
+
+```powershell
+# Windows 11 — Java 24 + Claude Code(네이티브 설치, `claude` 로그인 완료) + Git
+$env:RUNNER_TOKEN = "agr_…"     # AI 팀 설정 → 러너 발급(한 번만 보인다). 명령행 --token은 프로세스 목록에 보여 비권장
+java -jar agent-runner.jar --server https://<플랫폼 호스트>
+```
+
+| 옵션 | env | 기본 | 의미 |
+|---|---|---|---|
+| `--server` | `RUNNER_SERVER` | (필수) | 플랫폼 주소(nginx). `<server>/api/agent/runners/*`로 붙는다. 리다이렉트는 따라가지 않고 행선지를 로그로 알린다(토큰을 다른 주소로 보내지 않게) |
+| `--token` | `RUNNER_TOKEN` | (필수) | 러너 토큰 `agr_…`. 로그·예외에는 앞 8자만 |
+| `--work-dir` | `RUNNER_WORK_DIR` | `~/agent-runner` | 아래 작업 폴더 |
+| `--concurrency` | `RUNNER_CONCURRENCY` | `1` | 동시 run 1~8(heartbeat `maxConcurrency`로 보고 — 서버도 이 값으로 claim을 막는다) |
+| `--name` | `RUNNER_NAME` | 호스트 이름 | 로그 표시용(프로토콜에 이름 필드는 없다 — 서버 쪽 이름은 발급 때 정한다) |
+| `--claude-bin` | `CLAUDE_BIN` | PATH 탐색 | claude 실행 파일 |
+| `--extra-env-keys` | `RUNNER_EXTRA_ENV_KEYS` | 빈 값 | 워커에 더 넘길 env 이름(§5.1 커튼 해치와 같다 — 프록시·사내 CA·`CLAUDE_CODE_GIT_BASH_PATH`) |
+| `--retention-days` | `RUNNER_RETENTION_DAYS` | `7` | 워크스페이스 보존(0=정리 안 함) |
+| `--shutdown-grace` | `RUNNER_SHUTDOWN_GRACE` | `300`(초) | 종료 신호 뒤 진행 중 run 대기 |
+| `--log-format` | `RUNNER_LOG_FORMAT` | `text` | `json`이면 ECS 필드 한 줄 JSON(컨테이너 기본) |
+
+종료 코드 0 정상, 2 설정 오류·시작 거부(첫 heartbeat 401/403 = 토큰 철회·오타, claude/git 실행 불가, claude.cmd만 있음).
+
+**루프** — 첫 heartbeat로 토큰·종류(kind) 확인 → 30초마다 heartbeat(`version`=jar 스탬프·`os`·`maxConcurrency`·`runIds` = 실행 중 + 결과 미전송 run).
+응답 `stopRunIds`의 run은 자식 프로세스 트리(claude와 그 자손 gradle·node)를 죽이고 결과를 "러너: 중단됨 — …"(exit ≠ 0, `timedOut=false`)로 보고한다.
+동시 한도 아래면 claim(빈 응답 204면 10초 뒤, 오류면 지터 지수 백오프 최대 5분). 결과 보고는 네트워크 오류·5xx·408·429면 백오프(최대 60초)로 계속
+재시도하고(서버 멱등), 그 밖의 4xx는 버린다. 보내기 전 `pending-results/<runId>.json`에 적어 두고 다음 시작 때 재전송한다(파일에 토큰 없음).
+SIGINT/SIGTERM: claim 중지 → 진행 중 run을 유예까지 기다림(heartbeat 계속) → 남은 run 중단·"러너 종료" 보고(최대 60초) → 종료.
+
+**인증(과금 분리)** — claim에 `llmApiKey`가 있으면(PLATFORM) 워커 호출 env에 `ANTHROPIC_API_KEY`=그 값 **하나만**(러너 env의 다른 인증 키는 싣지 않는다,
+git에는 안 간다). 없으면(LOCAL) 플랫폼 것은 아무것도 넣지 않고, 러너 프로세스 자신의 env에 사람이 둔 `ANTHROPIC_API_KEY`·`CLAUDE_CODE_OAUTH_TOKEN`만
+넘긴다(커튼이 부모 env를 막으므로 넘기지 않으면 사용자 키가 워커에 닿지 않는다) — 둘 다 없으면 그 PC의 구독 로그인(`~/.claude`)으로 돈다. run 토큰은
+서버 인프로세스와 똑같이 클론 밖 `run-<id>-cfg/.mcp-run.json`에만 쓰고 실행 뒤 지운다. LOCAL이면 시작 때 `claude auth status`(JSON `loggedIn`)로
+로그인을 확인해 없으면 경고한다(env 키가 있으면 통과).
+
+**작업 폴더** — `workspaces/run-<id>`(TASK 워크스페이스는 run 뒤에도 지우지 않는다 — REVIEW·반려-fix가 이 러너에 고정돼 서버가 보관한 경로를 이어 쓴다.
+사용 시각 기준 보존 N일 뒤 정리, 진행 중 run의 승계 경로는 제외. 시작 때 남은 `-cfg`(토큰)는 전부 삭제, Windows 읽기 전용 git 객체도 지운다) ·
+`harness/<sha256>/`(서버 zip을 풀어 둔 캐시 — claim의 `harness.sha256`이 같으면 받지 않고, 다르면 `If-None-Match`로 받는다. ETag와 해시가 다르면 거부,
+zip-slip(절대 경로·드라이브·`..`·대상 밖) 항목이 하나라도 있으면 번들 전체 거부, 2만 항목·256MB 상한, 최근 3개 보존. 내려받기가 실패하면 캐시된 최신
+번들로 실행) · `pending-results/` · `runner.alive`(마지막 heartbeat 성공 시각 — 컨테이너 HEALTHCHECK).
+
+**Windows** — claude 찾기: `CLAUDE_BIN`/`--claude-bin` > PATH의 `claude.exe`(네이티브 설치 `%USERPROFILE%\.local\bin`) > npm 셔임 `claude.cmd` 옆의
+`node_modules\@anthropic-ai\claude-code\bin\claude.exe`. `claude.cmd`만 있으면 시작을 거부한다 — `.cmd`는 cmd.exe를 거쳐 여러 줄 프롬프트가 잘린다.
+git이 PATH에 있어야 한다(claude의 Bash 도구가 Git Bash를 git 위치에서 찾는다 — 다른 곳이면 `CLAUDE_CODE_GIT_BASH_PATH` + `--extra-env-keys`).
+Ctrl+C는 같은 콘솔의 claude에도 전달돼 진행 중 run이 곧바로 끝날 수 있다(그 run은 실패로 보고 → 서버에서 사고형 BLOCKED). 콘솔 코드 페이지(949)에서는
+로그의 일부 기호(—)가 `?`로 보인다.
+
+**러너 이미지(`runner/Dockerfile`, 컨텍스트 = 리포 루트)** — §12 지침 그대로(node 단계 claude-code 2.1.283 고정 · `eclipse-temurin:24-jdk` · git·
+ca-certificates + `tini` · Node·npm·corepack(pnpm) · git system 신원 · uid 10001 · `DISABLE_AUTOUPDATER=1`) + `/work` 볼륨 + `tini -- java -jar agent-runner.jar`.
+env 기본값: `RUNNER_WORK_DIR=/work`·`RUNNER_LOG_FORMAT=json`·`CLAUDE_BIN=/usr/local/bin/claude`·`RUNNER_EXTRA_ENV_KEYS=DISABLE_AUTOUPDATER`.
+**플랫폼 비밀 없음** — 입력은 `RUNNER_SERVER`·`RUNNER_TOKEN` 둘뿐, 하네스 마운트·구독 세션 마운트 없음. 포트 없음, HEALTHCHECK는 `runner.alive` 3분 이내.
+크기 약 860MB(2026-09-28 로컬 빌드 실측).
+
+**compose 배선(infra 몫)** — 러너 컨테이너: `RUNNER_SERVER`(nginx 주소 — 컨테이너 안에서 보이는 이름, 리다이렉트 없는 호스트명) · `RUNNER_TOKEN` =
+agent-service의 `AGENT_PLATFORM_RUNNER_TOKEN`과 같은 값 · 명명 볼륨 → `/work` · `stop_grace_period` > `RUNNER_SHUTDOWN_GRACE`+60초 · 플랫폼 내부망(DB·redis·
+내부 API)이 아니라 nginx만 닿는 네트워크. agent-service: `AGENT_IN_PROCESS_EXECUTION=false` · `AGENT_PLATFORM_RUNNER_TOKEN` · `AGENT_RUNNER_PUBLIC_MCP_URL`
+(러너 컨테이너에서 보이는 `<nginx>/api/agent/mcp`). 게이트웨이의 러너 경로 JWT 제외(위 "배포 의존")가 먼저 필요하다 — 없으면 첫 heartbeat 401로 러너가 종료
+코드 2로 멈춘다.
+
+**테스트** — `runner` 모듈: 스텁 HTTP 서버(JDK HttpServer) + 가짜 git/claude로 claim→실행→결과(커밋 링크 포함), PLATFORM 키는 워커 env에만·LOCAL은
+플랫폼 키 없음·git에는 인증 없음, `stopRunIds` 중단 보고, 결과 재시도(503 두 번), 미전송 결과 재전송, 하네스 해시 캐시(두 run에 다운로드 1회), 종료 유예 초과
+중단, 첫 heartbeat 401 종료, 토큰·run 토큰·키가 로그·예외·`toString`에 없음, zip-slip, 워크스페이스 보존, Windows claude 찾기, 실제 프로세스 kill.
+

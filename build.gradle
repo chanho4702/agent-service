@@ -38,6 +38,8 @@ def sharedVersion = providers.gradleProperty('commonProtoVersion').getOrElse('0.
 def grpcVersion = '1.69.0'
 
 dependencies {
+    // 워커 실행부(WorkSpec·WorkerExecution·HarnessMaterializer·CommitLinkParser 등) — 러너 jar와 공유(AGP-69 T3)
+    implementation project(':worker-core')
     implementation "com.platform:common-starter:${sharedVersion}"
     // org PermissionService(CheckPermission) — 프로젝트 ADMIN 판정(P3f)
     implementation "com.platform:common-proto:${sharedVersion}"

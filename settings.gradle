@@ -1,1 +1,5 @@
 rootProject.name = 'agent-service'
+
+// 루트 = 서비스(Spring Boot). worker-core = DB·Spring을 모르는 워커 실행부(서비스와 러너가 같은 코드를 쓴다),
+// runner = 사용자 PC·플랫폼 러너 컨테이너가 도는 실행 파일(agent-runner.jar) — CLAUDE.md §13.
+include 'worker-core', 'runner'
