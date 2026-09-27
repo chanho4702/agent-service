@@ -269,6 +269,49 @@ class MeetingServiceTest {
         verifyNoInteractions(gateRepository);
     }
 
+    // ---- AGP-62: 스킬 요약·진행자 스킬·진행자 기본 모델 ----
+
+    @Test
+    void build_job_carries_attendee_skill_summaries_and_facilitator_expertise() {
+        planner.edit(null, null, null, null, Persona.Edit.set("\n## 요구사항을 수용 기준으로 쪼갠다\n- 범위 관리"), null);
+        Run run = meeting(RunType.RETRO, "PROJECT-1", List.of(1L, 4L));
+        when(personaRepository.findAllById(List.of(1L, 4L))).thenReturn(List.of(planner, backend));
+        when(personaRepository.findById(1L)).thenReturn(Optional.of(planner));
+
+        WorkerJob job = service(props(false)).buildJob(run, "Bearer x");
+
+        assertThat(job.meeting().attendees()).extracting(WorkerJob.Attendee::skillSummary)
+                .containsExactly("요구사항을 수용 기준으로 쪼갠다", null);
+        assertThat(job.expertise().slug()).isEqualTo("seoyeon");
+        assertThat(job.expertise().skillDir()).isEqualTo(".claude/skills/persona-seoyeon");
+    }
+
+    @Test
+    void meeting_models_follow_the_facilitator_default_model_before_project_policy() {
+        planner.edit(null, null, null, Persona.Edit.set("claude-planner"), null, null);
+        backend.edit(null, null, null, Persona.Edit.set("claude-backend"), null, null);
+        manager.edit(null, null, null, Persona.Edit.set("claude-manager"), null, null);
+
+        // 소집 — 진행자는 PLANNER
+        stubProject();
+        Run meeting = service(props(false)).createMeeting(RunType.MEETING, PROJECT_ID, null, "안건", null).run();
+        assertThat(meeting.getModel()).isEqualTo("claude-planner");
+
+        // 자동 에스컬레이션 — 진행자는 그 이슈를 돌린 BACKEND
+        Run blocked = blockedTask(RunTrigger.SCHEDULER);
+        when(runRepository.findTop50ByIssueKeyOrderByIdDesc("AGP-9")).thenReturn(List.of(blocked));
+        service(props(true)).onBlocked(blocked, "r");
+
+        // 매니저 cron — 진행자는 MANAGER
+        when(almClient.listProjects("Bearer m108")).thenReturn(List.of(new ProjectResponse(1L, "AGP", "agent")));
+        service(props(false)).runManagerRounds();
+
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, times(3)).save(saved.capture());
+        assertThat(saved.getAllValues()).extracting(Run::getModel)
+                .containsExactly("claude-planner", "claude-backend", "claude-manager");
+    }
+
     @Test
     void escalation_defaults_to_personas_who_ran_the_issue_plus_reviewer() {
         stubProject();

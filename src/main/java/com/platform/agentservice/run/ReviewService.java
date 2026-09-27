@@ -96,7 +96,7 @@ public class ReviewService {
             return;
         }
 
-        Run review = runRepository.save(Run.queuedReview(run, reviewer.get().getId(), reviewModel(run)));
+        Run review = runRepository.save(Run.queuedReview(run, reviewer.get().getId(), reviewModel(run, reviewer.get())));
         log.info("TASK run={} 완료 → 검증 run={} 생성(리뷰어={})", run.getId(), review.getId(), reviewer.get().getSlug());
         submit(review.getId());
         commentBestEffort(run.getPersonaId(), run.getIssueKey(), "🔍 검증 run " + review.getId() + " 시작 — 리뷰어 "
@@ -151,13 +151,13 @@ public class ReviewService {
         return workspacePath != null && !workspacePath.isBlank() && !RunService.PENDING_WORKSPACE.equals(workspacePath);
     }
 
-    /** D-P2c-5: 리뷰 전용 모델 > 프로젝트별 > 전역 > 워커 기본. REVIEW는 시스템이 띄우는 run이라 USER 지정 단계가 없다. */
-    private String reviewModel(Run task) {
-        String model = reviewProperties.model();
-        if (model != null && !model.isBlank()) {
-            return model.trim();
-        }
-        return schedulerProperties.modelFor(RunService.projectKeyOf(task.getIssueKey()));
+    /**
+     * D-P2c-5 + AGP-62: 리뷰 전용 모델 > 리뷰어 페르소나 기본 모델 > 프로젝트별 > 전역 > 워커 기본. REVIEW는 시스템이 띄우는 run이라
+     * USER 지정 단계가 없고, 작업자(부모 TASK)의 모델을 이어받지 않는다.
+     */
+    private String reviewModel(Run task, Persona reviewer) {
+        return schedulerProperties.resolveModel(reviewProperties.model(), reviewer.getDefaultModel(),
+                RunService.projectKeyOf(task.getIssueKey()));
     }
 
     /**

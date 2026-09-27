@@ -57,6 +57,22 @@ public record SchedulerProperties(
     }
 
     /**
+     * run 모델 해석의 단일 지점(AGP-62): {@code override} > 페르소나 기본 모델 > {@link #modelFor 프로젝트 맵 > 전역 기본} >
+     * {@code null}(워커 기본). {@code override}는 USER run의 요청 {@code model}, REVIEW run의 {@code REVIEW_MODEL}이다 — 스케줄러
+     * 픽업·회의처럼 요청 단계가 없는 run은 null을 넘긴다. 페르소나는 run 소유자(회의는 진행자, REVIEW는 리뷰어)다. 빈 문자열은
+     * 모든 단계에서 미지정으로 본다. continuation(게이트 승인·재개·반려-fix)은 이 해석을 다시 타지 않고 직전 run 모델을 승계한다.
+     */
+    public String resolveModel(String override, String personaDefaultModel, String projectKey) {
+        if (override != null && !override.isBlank()) {
+            return override.trim();
+        }
+        if (personaDefaultModel != null && !personaDefaultModel.isBlank()) {
+            return personaDefaultModel.trim();
+        }
+        return modelFor(projectKey);
+    }
+
+    /**
      * 프로젝트별 맵(대소문자 무관) → 전역 기본 → {@code null}(워커 기본) 순으로 해석한다. 빈 문자열은
      * 미지정으로 본다 — {@code ${ENV:}} 형태의 빈 기본값이 {@code --model ""}로 새지 않게 한다.
      */

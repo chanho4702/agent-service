@@ -132,6 +132,22 @@ class OfficeServiceTest {
         assertThat(res.generatedAt()).isEqualTo(now);
     }
 
+    /** AGP-62 — 사무실은 관리 권한을 보지 않는 표면이라 아바타만 싣고 스킬·기본 모델은 싣지 않는다. */
+    @Test
+    void 아바타_설정은_싣고_스킬과_기본_모델은_싣지_않는다() throws Exception {
+        Persona p = persona(1L, "jiho", PersonaRole.BACKEND);
+        p.edit(null, null, null, Persona.Edit.set("claude-secret-model"), Persona.Edit.set("비공개 스킬 본문"),
+                Persona.Edit.set("{\"v\":1,\"hairStyle\":\"bob\"}"));
+        personas.saveAndFlush(p);
+
+        OfficeResponse res = service.office(null);
+
+        assertThat(res.personas().get(0).avatarConfig()).isEqualTo("{\"v\":1,\"hairStyle\":\"bob\"}");
+        String json = new com.fasterxml.jackson.databind.ObjectMapper().findAndRegisterModules().writeValueAsString(res);
+        assertThat(json).contains("\"avatarConfig\"").doesNotContain("skills").doesNotContain("defaultModel")
+                .doesNotContain("비공개 스킬 본문").doesNotContain("claude-secret-model");
+    }
+
     @Test
     void run이_없는_페르소나는_유휴로_나온다() {
         persona(1L, "jiho", PersonaRole.BACKEND);

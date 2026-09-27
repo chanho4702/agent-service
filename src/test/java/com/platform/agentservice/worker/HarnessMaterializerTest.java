@@ -124,4 +124,70 @@ class HarnessMaterializerTest {
         assertThat(workspace.resolve("CLAUDE.md")).doesNotExist();
         assertThat(result.copied()).noneMatch(p -> p.endsWith("CLAUDE.md"));
     }
+
+    // ---- AGP-62: 페르소나 스킬 실체화 ----
+
+    private static final WorkerJob.Expertise JIHO = new WorkerJob.Expertise("jiho", "지호", "BACKEND",
+            "## 백엔드: 장애를 \"조용히\" 삼키지 않는다\n- 409/503 계약을 지킨다\n");
+
+    @Test
+    void persona_skill_is_written_as_claude_code_skill_with_frontmatter() throws IOException {
+        Path file = materializerWith(bundleDir, List.of()).materializePersonaSkill(workspace, JIHO);
+
+        assertThat(file).isEqualTo(workspace.resolve(".claude/skills/persona-jiho/SKILL.md").toAbsolutePath().normalize());
+        String md = Files.readString(file);
+        assertThat(md).startsWith("---\nname: persona-jiho\ndescription: \"지호(BACKEND)의 전문성과 작업 방식 — "
+                + "백엔드: 장애를 \\\"조용히\\\" 삼키지 않는다. 이 페르소나로 작업·리뷰·회의할 때 참고한다.\"\n---\n\n");
+        assertThat(md).contains(HarnessMaterializer.GENERATED_MARKER);
+        assertThat(md).endsWith("## 백엔드: 장애를 \"조용히\" 삼키지 않는다\n- 409/503 계약을 지킨다\n");
+    }
+
+    @Test
+    void no_skills_creates_nothing() {
+        HarnessMaterializer m = materializerWith(bundleDir, List.of());
+
+        assertThat(m.materializePersonaSkill(workspace, null)).isNull();
+        assertThat(m.materializePersonaSkill(workspace, new WorkerJob.Expertise("jiho", "지호", "BACKEND", "  \n"))).isNull();
+        assertThat(workspace.resolve(".claude/skills")).doesNotExist();
+    }
+
+    @Test
+    void unsafe_slug_cannot_escape_the_skills_directory() {
+        HarnessMaterializer m = materializerWith(bundleDir, List.of());
+
+        for (String slug : List.of("../../evil", "..", "a/b", "A-B", "x", "a\\b")) {
+            assertThat(m.materializePersonaSkill(workspace, new WorkerJob.Expertise(slug, "n", "BACKEND", "skill"))).isNull();
+        }
+        assertThat(workspace.resolve(".claude/skills")).doesNotExist();
+        assertThat(root.resolve("evil")).doesNotExist();
+    }
+
+    @Test
+    void repo_owned_file_at_the_same_path_wins_but_generated_file_is_refreshed() throws IOException {
+        HarnessMaterializer m = materializerWith(bundleDir, List.of());
+        Path file = workspace.resolve(".claude/skills/persona-jiho/SKILL.md");
+        Files.createDirectories(file.getParent());
+        Files.writeString(file, "repo skill");
+
+        assertThat(m.materializePersonaSkill(workspace, JIHO)).isNull();
+        assertThat(Files.readString(file)).isEqualTo("repo skill");
+
+        Files.delete(file);
+        m.materializePersonaSkill(workspace, JIHO);
+        m.materializePersonaSkill(workspace, new WorkerJob.Expertise("jiho", "지호", "BACKEND", "새 스킬"));
+        assertThat(Files.readString(file)).endsWith("새 스킬\n");
+    }
+
+    @Test
+    void git_clone_excludes_the_generated_skill_dir_once() throws IOException {
+        Files.createDirectories(workspace.resolve(".git/info"));
+        Files.writeString(workspace.resolve(".git/info/exclude"), "# git ls-files --others --exclude-from=.git/info/exclude");
+        HarnessMaterializer m = materializerWith(bundleDir, List.of());
+
+        m.materializePersonaSkill(workspace, JIHO);
+        m.materializePersonaSkill(workspace, JIHO);
+
+        assertThat(Files.readString(workspace.resolve(".git/info/exclude")))
+                .isEqualTo("# git ls-files --others --exclude-from=.git/info/exclude\n/.claude/skills/persona-jiho/\n");
+    }
 }

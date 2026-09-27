@@ -155,7 +155,7 @@ public class RunService {
         projectGuard.accept(issue.projectId());
 
         requireNoActiveRun(issue.key());
-        String resolvedModel = isBlank(model) ? schedulerProperties.modelFor(projectKeyOf(issue.key())) : model.trim();
+        String resolvedModel = schedulerProperties.resolveModel(model, persona.getDefaultModel(), projectKeyOf(issue.key()));
         Run run = Run.queuedUser(issue.key(), issue.projectId(), persona.getId(), DEFAULT_HARNESS_REF,
                 resolvedModel, isBlank(instruction) ? null : instruction.trim());
         return runRepository.save(run);
@@ -290,7 +290,13 @@ public class RunService {
                 .map(CommentResponse::body)
                 .toList();
 
-        return new WorkerJob(repoUrl, claimed.title(), claimed.description(), recentComments, run.getInstruction());
+        return new WorkerJob(repoUrl, claimed.title(), claimed.description(), recentComments, run.getInstruction())
+                .withExpertise(expertiseOf(persona));
+    }
+
+    /** run 소유 페르소나의 스킬(AGP-62) — 없으면 null이라 워크스페이스·프롬프트가 이전과 같다. */
+    static WorkerJob.Expertise expertiseOf(Persona persona) {
+        return WorkerJob.Expertise.of(persona.getSlug(), persona.getName(), persona.getRole().name(), persona.getSkills());
     }
 
     /** F3(fix round, task-7): 대소문자 무관 조회 — env var 주입 시 Spring relaxed binding이 맵 키를 소문자로 접기 때문. */

@@ -215,6 +215,23 @@ class ReviewServiceTest {
         assertThat(saved.getValue().getModel()).isEqualTo("claude-project");
     }
 
+    /** AGP-62 — REVIEW_MODEL > 리뷰어 persona.defaultModel > 프로젝트 맵. 작업자 페르소나의 모델은 보지 않는다. */
+    @Test
+    void review_model_uses_reviewer_default_model_below_review_setting_and_ignores_worker_default() {
+        reviewer.edit(null, null, null, Persona.Edit.set("claude-reviewer"), null, null);
+        worker.edit(null, null, null, Persona.Edit.set("claude-worker"), null, null);
+        when(personaRepository.findBySlug("sora")).thenReturn(Optional.of(reviewer));
+        SchedulerProperties policy = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-global", Map.of("AGP", "claude-project"));
+
+        service(new ReviewProperties(true, "sora", null), policy).onRunDone(doneTask(WORKSPACE, 1));
+        service(new ReviewProperties(true, "sora", "claude-fable-5-1"), policy).onRunDone(doneTask(WORKSPACE, 1));
+
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.times(2)).save(saved.capture());
+        assertThat(saved.getAllValues()).extracting(Run::getModel).containsExactly("claude-reviewer", "claude-fable-5-1");
+    }
+
     @Test
     void review_done_creates_nothing_so_reviews_cannot_loop() {
         Run task = doneTask(WORKSPACE, 1);

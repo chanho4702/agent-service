@@ -26,6 +26,12 @@ public class Persona {
     @Column(nullable = false) private boolean active = true;
     /** 소속 ALM 프로젝트 — null이면 전사 공용(전역 관리자만 관리, D-P3f-3). 생성 후 불변이다. */
     private Long projectId;
+    /** 기본 모델(AGP-62) — run.model과 같은 폭. 모델 해석 순서는 {@code SchedulerProperties.resolveModel}. */
+    @Column(length = 60) private String defaultModel;
+    /** 전문성 마크다운(AGP-62) — 워커 워크스페이스에 SKILL.md로 실체화된다({@code HarnessMaterializer}). */
+    @Column(columnDefinition = "text") private String skills;
+    /** 사무실 아바타 설정 JSON 문자열(AGP-62) — 형태 검증은 {@code AvatarConfigValidator}. */
+    @Column(columnDefinition = "text") private String avatarConfig;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
     @UpdateTimestamp @Column(nullable = false) private Instant updatedAt;
 
@@ -46,6 +52,31 @@ public class Persona {
         this.name = name;
         this.emoji = emoji;
         this.voicePrompt = voicePrompt;
+    }
+
+    /**
+     * 관리자 편집(AGP-62, {@code PATCH /api/agent/personas/{id}}). 인자는 이미 검증·정규화된 값이다 — {@code null}이면 그 필드를
+     * 건드리지 않고, {@link Edit#clear}면 지운다(name은 호출측이 지우기를 거부한다).
+     */
+    public void edit(Edit<String> name, Edit<String> emoji, Edit<String> voicePrompt, Edit<String> defaultModel,
+                     Edit<String> skills, Edit<String> avatarConfig) {
+        if (name != null) this.name = name.value();
+        if (emoji != null) this.emoji = emoji.value();
+        if (voicePrompt != null) this.voicePrompt = voicePrompt.value();
+        if (defaultModel != null) this.defaultModel = defaultModel.value();
+        if (skills != null) this.skills = skills.value();
+        if (avatarConfig != null) this.avatarConfig = avatarConfig.value();
+    }
+
+    /** 부분 갱신의 한 필드 — 객체가 있으면 "이 값으로 바꾼다"(value가 null이면 지움), 객체 자체가 null이면 "그대로". */
+    public record Edit<T>(T value) {
+        public static <T> Edit<T> set(T value) {
+            return new Edit<>(value);
+        }
+
+        public static <T> Edit<T> clear() {
+            return new Edit<>(null);
+        }
     }
 
     /** 관리자 활성/비활성 전환(AGP-29). 재부트스트랩({@link #refresh})은 이 값을 건드리지 않는다. */

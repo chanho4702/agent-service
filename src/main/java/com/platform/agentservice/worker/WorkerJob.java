@@ -1,5 +1,7 @@
 package com.platform.agentservice.worker;
 
+import com.platform.agentservice.persona.PersonaSkills;
+
 import java.util.List;
 
 /**
@@ -16,7 +18,12 @@ import java.util.List;
  * <p>{@code meeting}은 회의 run(P3b)에만 있다 — 회의 run은 clone하지 않으므로 {@code repoUrl}이 {@code null}이다.
  */
 public record WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments,
-                        String instruction, MeetingContext meeting) {
+                        String instruction, MeetingContext meeting, Expertise expertise) {
+
+    public WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments,
+                     String instruction, MeetingContext meeting) {
+        this(repoUrl, issueTitle, issueBody, recentComments, instruction, meeting, null);
+    }
 
     /** 지시문이 없는 자동화 run용. */
     public WorkerJob(String repoUrl, String issueTitle, String issueBody, List<String> recentComments) {
@@ -45,7 +52,35 @@ public record WorkerJob(String repoUrl, String issueTitle, String issueBody, Lis
         }
     }
 
-    /** 참석 페르소나 — 첫 번째가 진행자. {@code voice}는 페르소나 말투(voicePrompt, 없으면 null). */
-    public record Attendee(String slug, String name, String role, String emoji, String voice) {
+    public WorkerJob withExpertise(Expertise expertise) {
+        return new WorkerJob(repoUrl, issueTitle, issueBody, recentComments, instruction, meeting, expertise);
+    }
+
+    /**
+     * 참석 페르소나 — 첫 번째가 진행자. {@code voice}는 페르소나 말투(voicePrompt, 없으면 null), {@code skillSummary}는 스킬 첫 줄
+     * 요약(AGP-62, {@code PersonaSkills.summary} — 없으면 null).
+     */
+    public record Attendee(String slug, String name, String role, String emoji, String voice, String skillSummary) {
+
+        public Attendee(String slug, String name, String role, String emoji, String voice) {
+            this(slug, name, role, emoji, voice, null);
+        }
+    }
+
+    /**
+     * run 소유 페르소나의 스킬(AGP-62) — {@link HarnessMaterializer}가 워크스페이스 {@code .claude/skills/persona-<slug>/SKILL.md}로
+     * 실체화하고 프롬프트가 그 경로를 가리킨다. 스킬이 없는 페르소나는 {@code null}({@link #of}).
+     */
+    public record Expertise(String slug, String name, String role, String skills) {
+
+        public static Expertise of(String slug, String name, String role, String skills) {
+            return PersonaSkills.hasSkills(skills) ? new Expertise(slug, name, role, skills) : null;
+        }
+
+        /** 워크스페이스 기준 스킬 디렉터리({@code .claude/skills/persona-<slug>}), slug가 경로로 안전하지 않으면 null. */
+        public String skillDir() {
+            String dir = PersonaSkills.dirName(slug);
+            return dir == null ? null : ".claude/skills/" + dir;
+        }
     }
 }

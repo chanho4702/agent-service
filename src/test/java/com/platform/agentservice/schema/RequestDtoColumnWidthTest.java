@@ -4,6 +4,7 @@ import com.platform.agentservice.pat.PatToken;
 import com.platform.agentservice.pat.dto.PatCreateRequest;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
+import com.platform.agentservice.persona.dto.PersonaUpdateRequest;
 import com.platform.agentservice.run.Run;
 import com.platform.agentservice.run.dto.MeetingCreateRequest;
 import com.platform.agentservice.run.dto.UserRunCreateRequest;
@@ -37,6 +38,9 @@ class RequestDtoColumnWidthTest {
         return Stream.of(
                 Arguments.of(PersonaCreateRequest.class, "name", Persona.class, "name", 80),
                 Arguments.of(PersonaCreateRequest.class, "emoji", Persona.class, "emoji", 16),
+                Arguments.of(PersonaUpdateRequest.class, "name", Persona.class, "name", 80),
+                Arguments.of(PersonaUpdateRequest.class, "emoji", Persona.class, "emoji", 16),
+                Arguments.of(PersonaUpdateRequest.class, "defaultModel", Persona.class, "defaultModel", 60),
                 Arguments.of(PatCreateRequest.class, "label", PatToken.class, "label", 120),
                 Arguments.of(UserRunCreateRequest.class, "issueKey", Run.class, "issueKey", 40),
                 Arguments.of(UserRunCreateRequest.class, "model", Run.class, "model", 60),

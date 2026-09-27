@@ -326,6 +326,55 @@ class RunServiceTest {
         assertThat(globalOnly.createUserRun(ISSUE_KEY, null, null, null, NO_GUARD).getModel()).isEqualTo("claude-global");
     }
 
+    // ---- AGP-62: 페르소나 기본 모델 층 — USER 요청 > persona.defaultModel > 프로젝트 맵 > 전역 ----
+
+    private Persona personaWithModel(String defaultModel) {
+        Persona p = persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho");
+        p.edit(null, null, null, Persona.Edit.set(defaultModel), null, null);
+        return p;
+    }
+
+    @Test
+    void createUserRun_persona_default_model_sits_between_request_and_project_policy() {
+        RunService service = serviceWith(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-global", Map.of("AGP", "claude-project")));
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(personaWithModel("claude-persona")));
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(issue(1L, ISSUE_KEY, "todo", 1));
+        stubSaveReturnsArgument();
+
+        assertThat(service.createUserRun(ISSUE_KEY, null, "claude-user", null, NO_GUARD).getModel()).isEqualTo("claude-user");
+        assertThat(service.createUserRun(ISSUE_KEY, null, " ", null, NO_GUARD).getModel()).isEqualTo("claude-persona");
+    }
+
+    @Test
+    void execute_passes_persona_skills_as_expertise_and_none_without_skills() {
+        Persona skilled = persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho");
+        skilled.edit(null, null, null, null, Persona.Edit.set("# 백엔드 장인\n- 테스트 먼저"), null);
+        when(personaRepository.findById(PERSONA_ID)).thenReturn(Optional.of(skilled));
+        Run run = queuedRun(52L);
+        when(runRepository.findById(52L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(
+                new WorkerResult(0, false, "ok", null, null, 0L, 0L, null, "raw", null));
+
+        runService.execute(52L);
+
+        ArgumentCaptor<WorkerJob> jobCaptor = ArgumentCaptor.forClass(WorkerJob.class);
+        verify(workerLauncher).launch(any(Run.class), jobCaptor.capture());
+        WorkerJob.Expertise expertise = jobCaptor.getValue().expertise();
+        assertThat(expertise.slug()).isEqualTo("jiho");
+        assertThat(expertise.skills()).isEqualTo("# 백엔드 장인\n- 테스트 먼저");
+        assertThat(expertise.skillDir()).isEqualTo(".claude/skills/persona-jiho");
+
+        assertThat(RunService.expertiseOf(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho"))).isNull();
+    }
+
     @Test
     void createUserRun_blank_instruction_is_stored_as_null() {
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona(PERSONA_ID, PERSONA_MEMBER_ID, "jiho")));

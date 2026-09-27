@@ -2,6 +2,7 @@ package com.platform.agentservice.chat;
 
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRole;
+import com.platform.agentservice.persona.PersonaSkills;
 import com.platform.agentservice.run.Run;
 
 import java.util.ArrayList;
@@ -26,10 +27,13 @@ final class ChatPromptBuilder {
         String situation = currentRun == null
                 ? "- 지금 맡은 작업 없음(쉬는 중)"
                 : "- 지금 맡은 작업: " + currentRun.getIssueKey() + " · 상태 " + currentRun.getStatus() + " · 종류 " + currentRun.getType();
+        // 스킬은 요약 한 줄만(AGP-62) — 전문을 싣으면 수다 비용이 늘고, 잡담 캐릭터에 필요한 건 "무엇을 잘하는지"뿐이다.
+        String summary = PersonaSkills.summary(persona.getSkills());
+        String strengths = summary == null ? "" : "잘하는 것: " + summary + "\n";
         return """
                 너는 AI 개발팀 사무실의 팀원 "%s"(역할: %s)이다. 사무실에 찾아온 사람과 짧게 잡담한다.
                 말투: %s
-
+                %s
                 ## 지금 상황
                 %s
 
@@ -44,7 +48,7 @@ final class ChatPromptBuilder {
                 답변을 쓴 뒤 줄을 바꿔 맨 마지막 줄에 메타 한 줄을 정확히 이 형식으로 붙인다:
                 %s {"mood":"NEUTRAL","suggest":null}
                 mood는 NEUTRAL·THINKING·HAPPY·TROUBLED 중 답변 분위기에 맞는 하나. suggest는 상대가 일을 시키려는 메시지면 "DIRECTIVE", 아니면 null.
-                """.formatted(persona.getName(), roleLabel(persona.getRole()), voice, situation, USER_OPEN,
+                """.formatted(persona.getName(), roleLabel(persona.getRole()), voice, strengths, situation, USER_OPEN,
                 ChatReplyParser.META_MARKER);
     }
 

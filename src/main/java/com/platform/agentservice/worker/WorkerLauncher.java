@@ -121,6 +121,8 @@ public class WorkerLauncher {
             harnessMaterializer.materialize(workspace);
             mcpConfigDir = mcpConfigDirFor(workspace);
         }
+        // 계보 run도 쓴다 — REVIEW는 작업자와 다른 페르소나(리뷰어)라 승계 워크스페이스에 리뷰어 스킬이 있어야 한다(AGP-62).
+        harnessMaterializer.materializePersonaSkill(workspace, job.expertise());
 
         // 토큰 발급 전에 해석한다 — 해석이 던지면(DB 장애) 철회할 토큰이 아직 없다. 실패를 env 폴백으로 삼키지 않는 이유:
         // 프로젝트 키가 있는데 조용히 전역·호스트 인증으로 돌면 과금 주체가 바뀐다(실행 인프라 오류 → 사고형 BLOCKED가 맞다).
@@ -265,9 +267,29 @@ public class WorkerLauncher {
         } else {
             appendTaskConvention(sb, run);
         }
+        appendExpertise(sb, job);
         sb.append('\n');
         sb.append("runId=").append(run.getId()).append('\n');
         return sb.toString();
+    }
+
+    /**
+     * run 페르소나 스킬 안내 한 줄(AGP-62) — {@link HarnessMaterializer#materializePersonaSkill}이 쓰는 경로와 같은 규칙으로 만든다.
+     * 스킬이 없으면 아무것도 붙이지 않는다(스킬 없는 페르소나의 프롬프트는 이전과 바이트 단위로 같다).
+     */
+    private static void appendExpertise(StringBuilder sb, WorkerJob job) {
+        WorkerJob.Expertise expertise = job.expertise();
+        String dir = expertise == null ? null : expertise.skillDir();
+        if (dir != null) {
+            sb.append("- 너의 전문성: ").append(dir).append(" 참고(SKILL.md — 이 페르소나의 작업 방식·기준을 따른다).\n");
+        }
+    }
+
+    /** 참석자 소개에 붙는 스킬 요약(AGP-62) — 없으면 아무것도 붙이지 않는다. */
+    private static void appendSkillSummary(StringBuilder sb, WorkerJob.Attendee a) {
+        if (a.skillSummary() != null && !a.skillSummary().isBlank()) {
+            sb.append(" · 잘하는 것: ").append(a.skillSummary());
+        }
     }
 
     private void appendTaskConvention(StringBuilder sb, Run run) {
@@ -355,6 +377,7 @@ public class WorkerLauncher {
             if (a.voice() != null && !a.voice().isBlank()) {
                 sb.append(" · 말투: ").append(a.voice());
             }
+            appendSkillSummary(sb, a);
             sb.append('\n');
         }
         sb.append('\n');
@@ -431,6 +454,7 @@ public class WorkerLauncher {
         sb.append("- 너는 진행자 ").append(facilitator.name()).append("(slug=").append(facilitator.slug())
                 .append(")다. 참석자를 위 순서대로 한 명씩 롤플레이해 각자의 롤 책임과 말투로 발언하게 하고, "
                         + "쟁점을 정리한 뒤 결정을 내린다. 명단에 없는 참석자를 지어내지 마라.\n");
+        appendExpertise(sb, job);
         sb.append("- 이 run은 회의 run이라 워크스페이스에 코드가 없다(리포를 clone하지 않았다). 코드를 수정·커밋하지 말고 git 명령을 쓰지 마라.\n");
         sb.append("- 맥락은 도구로 조회한다: get_project_context(projectId=").append(meeting.projectId())
                 .append(")로 스킴·명단, search_issues·get_issue로 관련 이슈, find_pages(spaceId=").append(meeting.spaceId())
@@ -510,6 +534,7 @@ public class WorkerLauncher {
         if (manager.voice() != null && !manager.voice().isBlank()) {
             sb.append(" · 말투: ").append(manager.voice());
         }
+        appendSkillSummary(sb, manager);
         sb.append("\n\n");
 
         List<String> blocks = new ArrayList<>();
@@ -532,6 +557,7 @@ public class WorkerLauncher {
         sb.append("## 매니저 규약\n");
         sb.append("- 너는 매니저 ").append(manager.name()).append("(slug=").append(manager.slug())
                 .append(")다. 보드를 정리하고 팀을 독려하고 사람에게 보고한다. 실무자가 아니다.\n");
+        appendExpertise(sb, job);
         sb.append("- 금지: 이슈 claim(claim_issue), 이슈 상태 전이(update_issue_status), 작업 기록(log_work·link_pr), "
                 + "코드 수정·커밋·git 명령. 이 run은 워크스페이스에 코드가 없다(리포를 clone하지 않았다).\n");
         sb.append("- 배분은 못 한다 — 담당자를 바꾸는 도구가 없다. 담당 제안은 add_comment로 남긴다.\n");

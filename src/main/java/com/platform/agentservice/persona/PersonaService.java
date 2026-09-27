@@ -4,12 +4,15 @@ import com.platform.agentservice.client.AuthTokenClient;
 import com.platform.agentservice.client.OrgClient;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.agentservice.persona.dto.PersonaResponse;
+import com.platform.agentservice.persona.dto.PersonaUpdateRequest;
+import com.platform.agentservice.tools.ToolInputGuard;
 import com.platform.common.error.NotFoundException;
 import lombok.RequiredArgsConstructor;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.util.List;
+import java.util.regex.Pattern;
 
 @Service
 @RequiredArgsConstructor
@@ -79,6 +82,69 @@ public class PersonaService {
                 .orElseThrow(() -> new NotFoundException("페르소나를 찾을 수 없습니다: " + id));
         persona.changeActive(active);
         return PersonaResponse.from(persona);
+    }
+
+    /**
+     * 관리자 편집(AGP-62). 전 필드를 먼저 검증한 뒤 한꺼번에 반영한다 — 한 필드가 400이면 아무것도 바뀌지 않는다. 권한은 컨트롤러
+     * 앞단({@code AgentAuthz.canManagePersona})이 이미 봤다. 오류 문구에는 입력값을 싣지 않는다(위치·사유만).
+     */
+    @Transactional
+    public PersonaResponse edit(long id, PersonaUpdateRequest req) {
+        Persona persona = personaRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("페르소나를 찾을 수 없습니다: " + id));
+        Persona.Edit<String> name = nameEdit(req.name());
+        Persona.Edit<String> emoji = textEdit("emoji", req.emoji());
+        Persona.Edit<String> voicePrompt = textEdit("voicePrompt", req.voicePrompt());
+        Persona.Edit<String> defaultModel = modelEdit(req.defaultModel());
+        Persona.Edit<String> skills = textEdit("skills", req.skills());
+        Persona.Edit<String> avatarConfig = avatarEdit(req.avatarConfig());
+        persona.edit(name, emoji, voicePrompt, defaultModel, skills, avatarConfig);
+        return PersonaResponse.from(persona);
+    }
+
+    /** CLI 인자({@code --model})가 되는 값 — 공백·따옴표는 Windows 인자 재조립에서 깨진다(F1). 실제 모델 id 문자만 허용. */
+    private static final Pattern MODEL_ID = Pattern.compile("[A-Za-z0-9._:@/\\[\\]-]{1,60}");
+
+    private static Persona.Edit<String> nameEdit(String raw) {
+        if (raw == null) return null;
+        String value = raw.strip();
+        if (value.isEmpty()) {
+            throw new IllegalArgumentException("name은 비울 수 없습니다");
+        }
+        requireEncoding("name", value);
+        return Persona.Edit.set(value);
+    }
+
+    private static Persona.Edit<String> textEdit(String field, String raw) {
+        if (raw == null) return null;
+        String value = raw.strip();
+        if (value.isEmpty()) return Persona.Edit.clear();
+        requireEncoding(field, value);
+        return Persona.Edit.set(value);
+    }
+
+    private static Persona.Edit<String> modelEdit(String raw) {
+        Persona.Edit<String> edit = textEdit("defaultModel", raw);
+        if (edit != null && edit.value() != null && !MODEL_ID.matcher(edit.value()).matches()) {
+            throw new IllegalArgumentException("defaultModel은 영문·숫자와 . _ : @ / [ ] - 만 쓸 수 있습니다(60자 이하)");
+        }
+        return edit;
+    }
+
+    private static Persona.Edit<String> avatarEdit(Object raw) {
+        if (raw == null) return null;
+        if (raw instanceof String text) {
+            if (text.isBlank()) return Persona.Edit.clear();
+            requireEncoding("avatarConfig", text);
+        }
+        return Persona.Edit.set(AvatarConfigValidator.normalize(raw));
+    }
+
+    private static void requireEncoding(String field, String value) {
+        String reason = ToolInputGuard.invalidReason(value);
+        if (reason != null) {
+            throw new IllegalArgumentException(field + " 입력 인코딩 거부: " + reason);
+        }
     }
 
     @Transactional(readOnly = true)

@@ -4,6 +4,7 @@ import com.platform.agentservice.authz.AgentCaller;
 import com.platform.agentservice.persona.dto.PersonaActiveRequest;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.agentservice.persona.dto.PersonaResponse;
+import com.platform.agentservice.persona.dto.PersonaUpdateRequest;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpHeaders;
@@ -51,6 +52,16 @@ public class PersonaController {
     @PreAuthorize("@agentAuthz.canManagePersona(authentication, #id)")
     public PersonaResponse changeActive(@PathVariable long id, @Valid @RequestBody PersonaActiveRequest request) {
         return personaService.changeActive(id, request.active());
+    }
+
+    /**
+     * 직원 편집(AGP-62) — 표시 필드·기본 모델·스킬·아바타 부분 갱신. 권한은 활성 토글과 같다(소속 프로젝트 관리자, 공용은 전역만).
+     * null=그대로, 빈 문자열=지움(name은 400).
+     */
+    @PatchMapping("/{id}")
+    @PreAuthorize("@agentAuthz.canManagePersona(authentication, #id)")
+    public PersonaResponse edit(@PathVariable long id, @Valid @RequestBody PersonaUpdateRequest request) {
+        return personaService.edit(id, request);
     }
 
     @GetMapping

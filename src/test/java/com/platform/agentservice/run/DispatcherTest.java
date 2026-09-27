@@ -182,6 +182,31 @@ class DispatcherTest {
         verify(runService).createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq("claude-sonnet-5"));
     }
 
+    /** AGP-62 — 스케줄러 픽업에는 요청 단계가 없으므로 페르소나 기본 모델이 프로젝트 맵보다 앞선다. */
+    @Test
+    void pickup_prefers_persona_default_model_over_project_policy() {
+        when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
+        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        Persona persona = persona();
+        persona.edit(null, null, null, Persona.Edit.set("claude-persona"), null, null);
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona));
+        when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
+
+        IssueResponse issue = issue(1L, "AGP-1", 9L);
+        when(almClient.search(any(), any(), any(), any(), any(), any(), eq(BEARER)))
+                .thenReturn(new IssuePageResponse(List.of(issue), 0, 20, 1));
+        when(runRepository.existsByIssueKeyAndStatusIn("AGP-1", RunService.ACTIVE_STATUSES)).thenReturn(false);
+        when(budgetGuard.allow(9L)).thenReturn(true);
+        when(runRepository.countByStatusInAndProjectId(CONCURRENCY_STATUSES, 9L)).thenReturn(0L);
+        when(runService.createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq("claude-persona"))).thenReturn(queuedRun(104L));
+
+        dispatcher(new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3,
+                "claude-sonnet-5", java.util.Map.of("AGP", "claude-opus-5-5"))).tick();
+
+        verify(runService).createQueuedForIssue(any(), eq(RunTrigger.SCHEDULER), eq("claude-persona"));
+        verify(runService).execute(104L);
+    }
+
     // ---- skips issue with active run, moves to next ----
 
     @Test

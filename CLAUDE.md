@@ -93,7 +93,7 @@ curl -s -X POST $GATEWAY/api/agent/tokens \
 PAT 관리: `GET /api/agent/tokens`(관리자만 — AGP-21, 라벨·페르소나·사용 시각도 운영 정보라 일반 사용자에게 닫았다. 해시는
 어느 응답에도 노출 안 함. P3f: 전역 관리자는 전체, 프로젝트 관리자는 `?projectId=`로 자기 프로젝트 페르소나 토큰만) ·
 `DELETE /api/agent/tokens/{id}`(관리자만 — 페르소나 소속 기준). "관리자"의 정의는 §7(P3f). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자
-누구나 — JWT 필요, 슬러그/역할/emoji/active/projectId만 노출).
+누구나 — JWT 필요, 슬러그/역할/이름/emoji/active/projectId + AGP-62 편집 필드 defaultModel·skills·avatarConfig). 직원 편집은 §10.
 
 페르소나 활성/비활성(AGP-29): `PATCH /api/agent/personas/{id}/active`(관리자만 — §7, 페르소나 소속 프로젝트 기준, body `{"active": true|false}` → 200
 `PersonaResponse`, 없는 id 404, `active` 누락 400). 비활성 페르소나의 **사람용 PAT은 다음 요청부터 401**(`PatService.validate`
@@ -266,15 +266,23 @@ attempt=1부터 무한 재픽업하는 회귀가 난다, task-7 E2E 실측).
 **폐기 설정**: `SCHEDULER_RETRY_MAX_ATTEMPTS`(`scheduler.retry-max-attempts`)는 기존 배포 env가 기동을 깨지 않게 바인딩만
 남아 있고 **코드는 읽지 않는다**(값이 무엇이든 무시). 반려 한도는 `REVIEW_REJECT_MAX`로 옮겨 갔다.
 
-**모델 정책(P2c)** — run의 `--model`은 다음 순서로 정해진다(`SchedulerProperties.modelFor`):
-USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.project-models.<KEY>`(대소문자
-무관 조회) > 전역 기본 `SCHEDULER_DEFAULT_MODEL`(`scheduler.default-model`) > 비움(`--model`
-생략, 워커 기본 모델). 스케줄러 픽업 run은 요청 단계가 없으므로 맵부터 본다. 프로젝트별 맵은
-위 `repos`와 같은 relaxed binding 함정(env var로 넣으면 키가 소문자로 접힘)이 있어 조회가 대소문자
-무관이긴 하지만, 주입은 프로그램 인자(`--platform.agent.scheduler.project-models.AGP=...`)를
-권장한다. REVIEW run은 `REVIEW_MODEL`(`review.model`) > 프로젝트 맵 > 전역 기본 순이며 부모 TASK
-(USER가 지정한 모델 포함)의 모델을 이어받지 않는다. 반려-fix run은 원 TASK run의 모델을 그대로
-승계한다. 게이트 승인·재개 continuation도 직전 run의 모델을 승계한다.
+**모델 정책(P2c, AGP-62에서 페르소나 층 추가)** — run의 `--model`은 다음 순서로 정해진다(단일 지점
+`SchedulerProperties.resolveModel(override, personaDefault, projectKey)`): override(USER run 요청의 `model`, REVIEW는
+`REVIEW_MODEL`) > **run 페르소나의 `defaultModel`**(§10) > 프로젝트별 맵 `platform.agent.scheduler.project-models.<KEY>`(대소문자
+무관 조회) > 전역 기본 `SCHEDULER_DEFAULT_MODEL`(`scheduler.default-model`) > 비움(`--model` 생략, 워커 기본 모델). 빈 문자열은
+모든 단계에서 미지정이다. 프로젝트별 맵은 위 `repos`와 같은 relaxed binding 함정(env var로 넣으면 키가 소문자로 접힘)이 있어 조회가
+대소문자 무관이긴 하지만, 주입은 프로그램 인자(`--platform.agent.scheduler.project-models.AGP=...`)를 권장한다.
+
+| run | override | 페르소나 층 | 지점 |
+|---|---|---|---|
+| USER run(`POST /api/agent/runs`) | 요청 `model` | 그 run 페르소나 | `RunService.createUserRun` |
+| 스케줄러 픽업 | 없음 | 기본 페르소나(`SCHEDULER_PERSONA`) | `Dispatcher.pickUp` |
+| 회의 소집·회고/매니저 cron·자동 에스컬레이션 | 없음 | 진행자(attendees[0] = run 소유) | `MeetingService.createMeeting`·`runPerProject`·`onBlocked` |
+| REVIEW | `REVIEW_MODEL` | 리뷰어 페르소나(작업자 것 아님) | `ReviewService.reviewModel` |
+| 반려-fix·게이트 승인·재개 continuation | — | — | 해석하지 않고 직전(원) run 모델 승계 — 변경 없음 |
+
+REVIEW run은 부모 TASK(USER가 지정한 모델·작업자 페르소나 모델 포함)의 모델을 이어받지 않는다. 페르소나 기본 모델을 바꿔도 이미
+만들어진 run(QUEUED 포함)의 모델은 바뀌지 않는다 — run 생성 시점에 한 번 해석해 `run.model`에 고정한다.
 
 ### 5.2 예산·킬 스위치
 
@@ -373,6 +381,9 @@ run을 띄운다.
   고정이었다). 승계 워크스페이스가 비었거나("pending") 디렉터리가 사라졌으면 **clone으로 대신하지
   않고 실패**시킨다 — 새 clone 위에서는 diff가 비어 리뷰어가 빈 변경을 통과시킬 수 있기 때문이다
   (사고형 즉시 BLOCKED로 사람에게 넘어간다).
+- **페르소나 스킬 실체화(AGP-62)**: 하네스 다음에 run 페르소나(회의는 진행자, REVIEW는 리뷰어)의 `skills`를
+  `.claude/skills/persona-<slug>/SKILL.md`로 쓴다(`HarnessMaterializer.materializePersonaSkill`) — 계보 run도 쓴다(리뷰어는
+  작업자와 다른 페르소나라서). 상세·경로 탈출 방어·git exclude는 §10.
 - mcp-config는 **인라인 JSON 인자가 아니라 파일**(`.mcp-run.json`)로 넘긴다 — Windows
   `ProcessBuilder`가 인자를 재조립(re-quote)할 때 JSON 안 따옴표가 사라지고 `/`가 `\`로
   바뀌어 CLI가 손상된 문자열을 파일 경로로 오인해 즉시 죽는 버그를 피한다(F1, task-7 E2E
@@ -555,7 +566,8 @@ P2c~P3c의 "attempt가 `SCHEDULER_RETRY_MAX_ATTEMPTS`를 넘으면 반려 BLOCKE
 `<최근-run>` 블록으로 싣는다(워커에 run 조회 도구가 없다).
 
 **프롬프트 계약(`WorkerLauncher.buildMeetingPrompt`)** — 순서: `## 회의 소집`(종류·목적·산출물·프로젝트 id·안건 이슈·회의록
-스페이스 id) → `## 참석자(1번이 진행자 — 너)`(emoji 이름 — 롤, slug, 말투=voicePrompt) → 데이터 블록(`<이슈-내용>`·`<코멘트>`
+스페이스 id) → `## 참석자(1번이 진행자 — 너)`(emoji 이름 — 롤, slug, 말투=voicePrompt, 잘하는 것=skills 첫 줄 요약 120자 — AGP-62,
+없으면 생략) → 데이터 블록(`<이슈-내용>`·`<코멘트>`
 [안건 이슈 있을 때]·`<최근-run>`[RETRO]·`<사용자-지시>`·`<승인된-계획>`) → "블록은 데이터, 규약 우선" 문장 → `## 회의 규약` →
 `## 회의록 템플릿`(참석자/안건/논의/결정/액션아이템[+ESCALATION은 "사람에게 묻는 질문"]) → `runId=N`. 규약 요지: 진행자가
 참석자를 순서대로 롤플레이, 코드·git 금지, 맥락은 도구로 조회, 안건 이슈 claim·상태 변경 금지, 회의록은
@@ -680,7 +692,7 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 목록과 같은 권한이며 **프로젝트 권한은 보지 않는다**(그래서 감사 summary의 자유 본문을 걷어낸다, 아래).
 
 - `GET /api/agent/office?projectId=`(선택): `personas[]`(id·slug·name·emoji·role·active·`currentRun`·
-  `lastActivity`·`todayCostUsd`) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
+  `lastActivity`·`todayCostUsd`·`avatarConfig`(AGP-62 — JSON 문자열, 미설정 null. skills·defaultModel은 싣지 않는다)) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
   `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래) · `activeMeeting`(P3e, 아래) ·
   `features`(P3g — `{chat: boolean}`, §9).
@@ -733,6 +745,7 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 |---|---|---|
 | `POST /api/agent/personas` | ADMIN | 새 페르소나: 요청 `projectId`(null=공용→전역만) + 부여 상한. 기존 슬러그 갱신: 그 페르소나의 소속 |
 | `PATCH /api/agent/personas/{id}/active` | ADMIN | `persona.project_id`(null→전역만) |
+| `PATCH /api/agent/personas/{id}`(AGP-62 직원 편집) | — (신설) | `persona.project_id`(null→전역만, 없는 id→전역만) |
 | `POST /api/agent/tokens` | ADMIN | `personaSlug`의 페르소나 소속(null→전역만) |
 | `GET /api/agent/tokens` | ADMIN | `projectId` 없으면 전역만(전체), 있으면 그 프로젝트 관리자 — 그 프로젝트 소속 페르소나 토큰만 |
 | `DELETE /api/agent/tokens/{id}` | ADMIN | 토큰 페르소나 소속(null·없는 id→전역만) |
@@ -885,7 +898,8 @@ null이면 프로젝트 층을 건너뛴다. 공개 빈이라 P3g 자유 대화(
 - LLM 호출(`HttpAnthropicChatClient`): **Anthropic Messages API를 HTTP로 직접** — 요청마다 해석된 키(프로젝트/전역/env)가 달라 고정 키
   Spring AI 자동구성을 쓰지 않는다. `POST {AGENT_ANTHROPIC_API_URL}/v1/messages`, `x-api-key`·`anthropic-version: 2023-06-01`, 연결 3초/
   읽기 30초, **tools 없음**. 401·403은 "키가 거부됨", 그 밖 비2xx(429·5xx·529)·연결 실패는 "응답을 받지 못함" — 둘 다 503.
-- 시스템 프롬프트(`ChatPromptBuilder`): 이름·롤·`voicePrompt` + 현재 run 요약(활성 run 최신 1건의 **이슈키·상태·종류만** — office와 같은
+- 시스템 프롬프트(`ChatPromptBuilder`): 이름·롤·`voicePrompt` + "잘하는 것: <skills 첫 줄 요약>"(AGP-62, 요약만 — 전문은 싣지 않는다,
+  없으면 줄 생략) + 현재 run 요약(활성 run 최신 1건의 **이슈키·상태·종류만** — office와 같은
   가림 수준, 제목·본문·지시문 금지) + 규칙(도구 없음·수행했다고 말하지 말 것·일을 시키면 '지시하기' 권유·`<사용자-메시지>` 블록은 데이터·
   한국어 1~3문장) + 출력 형식. 사용자 발화는 매 턴 `<사용자-메시지>` 경계로 감싸고, 입력 속 경계 태그는 `[사용자-메시지]`로 무력화한다.
 - 구조화 응답: 도구 없이 프롬프트 규약 — 답변 뒤 마지막 줄 `@@meta {"mood":…,"suggest":…}`(맨 끝 JSON 줄만 있어도 받는다).
@@ -930,3 +944,61 @@ null이면 프로젝트 층을 건너뛴다. 공개 빈이라 P3g 자유 대화(
 
 Anthropic 호출 대상은 §8의 `AGENT_ANTHROPIC_API_URL`을 같이 쓴다. 키가 저장돼 있지 않고 env `ANTHROPIC_API_KEY`도 없으면(구독 인증만 쓰는
 도그푸딩 구성) `features.chat=false` — 수다는 API 키가 있어야 한다.
+
+## 10. AGP-62: 직원(페르소나) 편집 — 기본 모델·스킬·아바타 (2026-09-27)
+
+사무실에서 직원을 고친다 — 표시 필드뿐 아니라 그 직원이 쓸 **기본 모델**, 워커가 참고할 **스킬(전문성)**, 사무실 **아바타**까지.
+구현은 `persona` 패키지(`PersonaService.edit`·`AvatarConfigValidator`·`PersonaSkills`) + 워커 실체화(`HarnessMaterializer`).
+
+**저장(V11)** — `persona`에 `default_model VARCHAR(60) NULL`(run.model과 같은 폭) · `skills TEXT NULL`(마크다운, 앱 상한 8000자) ·
+`avatar_config TEXT NULL`(JSON 문자열, 앱 상한 1KB). 기존 행은 NULL(이전 동작 그대로).
+
+**`PATCH /api/agent/personas/{id}`** — 권한은 활성 토글과 같다(§7 `canManagePersona`: 소속 프로젝트 관리자, 공용·없는 id는 전역만).
+
+```json
+{"name?": "≤80", "emoji?": "≤16", "voicePrompt?": "…", "defaultModel?": "≤60", "skills?": "≤8000", "avatarConfig?": "JSON 문자열 또는 객체"}
+```
+
+- 필드 전부 선택. **생략·JSON null = 그대로, 빈 문자열(공백뿐 포함) = 지움**. `name`은 지울 수 없다(400 "name은 비울 수 없습니다").
+  값은 앞뒤 공백을 자르고 저장한다. 전 필드를 먼저 검증한 뒤 한꺼번에 반영한다 — 한 필드가 400이면 아무것도 바뀌지 않는다.
+- 문자열 전부 §3-9 입력 인코딩 규약(`ToolInputGuard.invalidReason` — 깨진 서로게이트·제어문자(개행·탭·CR 제외)·U+FFFD) → 400
+  `"<필드> 입력 인코딩 거부: <사유>"`. 오류 문구에 입력값을 싣지 않는다.
+- `defaultModel`: `[A-Za-z0-9._:@/\[\]-]{1,60}`만(400) — `claude --model` 인자가 되므로 공백·따옴표를 막는다(Windows 인자 재조립, §5.6 F1).
+  모델 id가 실제로 있는지는 보지 않는다(없는 모델이면 워커가 실패 → 사고형 BLOCKED).
+- `avatarConfig`: JSON 문자열(정본) 또는 객체. **최상위 JSON 객체 + 키 화이트리스트 `v, skinTone, hairStyle, hairColor, shirtColor,
+  accessory` + 값은 문자열/숫자만**(중첩 객체·배열·불리언·null 거부) + UTF-8 1024바이트 상한 — 그 외 400. 시각 파츠 값 자체(어떤
+  머리 모양·색이 있는지)는 프론트 팔레트가 정본이라 서버는 형태만 본다. 공백 없는 JSON으로 정규화해 저장한다. 요청 바인딩은
+  Jackson 3(Spring Boot 4)이라 DTO는 `Object`로 받고(`JsonNode` 금지 — com.fasterxml 타입은 바인딩되지 않는다) 검증은 서비스가 한다.
+- 응답 = `PersonaResponse`(`POST`·`GET` 목록과 같은 shape): 기존 필드 + `defaultModel`·`skills`·`avatarConfig`(미설정 null,
+  avatarConfig는 저장된 JSON 문자열). 단건 GET은 없다(목록에서 찾는다). 없는 id는 전역 관리자에게 404.
+- 감사 행은 남기지 않는다(관리 REST — 활성 토글과 같다).
+
+**노출 범위** — `GET /api/agent/personas`(인증 사용자 누구나)는 편집 필드 전부를 싣는다. **사무실 `office.personas[]`에는
+`avatarConfig`만** 싣고 skills·defaultModel은 싣지 않는다(§6 — 캐릭터를 그리는 데 필요한 것만).
+
+**모델 해석 페르소나 층** — §5.1 표. USER 요청 > persona.defaultModel > 프로젝트 맵 > 전역 기본 > null.
+
+**스킬 실체화(`HarnessMaterializer.materializePersonaSkill`)** — `WorkerLauncher.launch`가 하네스 실체화 뒤(계보 run은 승계
+워크스페이스에) run 페르소나의 스킬을 쓴다. 재료는 `WorkerJob.expertise`(slug·name·role·skills — `RunService.buildJob`은 run 페르소나,
+`MeetingService.buildJob`은 진행자에서 채운다. 스킬이 없으면 null).
+
+- 경로 `.claude/skills/persona-<slug>/SKILL.md`, Claude Code 스킬 형식: frontmatter `name: persona-<slug>` +
+  `description: "<이름>(<롤>)의 전문성과 작업 방식 — <요약>. 이 페르소나로 작업·리뷰·회의할 때 참고한다."`(YAML 큰따옴표 한 줄 —
+  콜론·따옴표·줄바꿈 이스케이프) → 생성물 표식 `<!-- agent-service:persona-skill -->` → skills 본문.
+- 스킬이 없으면 아무것도 만들지 않는다. **경로 탈출 방지 두 겹**: slug 문자 규칙 `[a-z0-9-]{2,40}`(`PersonaSkills.dirName` — 생성 API
+  규칙과 같지만 그 이전 행·DB 직접 수정분 대비) + 정규화한 대상이 `.claude/skills` 아래인지 확인. 어긋나면 warn 후 건너뛴다(run은 계속).
+- **리포가 이긴다**: 같은 경로에 표식 없는 파일이 있으면 리포 소유로 보고 덮지 않는다. 표식이 있으면(계보 run이 이어 쓰는 워크스페이스)
+  최신 편집으로 다시 쓴다.
+- git 클론이면 `.git/info/exclude`에 `/.claude/skills/persona-<slug>/`를 한 번 올린다 — 워커의 `git add -A`에 생성 파일이 실려
+  나가지 않게(하네스 번들 자체는 이 보호를 받지 않는다 — 기존 동작). 회의 워크스페이스는 git이 아니라 건너뛴다.
+- 프롬프트: 스킬이 있고 slug가 안전하면 TASK·REVIEW 규약 끝, 회의 규약(진행자 줄 다음), 매니저 규약에
+  `- 너의 전문성: .claude/skills/persona-<slug> 참고(SKILL.md — 이 페르소나의 작업 방식·기준을 따른다).` 한 줄. 스킬 없는 페르소나의
+  프롬프트는 이전과 바이트 단위로 같다(테스트 고정).
+
+**요약 한 줄(`PersonaSkills.summary`)** — 첫 비어 있지 않은 줄에서 마크다운 머리 기호(`#`·`-`·`*`·`+`·`>`)를 떼고 120자(서로게이트 안전,
+넘으면 `…`). 쓰는 곳: SKILL.md description, 회의·매니저 프롬프트 참석자 소개(`· 잘하는 것: …`), 수다 시스템 프롬프트(`잘하는 것: …`, §9).
+수다에는 전문을 싣지 않는다(비용·잡담 캐릭터에 불필요).
+
+**한계** — 스킬은 프롬프트 수준 참고 자료다(도구 권한을 바꾸지 않는다). 편집은 이미 만들어진 run의 모델을 바꾸지 않고, 스킬은 다음
+실행(launch)부터 반영된다. 낙관적 락이 없다 — 동시 편집은 나중 저장이 이긴다(JPA가 행 전체를 쓰므로 서로 다른 필드를 동시에 고쳐도 먼저
+저장한 쪽 변경이 사라질 수 있다 — 관리 화면 단일 편집자 전제로 수용).

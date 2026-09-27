@@ -256,6 +256,65 @@ class PersonaControllerTest {
         org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong());
     }
 
+    // ---- AGP-62: PATCH /{id} 권한 — 활성 토글과 같은 판정 ----
+
+    @Test
+    void project_admin_edits_own_project_persona() throws Exception {
+        projectAdminOf7();
+        Persona own = personaRepository.save(Persona.of(9711L, "edit-own", PersonaRole.BACKEND, "O", null, null, 7L));
+        given(personaService.edit(org.mockito.ArgumentMatchers.eq(own.getId()), any())).willReturn(new PersonaResponse(
+                own.getId(), 9711L, "edit-own", PersonaRole.BACKEND, "O2", null, true, 7L, "claude-x", "skill", null));
+
+        mvc.perform(patch("/api/agent/personas/" + own.getId()).with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"O2\",\"defaultModel\":\"claude-x\"}"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.defaultModel").value("claude-x"))
+                .andExpect(jsonPath("$.skills").value("skill"));
+    }
+
+    @Test
+    void other_project_admin_cannot_edit_persona() throws Exception {
+        given(permissionClient.checkAdmin(3L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.deny("NO_GRANT"));
+        Persona own = personaRepository.save(Persona.of(9712L, "edit-other", PersonaRole.BACKEND, "O", null, null, 7L));
+
+        mvc.perform(patch("/api/agent/personas/" + own.getId()).with(authentication(TestAuth.user(3L, "Carol")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"X\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
+
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).edit(org.mockito.ArgumentMatchers.anyLong(), any());
+    }
+
+    @Test
+    void shared_persona_edit_is_global_admin_only() throws Exception {
+        projectAdminOf7();
+        Persona shared = personaRepository.save(Persona.of(9713L, "edit-shared", PersonaRole.BACKEND, "S", null, null));
+        given(personaService.edit(org.mockito.ArgumentMatchers.eq(shared.getId()), any())).willReturn(PersonaResponse.from(shared));
+
+        mvc.perform(patch("/api/agent/personas/" + shared.getId()).with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"X\"}"))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("전사 공용 페르소나는 전역 관리자만 관리할 수 있습니다"));
+        mvc.perform(patch("/api/agent/personas/" + shared.getId()).with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"X\"}"))
+                .andExpect(status().isOk());
+    }
+
+    /** 없는 id는 전역 관리자만 통과(서비스 404) — 프로젝트 관리자에게 존재 여부를 흘리지 않는다. */
+    @Test
+    void unknown_persona_edit_is_403_for_project_admin_and_404_for_global_admin() throws Exception {
+        projectAdminOf7();
+        given(personaService.edit(org.mockito.ArgumentMatchers.eq(987654L), any()))
+                .willThrow(new com.platform.common.error.NotFoundException("페르소나를 찾을 수 없습니다: 987654"));
+
+        mvc.perform(patch("/api/agent/personas/987654").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"X\"}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(patch("/api/agent/personas/987654").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"X\"}"))
+                .andExpect(status().isNotFound());
+    }
+
     @Test
     void authenticated_user_can_list_personas() throws Exception {
         given(personaService.list()).willReturn(java.util.List.of(

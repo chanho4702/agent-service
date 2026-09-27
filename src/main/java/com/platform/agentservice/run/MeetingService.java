@@ -8,6 +8,7 @@ import com.platform.agentservice.client.dto.ProjectResponse;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.persona.PersonaRole;
+import com.platform.agentservice.persona.PersonaSkills;
 import com.platform.agentservice.worker.WorkerJob;
 import com.platform.agentservice.worker.WorkerProperties;
 import com.platform.common.error.ConflictException;
@@ -134,7 +135,7 @@ public class MeetingService {
         }
 
         Run run = runRepository.save(Run.queuedMeeting(type, issueKey, projectId, ids(attendees), RunTrigger.USER,
-                RunService.DEFAULT_HARNESS_REF, schedulerProperties.modelFor(project.key()), instruction));
+                RunService.DEFAULT_HARNESS_REF, modelFor(facilitator, project.key()), instruction));
         log.info("회의 run={} 소집({}, projectId={}, issueKey={}, 참석 {}명)", run.getId(), type, projectId, issueKey,
                 attendees.size());
         return new MeetingCreated(run, attendees);
@@ -167,7 +168,9 @@ public class MeetingService {
                 meetingProperties.autoIssue(), attendeesOf(run), recentRuns, approvedPlan(run),
                 manager ? pendingGateLines(run.getProjectId()) : List.of(),
                 manager ? blockedRunLines(run) : List.of());
-        return new WorkerJob(null, title, body, recentComments, run.getInstruction(), meeting);
+        WorkerJob.Expertise expertise = personaRepository.findById(run.getPersonaId())
+                .map(RunService::expertiseOf).orElse(null);
+        return new WorkerJob(null, title, body, recentComments, run.getInstruction(), meeting, expertise);
     }
 
     /**
@@ -199,7 +202,7 @@ public class MeetingService {
                 + "실패 기록(끝부분):\n" + tail(blockedRun.getError());
         Run escalation = runRepository.save(Run.queuedMeeting(RunType.ESCALATION, issueKey, blockedRun.getProjectId(),
                 ids(attendees), blockedRun.getTrigger(), RunService.DEFAULT_HARNESS_REF,
-                schedulerProperties.modelFor(RunService.projectKeyOf(issueKey)), instruction));
+                modelFor(attendees.get(0), RunService.projectKeyOf(issueKey)), instruction));
         log.info("run={} BLOCKED → 자동 에스컬레이션 회의 run={} 생성", blockedRun.getId(), escalation.getId());
         submit(escalation.getId());
         commentBestEffort(attendees.get(0), issueKey, "🆘 자동 에스컬레이션 회의 run " + escalation.getId() + " 소집 — 참석: "
@@ -259,7 +262,7 @@ public class MeetingService {
                 }
                 Run run = runRepository.save(Run.queuedMeeting(type, Run.projectIssueKey(project.id()),
                         project.id(), ids(attendees), RunTrigger.SCHEDULER, RunService.DEFAULT_HARNESS_REF,
-                        schedulerProperties.modelFor(project.key()), agenda));
+                        modelFor(attendees.get(0), project.key()), agenda));
                 log.info("{} — 프로젝트 {} {} run={} 생성", label, project.key(), type, run.getId());
                 submit(run.getId());
             } catch (Exception e) {
@@ -269,6 +272,11 @@ public class MeetingService {
     }
 
     // ---- 내부 ----
+
+    /** 회의 계열 run 모델은 진행자(run 소유 페르소나) 기준이다(AGP-62) — 요청 단계가 없어 override는 없다. */
+    private String modelFor(Persona facilitator, String projectKey) {
+        return schedulerProperties.resolveModel(null, facilitator.getDefaultModel(), projectKey);
+    }
 
     boolean hasActiveMeeting(long projectId) {
         return runRepository.existsByProjectIdAndTypeInAndStatusIn(projectId, RunType.MEETING_TYPES,
@@ -353,7 +361,8 @@ public class MeetingService {
     }
 
     private static WorkerJob.Attendee toAttendee(Persona p) {
-        return new WorkerJob.Attendee(p.getSlug(), p.getName(), p.getRole().name(), p.getEmoji(), p.getVoicePrompt());
+        return new WorkerJob.Attendee(p.getSlug(), p.getName(), p.getRole().name(), p.getEmoji(), p.getVoicePrompt(),
+                PersonaSkills.summary(p.getSkills()));
     }
 
     /** 회고 자료 — 워커에는 run을 조회하는 도구가 없어서 서버가 요약을 실어 준다. 자기 자신(회의 run)은 뺀다. */

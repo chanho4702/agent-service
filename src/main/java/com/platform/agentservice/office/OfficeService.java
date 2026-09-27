@@ -125,7 +125,7 @@ public class OfficeService {
                         || currentRuns.containsKey(p.getId()))
                 .map(p -> new OfficeResponse.OfficePersona(p.getId(), p.getSlug(), p.getName(), p.getEmoji(),
                         p.getRole(), p.isActive(), toCurrent(currentRuns.get(p.getId())), bubbles.get(p.getId()),
-                        costs.getOrDefault(p.getId(), BigDecimal.ZERO)))
+                        costs.getOrDefault(p.getId(), BigDecimal.ZERO), p.getAvatarConfig()))
                 .toList();
 
         List<Run> finished = projectId == null

@@ -16,6 +16,18 @@ class SchedulerPropertiesTest {
         return new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3, defaultModel, projectModels);
     }
 
+    /** AGP-62 — 해석 5단계: override > 페르소나 기본 > 프로젝트 맵 > 전역 기본 > null. 빈 값은 모든 단계에서 미지정. */
+    @Test
+    void resolve_model_walks_override_persona_project_global_then_null() {
+        SchedulerProperties full = properties("claude-global", Map.of("agp", "claude-project"));
+
+        assertThat(full.resolveModel(" claude-user ", "claude-persona", "AGP")).isEqualTo("claude-user");
+        assertThat(full.resolveModel("  ", " claude-persona ", "AGP")).isEqualTo("claude-persona");
+        assertThat(full.resolveModel(null, "", "AGP")).isEqualTo("claude-project");
+        assertThat(full.resolveModel(null, null, "WEB")).isEqualTo("claude-global");
+        assertThat(properties(" ", Map.of()).resolveModel(null, null, "AGP")).isNull();
+    }
+
     @Test
     void project_model_wins_over_global_default() {
         SchedulerProperties p = properties("claude-sonnet-5", Map.of("AGP", "claude-opus-5-5"));
