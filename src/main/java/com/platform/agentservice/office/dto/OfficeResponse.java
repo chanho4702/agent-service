@@ -1,6 +1,7 @@
 package com.platform.agentservice.office.dto;
 
 import com.platform.agentservice.budget.dto.BudgetStatusResponse;
+import com.platform.agentservice.execution.ExecutionSite;
 import com.platform.agentservice.persona.PersonaRole;
 import com.platform.agentservice.run.GateKind;
 import com.platform.agentservice.run.RunStatus;
@@ -100,6 +101,11 @@ public record OfficeResponse(
         }
     }
 
+    /**
+     * {@code executionSite}(P4a D-P4-4) — LOCAL이면 책상 모니터에 "집" 표지. {@code awaitingRunner}는 QUEUED인데 지금 집어갈 러너가
+     * 없음("러너 대기" 라벨) — LOCAL은 범위 안 LOCAL 러너(고정 run은 그 러너)가 전부 오프라인, SERVER는 인프로세스 실행이 꺼져 있고
+     * PLATFORM 러너가 오프라인일 때.
+     */
     public record CurrentRun(
             long id,
             RunStatus status,
@@ -108,8 +114,15 @@ public record OfficeResponse(
             RunTrigger trigger,
             int attempt,
             String model,
-            Instant startedAt
+            Instant startedAt,
+            ExecutionSite executionSite,
+            boolean awaitingRunner
     ) {
+        /** 실행 위치 필드 없는 생성(기존 테스트) — SERVER, 대기 아님. */
+        public CurrentRun(long id, RunStatus status, String issueKey, RunType type, RunTrigger trigger, int attempt,
+                          String model, Instant startedAt) {
+            this(id, status, issueKey, type, trigger, attempt, model, startedAt, ExecutionSite.SERVER, false);
+        }
     }
 
     /**

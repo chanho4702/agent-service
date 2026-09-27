@@ -11,6 +11,9 @@ import com.platform.agentservice.budget.BudgetProperties;
 import com.platform.agentservice.budget.LedgerScope;
 import com.platform.agentservice.budget.UsageLedger;
 import com.platform.agentservice.budget.UsageLedgerRepository;
+import com.platform.agentservice.execution.ExecutionProperties;
+import com.platform.agentservice.execution.ExecutionSite;
+import com.platform.agentservice.execution.ExecutionSiteResolver;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.run.dto.RunSummaryResponse;
@@ -22,6 +25,7 @@ import com.platform.agentservice.worker.WorkerResult;
 import com.platform.common.error.ConflictException;
 import com.platform.common.error.NotFoundException;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -97,13 +101,35 @@ public class RunService {
     private final ReviewService reviewService;
     private final MeetingService meetingService;
     private final AlertService alertService;
+    private final ExecutionSiteResolver executionSites;
+    private final ExecutionProperties executionProperties;
+    /** 러너 run의 토큰 철회(취소 시)용 — 구 생성자(테스트)에서는 null. */
+    private final RunTokenService runTokenService;
 
+    /** P4a 이전 협력자만 받는 생성자(기존 단위 테스트) — 실행 위치는 항상 SERVER·인프로세스. */
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
                        SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
                        CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService,
                        MeetingService meetingService, AlertService alertService) {
+        this(runRepository, almClient, issueClaimSupport, tokenService, personaRepository, workerLauncher, workerProperties,
+                usageLedgerRepository, schedulerProperties, budgetProperties, commitLinkParser, budgetGuard, reviewService,
+                meetingService, alertService, ExecutionSiteResolver.serverOnly(), new ExecutionProperties("SERVER", true),
+                null);
+    }
+
+    @Autowired
+    public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
+                       TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
+                       WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
+                       SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
+                       CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService,
+                       MeetingService meetingService, AlertService alertService, ExecutionSiteResolver executionSites,
+                       ExecutionProperties executionProperties, RunTokenService runTokenService) {
+        this.executionSites = executionSites;
+        this.executionProperties = executionProperties;
+        this.runTokenService = runTokenService;
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -130,7 +156,14 @@ public class RunService {
         requireNoActiveRun(issue.issueKey());
         Run run = Run.queued(RunType.TASK, issue.issueKey(), issue.projectId(), issue.personaId(),
                 trigger, DEFAULT_HARNESS_REF, model);
+        run.assignExecutionSite(executionSites.resolve(null, issue.projectId()));
         return runRepository.save(run);
+    }
+
+    /** 실행 위치 지정 없는 USER run(기존 호출부) — 프로젝트 설정 &gt; 전역 기본을 따른다. */
+    public Run createUserRun(String issueKey, String instruction, String model, String personaSlug,
+                             LongConsumer projectGuard) {
+        return createUserRun(issueKey, instruction, model, personaSlug, null, projectGuard);
     }
 
     /**
@@ -148,7 +181,9 @@ public class RunService {
      * 권한이 없으면 가드가 403을 던져 run이 만들어지지 않는다.
      */
     public Run createUserRun(String issueKey, String instruction, String model, String personaSlug,
-                             LongConsumer projectGuard) {
+                             String executionSite, LongConsumer projectGuard) {
+        // 모르는 위치 값은 ALM을 부르기 전에 400으로 끊는다.
+        ExecutionSite.parseOrNull(executionSite);
         Persona persona = resolveUserRunPersona(personaSlug);
         String bearer = tokenService.bearerFor(persona.getMemberId());
         IssueResponse issue = almClient.getByKey(issueKey.trim(), bearer);
@@ -158,6 +193,7 @@ public class RunService {
         String resolvedModel = schedulerProperties.resolveModel(model, persona.getDefaultModel(), projectKeyOf(issue.key()));
         Run run = Run.queuedUser(issue.key(), issue.projectId(), persona.getId(), DEFAULT_HARNESS_REF,
                 resolvedModel, isBlank(instruction) ? null : instruction.trim());
+        run.assignExecutionSite(executionSites.resolve(executionSite, issue.projectId()));
         return runRepository.save(run);
     }
 
@@ -212,6 +248,12 @@ public class RunService {
             log.debug("QUEUED 상태가 아니라 실행을 건너뜁니다: id={} status={}", runId, run.getStatus());
             return;
         }
+        if (!runsInProcess(run)) {
+            // P4a: LOCAL run·러너 고정 run·인프로세스 실행이 꺼진 SERVER run은 러너가 claim해 간다 — 여기서는 QUEUED로 둔다.
+            log.debug("러너가 집어갈 run이라 인프로세스 실행을 건너뜁니다: id={} site={} runner={}",
+                    runId, run.getExecutionSite(), run.getRunnerId());
+            return;
+        }
         if (!budgetGuard.allow(run.getProjectId())) {
             log.info("킬 스위치/예산 캡으로 실행을 보류합니다 — QUEUED로 남겨 다음 드레인 틱이 다시 집어갑니다: id={}", runId);
             return;
@@ -248,13 +290,56 @@ public class RunService {
         applyOutcome(runId, result);
     }
 
-    /** {@code POST /api/agent/runs/{id}/cancel} — 실행 중인 워커 OS 프로세스 강제 종료는 P2a 범위 밖이다. */
+    /**
+     * 이 프로세스가 직접 워커를 띄울 run인가(P4a D-P4-5). SERVER이면서 러너에 고정되지 않았고 인프로세스 실행이 켜져 있어야 한다 —
+     * LOCAL은 사용자 PC 러너, 러너 고정 run은 승계 워크스페이스가 그 러너 디스크에 있고, 인프로세스가 꺼진 배포(compose)의 SERVER run은
+     * PLATFORM 러너 컨테이너가 claim한다.
+     */
+    public boolean runsInProcess(Run run) {
+        return run.getExecutionSite() == ExecutionSite.SERVER && !run.isRunnerBound()
+                && executionProperties.inProcessEnabled();
+    }
+
+    /**
+     * {@code POST /api/agent/runs/{id}/cancel} — 실행 중인 워커 OS 프로세스 강제 종료는 P2a 범위 밖이다. 러너 run이면 run 토큰을
+     * 곧바로 철회한다(러너는 다음 heartbeat의 {@code stopRunIds}로 워커를 멈춘다).
+     */
     public void cancel(long runId) {
         Run run = runRepository.findById(runId)
                 .orElseThrow(() -> new NotFoundException("run을 찾을 수 없습니다: " + runId));
         run.cancel();
+        Long patId = run.getPatId();
+        if (patId != null && run.isRunnerBound() && runTokenService != null) {
+            run.clearRunToken();
+        } else {
+            patId = null;
+        }
         runRepository.save(run);
+        if (patId != null) {
+            runTokenService.revoke(patId);
+        }
         commentBestEffort(run, "🛑 관리자 요청으로 취소됨 — 이미 실행 중인 워커 프로세스는 강제 종료되지 않습니다(P2a 범위 밖).");
+    }
+
+    // ---- 러너 실행 경로(P4a AGP-69) — RunnerService가 부른다. 인프로세스 execute와 같은 준비·종결 경로를 공유한다. ----
+
+    /** claim된(RUNNING) run의 워커 입력 — 인프로세스 {@link #execute}의 준비 단계와 같다(리포 매핑·claim·코멘트·회의 자료). */
+    public WorkerJob prepareJob(Run run) {
+        return buildJob(run);
+    }
+
+    /** 준비 실패·러너 연결 끊김 등 — 인프로세스 실패와 같은 사고형 즉시 중단(BLOCKED + 코멘트 + 메일 + 자동 에스컬레이션). */
+    public void failIncident(long runId, String cause) {
+        finishFailed(runId, cause);
+    }
+
+    /**
+     * 러너가 보고한 결과 반영 — 인프로세스 종결과 같은 {@link #applyOutcome}(원장·리뷰 상시화·반려 예산·실패 정책·에스컬레이션).
+     * 커밋 링크는 서버가 러너 디스크를 볼 수 없으므로 러너가 파싱해 보낸 목록을 쓴다(워크스페이스 경로를 서버에서 파싱하지 않는다 —
+     * 같은 경로가 서버에 우연히 있으면 남의 커밋을 링크할 수 있다).
+     */
+    public void applyExternalOutcome(long runId, WorkerResult result, List<CommitLinkParser.CommitLink> reportedCommits) {
+        applyOutcome(runId, result, reportedCommits == null ? List.of() : reportedCommits);
     }
 
     /** {@code GET /api/agent/runs?status=} 감독 API — 최소 필드 목록. */
@@ -350,9 +435,14 @@ public class RunService {
      * 다른 run과 같이 사고형 즉시 중단이다(P3d) — 사람이 재개하면 {@link Run#continuation}이 워크스페이스를 승계한다.
      */
     private void applyOutcome(long runId, WorkerResult result) {
+        applyOutcome(runId, result, null);
+    }
+
+    /** {@code reportedCommits}가 null이면 인프로세스 — 워크스페이스를 직접 파싱한다. null이 아니면(러너 보고) 그 목록만 쓴다. */
+    private void applyOutcome(long runId, WorkerResult result, List<CommitLinkParser.CommitLink> reportedCommits) {
         try {
             safelyRecordSessionAndLedger(runId, result);
-            linkCommits(runId, result);
+            linkCommits(runId, result, reportedCommits);
             safelyWarnIfOverPerRunBudget(runId, result);
 
             Run run = runRepository.findById(runId).orElseThrow();
@@ -489,9 +579,9 @@ public class RunService {
      * 여기(백그라운드 워커 스레드, PAT principal 없음)서는 적용할 수 없다 — 기존
      * {@link #commentBestEffort}와 같은 방식으로 로그만 남기고 삼킨다(선택, T6b 브리핑).
      */
-    private void linkCommits(long runId, WorkerResult result) {
+    private void linkCommits(long runId, WorkerResult result, List<CommitLinkParser.CommitLink> reportedCommits) {
         String workspacePath = result.workspacePath();
-        if (workspacePath == null || workspacePath.isBlank()) {
+        if (reportedCommits == null && (workspacePath == null || workspacePath.isBlank())) {
             return;
         }
         try {
@@ -502,7 +592,8 @@ public class RunService {
                 // 어떤 리포 안에 있으면 남의 커밋을 이 이슈에 링크할 수 있다.
                 return;
             }
-            List<CommitLinkParser.CommitLink> links = commitLinkParser.parse(Path.of(workspacePath));
+            List<CommitLinkParser.CommitLink> links = reportedCommits != null
+                    ? reportedCommits : commitLinkParser.parse(Path.of(workspacePath));
             if (links.isEmpty()) {
                 return;
             }

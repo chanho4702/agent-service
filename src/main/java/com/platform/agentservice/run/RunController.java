@@ -54,7 +54,7 @@ public class RunController {
     public RunSummaryResponse create(@Valid @RequestBody UserRunCreateRequest request, Authentication authentication) {
         AgentCaller caller = AgentCaller.from(authentication);
         Run run = runService.createUserRun(request.issueKey(), request.instruction(), request.model(),
-                request.personaSlug(), projectId -> agentAuthz.requireManageProject(caller, projectId));
+                request.personaSlug(), request.executionSite(), projectId -> agentAuthz.requireManageProject(caller, projectId));
         try {
             runService.execute(run.getId());
         } catch (TaskRejectedException e) {

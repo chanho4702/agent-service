@@ -55,6 +55,8 @@ class DispatcherTest {
     }
 
     private Dispatcher dispatcher(SchedulerProperties properties) {
+        // P4a: 기본 run(SERVER·러너 고정 없음·인프로세스 켜짐)은 인프로세스 대상 — 드레인 필터를 통과한다.
+        org.mockito.Mockito.lenient().when(runService.runsInProcess(org.mockito.ArgumentMatchers.any())).thenReturn(true);
         return new Dispatcher(properties, budgetGuard, runRepository, runService, almClient, tokenService, personaRepository);
     }
 
@@ -92,7 +94,7 @@ class DispatcherTest {
     @Test
     void global_concurrency_cap_blocks_new_issue_pickup() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(2L); // == maxConcurrentGlobal
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(2L); // == maxConcurrentGlobal
 
         dispatcher(enabledProperties(2, 1)).tick();
 
@@ -106,7 +108,7 @@ class DispatcherTest {
     @Test
     void picks_new_auto_labeled_todo_issue_and_creates_and_executes_run() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
 
@@ -134,7 +136,7 @@ class DispatcherTest {
     @Test
     void pickup_passes_model_resolved_from_project_key_of_the_issue() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
 
@@ -161,7 +163,7 @@ class DispatcherTest {
     @Test
     void pickup_falls_back_to_global_default_model_when_project_has_no_entry() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
 
@@ -186,7 +188,7 @@ class DispatcherTest {
     @Test
     void pickup_prefers_persona_default_model_over_project_policy() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         Persona persona = persona();
         persona.edit(null, null, null, Persona.Edit.set("claude-persona"), null, null);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona));
@@ -212,7 +214,7 @@ class DispatcherTest {
     @Test
     void skips_issue_that_already_has_an_active_run_and_picks_next_one() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
 
@@ -243,7 +245,7 @@ class DispatcherTest {
         Run continuationRun = queuedRun(7L);
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of(continuationRun));
         // 픽업 단계는 전역 한도 초과로 막아 드레인 동작만 분리해서 본다.
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(2L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(2L);
 
         dispatcher(enabledProperties(2, 1)).tick();
 
@@ -261,7 +263,7 @@ class DispatcherTest {
         org.mockito.Mockito.doThrow(new org.springframework.core.task.TaskRejectedException("실행기 포화"))
                 .when(runService).execute(1L);
 
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
         IssueResponse issue = issue(9L, "AGP-9", 9L);
@@ -286,7 +288,7 @@ class DispatcherTest {
     @Test
     void per_project_concurrency_cap_blocks_pickup_of_that_project_issue() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
 
@@ -307,7 +309,7 @@ class DispatcherTest {
     @Test
     void budget_guard_denial_blocks_pickup() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
 
@@ -327,7 +329,7 @@ class DispatcherTest {
 
     private void stubPickPreconditions() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(persona()));
         when(tokenService.bearerFor(PERSONA_MEMBER_ID)).thenReturn(BEARER);
     }
@@ -469,7 +471,7 @@ class DispatcherTest {
     @Test
     void missing_default_persona_skips_pickup_without_error() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.empty());
 
         dispatcher(enabledProperties(2, 1)).tick();
@@ -481,7 +483,7 @@ class DispatcherTest {
     @Test
     void inactive_default_persona_skips_pickup_without_touching_alm() {
         when(runRepository.findByStatus(RunStatus.QUEUED)).thenReturn(List.of());
-        when(runRepository.countByStatusIn(CONCURRENCY_STATUSES)).thenReturn(0L);
+        when(runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, com.platform.agentservice.execution.ExecutionSite.SERVER)).thenReturn(0L);
         Persona inactive = persona();
         inactive.changeActive(false);
         when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(inactive));

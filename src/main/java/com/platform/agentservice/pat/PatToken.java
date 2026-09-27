@@ -27,15 +27,29 @@ public class PatToken {
     private Instant expiresAt;
     private Instant lastUsedAt;
     private Instant revokedAt;
+    /** 만료 임박 알림을 보낸 시각(D-P4-3b) — 같은 토큰에 매일 다시 보내지 않게 1회 표식. */
+    private Instant expiryWarnedAt;
+    /** 발급자 메일(발급 시 JWT email 클레임) — 만료 임박 알림 수신자. V13 이전 토큰·run 토큰은 null(운영 수신자로 간다). */
+    @Column(length = 200) private String ownerEmail;
 
     public static PatToken of(String tokenHash, String label, Long ownerMemberId, Long personaId, Instant expiresAt) {
+        return of(tokenHash, label, ownerMemberId, personaId, expiresAt, null);
+    }
+
+    public static PatToken of(String tokenHash, String label, Long ownerMemberId, Long personaId, Instant expiresAt,
+                              String ownerEmail) {
         PatToken t = new PatToken();
         t.tokenHash = tokenHash;
         t.label = label;
         t.ownerMemberId = ownerMemberId;
         t.personaId = personaId;
         t.expiresAt = expiresAt;
+        t.ownerEmail = ownerEmail;
         return t;
+    }
+
+    public void markExpiryWarned(Instant at) {
+        this.expiryWarnedAt = at;
     }
 
     /** PatAuthFilter가 검증 성공 시 스로틀 적용 후 호출한다. */

@@ -73,7 +73,7 @@ class RunControllerTest {
 
     @Test
     void admin_create_user_run_returns_201_with_summary_and_submits_execution() throws Exception {
-        given(runService.createUserRun(eq("AGP-9"), eq("테스트부터"), eq("claude-sonnet-5"), eq("jiho"), any())).willReturn(queuedUserRun(77L));
+        given(runService.createUserRun(eq("AGP-9"), eq("테스트부터"), eq("claude-sonnet-5"), eq("jiho"), isNull(), any())).willReturn(queuedUserRun(77L));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -93,19 +93,19 @@ class RunControllerTest {
 
     @Test
     void create_user_run_with_only_issue_key_passes_nulls_for_optional_fields() throws Exception {
-        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any())).willReturn(queuedUserRun(78L));
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), isNull(), any())).willReturn(queuedUserRun(78L));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"issueKey\":\"AGP-9\"}"))
                 .andExpect(status().isCreated());
 
-        verify(runService).createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any());
+        verify(runService).createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), isNull(), any());
     }
 
     @Test
     void create_user_run_still_returns_201_when_execution_submission_is_rejected() throws Exception {
-        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any())).willReturn(queuedUserRun(79L));
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), isNull(), any())).willReturn(queuedUserRun(79L));
         willThrow(new TaskRejectedException("pool full")).given(runService).execute(79L);
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
@@ -117,8 +117,8 @@ class RunControllerTest {
 
     /** 서비스가 이슈로 프로젝트를 확정한 뒤 가드를 부르는 것을 흉내 낸다 — 가드가 던지면 run은 만들어지지 않는다. */
     private void stubUserRunResolvingProject(long projectId, long runId) {
-        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any())).willAnswer(inv -> {
-            ((LongConsumer) inv.getArgument(4)).accept(projectId);
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), isNull(), any())).willAnswer(inv -> {
+            ((LongConsumer) inv.getArgument(5)).accept(projectId);
             return queuedUserRun(runId);
         });
     }
@@ -217,7 +217,7 @@ class RunControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").exists());
 
-        verify(runService, never()).createUserRun(any(), any(), any(), any(), any());
+        verify(runService, never()).createUserRun(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -227,7 +227,7 @@ class RunControllerTest {
                         .content("{\"issueKey\":\"AGP-9\",\"model\":\"" + "m".repeat(61) + "\"}"))
                 .andExpect(status().isBadRequest());
 
-        verify(runService, never()).createUserRun(any(), any(), any(), any(), any());
+        verify(runService, never()).createUserRun(any(), any(), any(), any(), any(), any());
     }
 
     @Test
@@ -237,12 +237,12 @@ class RunControllerTest {
                         .content("{\"issueKey\":\"AGP-9\",\"instruction\":\"" + "가".repeat(4001) + "\"}"))
                 .andExpect(status().isBadRequest());
 
-        verify(runService, never()).createUserRun(any(), any(), any(), any(), any());
+        verify(runService, never()).createUserRun(any(), any(), any(), any(), any(), any());
     }
 
     @Test
     void create_user_run_unknown_persona_maps_to_404_error_body() throws Exception {
-        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), eq("ghost"), any()))
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), eq("ghost"), isNull(), any()))
                 .willThrow(new NotFoundException("페르소나를 찾을 수 없습니다: ghost"));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))
@@ -256,7 +256,7 @@ class RunControllerTest {
 
     @Test
     void create_user_run_duplicate_active_run_maps_to_409() throws Exception {
-        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), any()))
+        given(runService.createUserRun(eq("AGP-9"), isNull(), isNull(), isNull(), isNull(), any()))
                 .willThrow(new ConflictException("이미 진행 중인 run이 있습니다: AGP-9"));
 
         mvc.perform(post("/api/agent/runs").with(authentication(TestAuth.admin(1L, "Admin")))

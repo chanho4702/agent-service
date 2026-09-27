@@ -72,7 +72,7 @@ class MeetingControllerTest {
 
     @Test
     void admin_convenes_meeting_201_with_run_summary_and_attendees_and_submits_execution() throws Exception {
-        given(meetingService.createMeeting(RunType.MEETING, 1L, "AGP-3", "로그인 개편", List.of("seoyeon", "jiho")))
+        given(meetingService.createMeeting(RunType.MEETING, 1L, "AGP-3", "로그인 개편", List.of("seoyeon", "jiho"), null))
                 .willReturn(created(90L));
 
         mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.admin(1L, "Admin")))
@@ -99,14 +99,14 @@ class MeetingControllerTest {
 
     @Test
     void optional_fields_are_passed_as_null() throws Exception {
-        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null)).willReturn(created(91L));
+        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null, null)).willReturn(created(91L));
 
         mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.admin(1L, "Admin")))
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"type\":\"RETRO\",\"projectId\":1}"))
                 .andExpect(status().isCreated());
 
-        verify(meetingService).createMeeting(RunType.RETRO, 1L, null, null, null);
+        verify(meetingService).createMeeting(RunType.RETRO, 1L, null, null, null, null);
     }
 
     @Test
@@ -114,7 +114,7 @@ class MeetingControllerTest {
         Run run = Run.queuedMeeting(RunType.MANAGER, "PROJECT-1", 1L, List.of(8L), RunTrigger.USER, "harness://default",
                 null, null);
         ReflectionTestUtils.setField(run, "id", 95L);
-        given(meetingService.createMeeting(RunType.MANAGER, 1L, null, null, null)).willReturn(
+        given(meetingService.createMeeting(RunType.MANAGER, 1L, null, null, null, null)).willReturn(
                 new MeetingService.MeetingCreated(run, List.of(persona(8L, "boram", PersonaRole.MANAGER, "📋"))));
 
         mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.admin(1L, "Admin")))
@@ -129,7 +129,7 @@ class MeetingControllerTest {
 
     @Test
     void submission_rejection_still_returns_201() throws Exception {
-        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null)).willReturn(created(92L));
+        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null, null)).willReturn(created(92L));
         willThrow(new TaskRejectedException("pool full")).given(runService).execute(92L);
 
         mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.admin(1L, "Admin")))
@@ -149,14 +149,14 @@ class MeetingControllerTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
 
-        verify(meetingService, never()).createMeeting(any(), anyLong(), any(), any(), any());
+        verify(meetingService, never()).createMeeting(any(), anyLong(), any(), any(), any(), any());
     }
 
     /** P3f — 프로젝트 관리자는 자기 프로젝트 회의를 소집할 수 있다(생성자는 alm이 PROJECT ADMIN을 자동 부여). */
     @Test
     void project_admin_convenes_meeting_of_own_project() throws Exception {
         given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "1")).willReturn(PermissionDecision.allow());
-        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null)).willReturn(created(96L));
+        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null, null)).willReturn(created(96L));
 
         mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.user(2L, "Bob")))
                         .contentType(MediaType.APPLICATION_JSON)
@@ -181,7 +181,7 @@ class MeetingControllerTest {
                 .andExpect(status().isBadRequest())
                 .andExpect(jsonPath("$.error").exists());
 
-        verify(meetingService, never()).createMeeting(any(), anyLong(), any(), any(), any());
+        verify(meetingService, never()).createMeeting(any(), anyLong(), any(), any(), any(), any());
     }
 
     @Test
@@ -194,11 +194,11 @@ class MeetingControllerTest {
 
     @Test
     void service_errors_map_to_400_404_409_with_error_body() throws Exception {
-        given(meetingService.createMeeting(RunType.TASK, 1L, null, "x", null))
+        given(meetingService.createMeeting(RunType.TASK, 1L, null, "x", null, null))
                 .willThrow(new IllegalArgumentException("회의 종류는 MEETING·RETRO·ESCALATION 중 하나여야 합니다: TASK"));
-        given(meetingService.createMeeting(RunType.MEETING, 1L, null, "x", List.of("ghost")))
+        given(meetingService.createMeeting(RunType.MEETING, 1L, null, "x", List.of("ghost"), null))
                 .willThrow(new NotFoundException("페르소나를 찾을 수 없습니다: ghost"));
-        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null))
+        given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null, null))
                 .willThrow(new ConflictException("이 프로젝트에 이미 진행 중인 회의 run이 있습니다: projectId=1"));
 
         mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.admin(1L, "Admin")))

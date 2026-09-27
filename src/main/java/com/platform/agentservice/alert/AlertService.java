@@ -5,6 +5,7 @@ import com.platform.agentservice.run.Run;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -47,6 +48,51 @@ public class AlertService {
             sendRejectThreshold(reviewRun, rejectCount, rejectMax, fixRunId);
         } catch (Exception e) {
             log.warn("run={} 반려 임계 알림 메일 조립 실패(run 처리는 계속됩니다): {}", idOf(reviewRun), e.getMessage());
+        }
+    }
+
+    /** 만료 임박 사람용 PAT 한 건(D-P4-3b) — 토큰 원문·해시는 없다. */
+    public record ExpiringToken(long id, String label, String personaSlug, Instant expiresAt) {
+    }
+
+    /**
+     * 사람용 PAT 만료 임박 알림(D-P4-3b) — 발급자 메일로 한 통(그 사람의 임박 토큰을 묶어서). 발급자 메일을 모르면(V13 이전 토큰)
+     * 운영 수신자({@code AGENT_ALERT_MAIL_TO})로 보낸다. 던지지 않는다.
+     *
+     * @return 메일을 큐에 넘겼거나 org 메일이 꺼져 있어 보낼 수 없는 상태면 true(호출자는 "경고함"으로 표식해 매일 되풀이하지 않는다),
+     *         수신자·토큰 미설정·호출 실패면 false(다음 날 다시 시도)
+     */
+    public boolean notifyTokensExpiring(String ownerEmail, long ownerMemberId, List<ExpiringToken> tokens) {
+        try {
+            List<String> to = ownerEmail != null && !ownerEmail.isBlank() ? List.of(ownerEmail.trim()) : properties.recipients();
+            if (to.isEmpty()) {
+                log.info("PAT 만료 임박 알림 생략 — 수신자 없음(발급자 메일 미상·AGENT_ALERT_MAIL_TO 미설정): owner={} tokens={}",
+                        ownerMemberId, tokens.size());
+                return false;
+            }
+            String token = properties.token();
+            if (token.isEmpty()) {
+                log.warn("PAT 만료 임박 알림 생략 — org 내부 토큰 미설정(ORG_INTERNAL_TOKEN): owner={}", ownerMemberId);
+                return false;
+            }
+            StringBuilder body = new StringBuilder("AI 팀 직원 토큰(PAT)이 7일 안에 만료됩니다. 계속 쓰려면 새 토큰을 발급해 교체하세요.\n\n");
+            for (ExpiringToken t : tokens) {
+                body.append("- #").append(t.id()).append(' ').append(nullToDash(t.label()))
+                        .append(" (페르소나 ").append(nullToDash(t.personaSlug())).append(") 만료 ").append(t.expiresAt()).append('\n');
+            }
+            body.append("\n발급자 memberId: ").append(ownerMemberId).append('\n')
+                    .append("교체: ALM AI 팀 설정 → 직원 토큰에서 새로 발급하고 기존 토큰을 철회(DELETE /api/agent/tokens/{id}).\n");
+            String subject = "[AI팀] 직원 토큰 " + tokens.size() + "건 만료 임박";
+            OrgClient.InternalMailResponse response = orgClient.enqueueInternalMail(to, subject, body.toString(), SOURCE, token);
+            if (response.disabled()) {
+                log.info("PAT 만료 임박 알림 미발송 — org 메일 허브가 꺼져 있습니다: owner={}", ownerMemberId);
+            } else {
+                log.info("PAT 만료 임박 알림 큐 적재: owner={} tokens={}", ownerMemberId, tokens.size());
+            }
+            return true;
+        } catch (Exception e) {
+            log.warn("PAT 만료 임박 알림 요청 실패 — 다음 주기에 다시 시도합니다: owner={} {}", ownerMemberId, e.getMessage());
+            return false;
         }
     }
 

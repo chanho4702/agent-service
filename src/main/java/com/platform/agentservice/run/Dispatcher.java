@@ -4,6 +4,7 @@ import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.IssuePageResponse;
 import com.platform.agentservice.client.dto.IssueResponse;
+import com.platform.agentservice.execution.ExecutionSite;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -74,6 +75,10 @@ public class Dispatcher {
      */
     private void drainQueued() {
         for (Run run : runRepository.findByStatus(RunStatus.QUEUED)) {
+            if (!runService.runsInProcess(run)) {
+                // P4a: LOCAL·러너 고정·인프로세스 꺼짐의 SERVER run은 러너가 claim한다 — 제출해 봐야 execute가 곧바로 물러난다.
+                continue;
+            }
             try {
                 runService.execute(run.getId());
             } catch (Exception e) {
@@ -91,7 +96,10 @@ public class Dispatcher {
      * {@link SchedulerProperties#maxPickPages()}로 한 틱의 ALM 호출 수를 묶는다.
      */
     private void pickNewIssue() {
-        if (runRepository.countByStatusIn(CONCURRENCY_STATUSES) >= properties.maxConcurrentGlobal()) {
+        // 전역 한도는 서버 쪽 워커 자리(인프로세스·PLATFORM 러너)다 — 사용자 PC에서 도는(또는 러너를 기다리는) LOCAL run은 세지 않는다.
+        // 세면 러너가 꺼진 프로젝트의 LOCAL 대기 run이 서버 픽업 전체를 굶긴다. 프로젝트별 한도는 위치 무관하게 센다.
+        if (runRepository.countByStatusInAndExecutionSite(CONCURRENCY_STATUSES, ExecutionSite.SERVER)
+                >= properties.maxConcurrentGlobal()) {
             return;
         }
 

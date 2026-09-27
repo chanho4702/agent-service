@@ -1,5 +1,8 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.execution.ExecutionSite;
+import com.platform.agentservice.execution.ExecutionSiteResolver;
+import org.springframework.beans.factory.annotation.Autowired;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.CommentResponse;
@@ -74,11 +77,23 @@ public class MeetingService {
     private final SchedulerProperties schedulerProperties;
     private final WorkerProperties workerProperties;
     private final ObjectProvider<RunService> runServiceProvider;
+    private final ExecutionSiteResolver executionSites;
 
+    /** P4a 이전 협력자만 받는 생성자(기존 단위 테스트) — 회의 run 실행 위치는 SERVER. */
     public MeetingService(RunRepository runRepository, PersonaRepository personaRepository, GateRepository gateRepository,
                           AlmClient almClient, TokenService tokenService, MeetingProperties meetingProperties,
                           SchedulerProperties schedulerProperties, WorkerProperties workerProperties,
                           ObjectProvider<RunService> runServiceProvider) {
+        this(runRepository, personaRepository, gateRepository, almClient, tokenService, meetingProperties,
+                schedulerProperties, workerProperties, runServiceProvider, ExecutionSiteResolver.serverOnly());
+    }
+
+    @Autowired
+    public MeetingService(RunRepository runRepository, PersonaRepository personaRepository, GateRepository gateRepository,
+                          AlmClient almClient, TokenService tokenService, MeetingProperties meetingProperties,
+                          SchedulerProperties schedulerProperties, WorkerProperties workerProperties,
+                          ObjectProvider<RunService> runServiceProvider, ExecutionSiteResolver executionSites) {
+        this.executionSites = executionSites;
         this.runRepository = runRepository;
         this.personaRepository = personaRepository;
         this.gateRepository = gateRepository;
@@ -100,6 +115,13 @@ public class MeetingService {
      */
     public MeetingCreated createMeeting(RunType type, long projectId, String agendaIssueKey, String agenda,
                                         List<String> personaSlugs) {
+        return createMeeting(type, projectId, agendaIssueKey, agenda, personaSlugs, null);
+    }
+
+    /** {@code executionSite}(P4a): 요청 지정 &gt; 프로젝트 설정 &gt; 전역 기본 — 모르는 값은 400. */
+    public MeetingCreated createMeeting(RunType type, long projectId, String agendaIssueKey, String agenda,
+                                        List<String> personaSlugs, String executionSite) {
+        ExecutionSite.parseOrNull(executionSite);
         if (type == null || !type.isMeeting()) {
             throw new IllegalArgumentException("회의 종류는 MEETING·RETRO·ESCALATION·MANAGER 중 하나여야 합니다: " + type);
         }
@@ -134,8 +156,10 @@ public class MeetingService {
             throw new ConflictException("이 프로젝트에 이미 진행 중인 회의 run이 있습니다: projectId=" + projectId);
         }
 
-        Run run = runRepository.save(Run.queuedMeeting(type, issueKey, projectId, ids(attendees), RunTrigger.USER,
-                RunService.DEFAULT_HARNESS_REF, modelFor(facilitator, project.key()), instruction));
+        Run meeting = Run.queuedMeeting(type, issueKey, projectId, ids(attendees), RunTrigger.USER,
+                RunService.DEFAULT_HARNESS_REF, modelFor(facilitator, project.key()), instruction);
+        meeting.assignExecutionSite(executionSites.resolve(executionSite, projectId));
+        Run run = runRepository.save(meeting);
         log.info("회의 run={} 소집({}, projectId={}, issueKey={}, 참석 {}명)", run.getId(), type, projectId, issueKey,
                 attendees.size());
         return new MeetingCreated(run, attendees);
@@ -200,9 +224,11 @@ public class MeetingService {
                 + "원 run: " + blockedRun.getId() + "(" + blockedRun.getType() + ")\n"
                 + "차단 사유: " + reason + "\n"
                 + "실패 기록(끝부분):\n" + tail(blockedRun.getError());
-        Run escalation = runRepository.save(Run.queuedMeeting(RunType.ESCALATION, issueKey, blockedRun.getProjectId(),
+        Run queuedEscalation = Run.queuedMeeting(RunType.ESCALATION, issueKey, blockedRun.getProjectId(),
                 ids(attendees), blockedRun.getTrigger(), RunService.DEFAULT_HARNESS_REF,
-                modelFor(attendees.get(0), RunService.projectKeyOf(issueKey)), instruction));
+                modelFor(attendees.get(0), RunService.projectKeyOf(issueKey)), instruction);
+        queuedEscalation.assignExecutionSite(executionSites.resolve(null, blockedRun.getProjectId()));
+        Run escalation = runRepository.save(queuedEscalation);
         log.info("run={} BLOCKED → 자동 에스컬레이션 회의 run={} 생성", blockedRun.getId(), escalation.getId());
         submit(escalation.getId());
         commentBestEffort(attendees.get(0), issueKey, "🆘 자동 에스컬레이션 회의 run " + escalation.getId() + " 소집 — 참석: "
@@ -260,9 +286,11 @@ public class MeetingService {
                     log.info("{} — 프로젝트 {}에 진행 중인 회의 run이 있어 건너뜁니다", label, project.key());
                     continue;
                 }
-                Run run = runRepository.save(Run.queuedMeeting(type, Run.projectIssueKey(project.id()),
+                Run queued = Run.queuedMeeting(type, Run.projectIssueKey(project.id()),
                         project.id(), ids(attendees), RunTrigger.SCHEDULER, RunService.DEFAULT_HARNESS_REF,
-                        modelFor(attendees.get(0), project.key()), agenda));
+                        modelFor(attendees.get(0), project.key()), agenda);
+                queued.assignExecutionSite(executionSites.resolve(null, project.id()));
+                Run run = runRepository.save(queued);
                 log.info("{} — 프로젝트 {} {} run={} 생성", label, project.key(), type, run.getId());
                 submit(run.getId());
             } catch (Exception e) {

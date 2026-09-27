@@ -18,5 +18,11 @@ public record MeetingCreateRequest(
         @NotNull(message = "projectId는 필수입니다") Long projectId,
         @Size(max = 40, message = "agendaIssueKey는 40자 이하여야 합니다") String agendaIssueKey,
         @Size(max = 4000, message = "agenda는 4000자 이하여야 합니다") String agenda,
-        @Size(max = 20, message = "personaSlugs는 20명 이하여야 합니다") List<String> personaSlugs) {
+        @Size(max = 20, message = "personaSlugs는 20명 이하여야 합니다") List<String> personaSlugs,
+        String executionSite) {
+
+    /** 실행 위치 지정 없는 요청(기존 호출부). */
+    public MeetingCreateRequest(RunType type, Long projectId, String agendaIssueKey, String agenda, List<String> personaSlugs) {
+        this(type, projectId, agendaIssueKey, agenda, personaSlugs, null);
+    }
 }

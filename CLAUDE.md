@@ -90,8 +90,14 @@ curl -s -X POST $GATEWAY/api/agent/tokens \
   -d '{"label":"my-claude-code","personaSlug":"jiho"}'
 ```
 
+PAT 만료(D-P4-3b, P4a — §13): 요청의 `expiresInDays`를 생략하면 **90일**, 주면 1~365일(범위 밖 400). 무기한은 **전역 관리자가
+`"noExpiry": true`를 명시할 때만**(아니면 403 "무기한 토큰은 전역 관리자만 발급할 수 있습니다", 기간과 함께 주면 400). 응답에
+`expiresAt`(무기한이면 null)이 실린다. 만료된 토큰은 401(기존). V13 이전 토큰은 그대로(무기한은 목록에서 `noExpiry=true`로 경고).
+만료 7일 전 발급자에게 메일 1회(발급 시 JWT `email` 클레임 — 모르면 `AGENT_ALERT_MAIL_TO`), `pat_token.expiry_warned_at`으로 되풀이 방지.
+
 PAT 관리: `GET /api/agent/tokens`(관리자만 — AGP-21, 라벨·페르소나·사용 시각도 운영 정보라 일반 사용자에게 닫았다. 해시는
-어느 응답에도 노출 안 함. P3f: 전역 관리자는 전체, 프로젝트 관리자는 `?projectId=`로 자기 프로젝트 페르소나 토큰만) ·
+어느 응답에도 노출 안 함. P3f: 전역 관리자는 전체, 프로젝트 관리자는 `?projectId=`로 자기 프로젝트 페르소나 토큰만. P4a 항목 필드:
+`kind`(HUMAN|RUN) · `noExpiry`(무기한 사람용 토큰 — 화면 "무기한" 경고) · `expiringSoon`(7일 안 만료 — 경고 배지)) ·
 `DELETE /api/agent/tokens/{id}`(관리자만 — 페르소나 소속 기준). "관리자"의 정의는 §7(P3f). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자
 누구나 — JWT 필요, 슬러그/역할/이름/emoji/active/projectId + AGP-62 avatarConfig만. 말투·기본 모델·스킬은 관리자 전용
 `GET /api/agent/personas/{id}`). 직원 편집은 §10.
@@ -255,9 +261,10 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
 픽업한다(단순화, 브리핑 지시). 검색 첫 페이지가 활성 run 보유·예산 거부·프로젝트 한도 초과 이슈로 가득 차도
 뒤 후보가 굶지 않게 후보를 찾거나 마지막 페이지(`page·size·total`로 판정)에 닿을 때까지 다음
 페이지로 넘어간다 — 한 틱 상한 `SCHEDULER_MAX_PICK_PAGES`(`scheduler.max-pick-pages`, 기본 5,
-0 이하는 5로 본다)(AGP-52). 동시성은 `SCHEDULER_MAX_GLOBAL`(기본 2, 전역 QUEUED+RUNNING)
-· `SCHEDULER_MAX_PER_PROJECT`(기본 1, 프로젝트별) — 픽업 단계에서만 본다(이미 QUEUED인 run을
-드레인하는 건 다시 게이트하지 않음).
+0 이하는 5로 본다)(AGP-52). 동시성은 `SCHEDULER_MAX_GLOBAL`(기본 2, 전역 QUEUED+RUNNING — P4a부터 **SERVER run만** 센다,
+LOCAL 대기 run이 서버 픽업을 굶기지 않게) · `SCHEDULER_MAX_PER_PROJECT`(기본 1, 프로젝트별 — 위치 무관) — 픽업 단계에서만 본다(이미
+QUEUED인 run을 드레인하는 건 다시 게이트하지 않음). 드레인과 `RunService.execute`는 **인프로세스 대상 run만** 띄운다
+(`RunService.runsInProcess` — SERVER + 러너 고정 없음 + `AGENT_IN_PROCESS_EXECUTION=true`). 나머지는 러너가 claim한다(§13).
 
 **실패 정책(P3d, 2026-09-27 사용자 결정 AGP-55 — P2a "재시도 3회 → BLOCKED"를 대체)** — **사고형(인프라) 실패는
 재시도하지 않고 즉시 중단한다.** 프로세스 비정상 종료·시간 초과·워커 self-FAILED(`report_result(FAILED)`)·준비 단계 실패
@@ -715,7 +722,9 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
     `hostPersonaId`=run 소유 페르소나(진행자, `attendeePersonaIds[0]`과 같지만 명시 계약), 참석자는 `run.attendee_persona_ids` 저장
     순서 그대로(명단이 비면 진행자 1명). QUEUED·WAITING_APPROVAL·BLOCKED 회의는 싣지 않는다. 쿼리 1회, `run(status)` 인덱스.
   - `currentRun`: `RunService.ACTIVE_STATUSES`(QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED) 중 페르소나별 최신 1건(id 기준), 없으면 null.
-    필드: id·status·issueKey·type·trigger·attempt·model·startedAt.
+    필드: id·status·issueKey·type·trigger·attempt·model·startedAt + P4a `executionSite`(SERVER|LOCAL — LOCAL이면 책상 모니터 "집"
+    표지)·`awaitingRunner`(QUEUED인데 지금 집어갈 러너가 없음 — "러너 대기" 라벨, 판정은 §13 `RunnerAvailability`). `recentRuns[]`·run 목록
+    요약(`RunSummaryResponse`)에도 `executionSite`·`runnerId`가 붙는다(필드 추가만).
   - 최근 종결 = DONE·FAILED·CANCELLED·BLOCKED, `updatedAt` 최신순(BLOCKED는 endedAt이 비어 있어서). BLOCKED는
     `currentRun`에도 나온다.
   - `lastActivity`: 그 페르소나 최근 감사 1건, **5분 이내일 때만**(아니면 null). `AuditEntry` = id·tool·status·summary·createdAt·
@@ -1027,13 +1036,19 @@ Anthropic 호출 대상은 §8의 `AGENT_ANTHROPIC_API_URL`을 같이 쓴다. �
 "MCP로 연결해서 하는 경우랑 직접 우리 UI에서 하는 경우 나눠줘야 한다"(사용자 지시). 두 경로는 같은 MCP 도구(§3)를 부르지만 구조가
 다르다 — 감사·사무실에서 섞여 보이지 않도록 `tool_call_audit.origin`(V12)으로 구분한다.
 
-| | 내부 워커(우리 UI·스케줄러) | 외부 MCP(사람의 Claude Code 등) |
+**P4a(§13)부터 "내부 워커"는 실행 위치가 셋으로 갈린다** — 어느 쪽이든 run·run 토큰·예산·리뷰·실패 정책·감사 `origin=WORKER`는 똑같고
+(같은 `WorkerLauncher.buildSpec` + `WorkerExecution` + `RunService.applyOutcome`), 다른 것은 워커 프로세스가 도는 곳과 LLM 과금뿐이다:
+① 인프로세스(SERVER, `AGENT_IN_PROCESS_EXECUTION=true` — 호스트 dev), ② PLATFORM 러너(SERVER, 비밀 없는 러너 컨테이너가 claim —
+compose), ③ LOCAL 러너(사용자 PC가 claim — 그 PC의 구독·자기 키로 과금, 우리 키를 받지 않는다). 외부 MCP(오른쪽 열)는 run이 없는
+사람 직접 호출이라 여전히 별개다. 러너 토큰(`agr_`)은 MCP 도구를 부를 수 없고 직원 토큰(`agp_`)·run 토큰은 러너 API를 부를 수 없다.
+
+| | 내부 워커(우리 UI·스케줄러 — 인프로세스·PLATFORM 러너·LOCAL 러너) | 외부 MCP(사람의 Claude Code 등) |
 |---|---|---|
 | 시작 | USER run(`POST /api/agent/runs`)·스케줄러 픽업·회의/매니저 소집 → **run 생성** | 사람이 관리자에게 받은 페르소나 PAT으로 자기 클라이언트에서 접속(§1·§2) — **run 없음** |
 | 인증 | run 토큰(디스패처가 run마다 발급하는 임시 PAT, 종결 시 철회 — `PatToken.isRunToken()`) | 사람용 PAT(`agp_*`, 철회·만료 전까지 유효) |
 | 예산·킬 스위치(§5.2) | 적용(`RunService.execute` 진입점) | **미적용** — 호출자 자기 비용·자기 하네스 |
 | 리뷰 상시화(§5.8)·게이트(§5.3) | 적용(done은 리뷰어만, `request_gate`·`report_*`는 run 토큰 전용) | 미적용 — §3 규약 5번대로 호출자가 직접 done |
-| LLM 키·과금 | 우리 쪽(§8 프로젝트 > 전역 > env) | 호출자 쪽(우리 키를 쓰지 않는다) |
+| LLM 키·과금 | 인프로세스·PLATFORM 러너: 우리 쪽(§8 프로젝트 > 전역 > env). LOCAL 러너: 그 PC 쪽(원장 `credential_scope=LOCAL`) | 호출자 쪽(우리 키를 쓰지 않는다) |
 | 기록 | 페르소나 명의 + 감사 `origin=WORKER`, `run_id` | 페르소나 명의 + 감사 `origin=EXTERNAL` |
 | 사무실 | `currentRun`·말풍선 | 활성 run 없으면 `presence=EXTERNAL`("원격 접속 중") + 말풍선 |
 
@@ -1100,3 +1115,156 @@ Anthropic 호출 대상은 §8의 `AGENT_ANTHROPIC_API_URL`을 같이 쓴다. �
 `./gradlew build`는 run 범위 토큰 주입이 후속이다(env 커튼 때문에 호스트 env 토큰은 닿지 않는다).
 
 **CI** — `ci.yml`이 main 푸시에서 buildx + GitHub Actions 캐시(`type=gha`)로 이미지를 만든다.
+
+## 13. P4a: 실행 위치 — 서버·로컬 러너 (2026-09-27, AGP-69 T2 + 토큰 위생 D-P4-3b)
+
+"둘 다 해야지"(사용자 결정) — 플랫폼 지시(USER run·스케줄러 픽업·회의·매니저)가 실제로 실행되는 곳을 ① **서버**(24시간, LLM API 키
+과금) ② **로컬 러너**(사용자 PC, 그 사람의 Claude 구독 — PC가 켜져 있어야 함)로 나눈다. 서버 쪽 격리 방침(워커를 이 서비스 컨테이너에서
+돌리지 않는다)과 러너 이미지 지침은 §12. 설계: `plans/2026-09-27-agent-service-p4-execution-sites.md`
+(D-P4-1·3·3b·4·5). 구현은 `execution`·`runner` 패키지 + `WorkerLauncher` 분리 + `RunService` 러너 경로.
+
+**실행 위치는 run 속성(D-P4-1, V13)** — `run.execution_site`(SERVER|LOCAL, 기존 행 SERVER) + `run.runner_id`(QUEUED=고정 러너, RUNNING
+이후=배정 러너, 인프로세스 run은 null). 새 run의 위치는 단일 지점 `ExecutionSiteResolver`: **요청 `executionSite` > 프로젝트 설정
+(`project_execution_site`) > 전역 기본 `AGENT_DEFAULT_EXECUTION_SITE`(기본 SERVER, 잘못된 값은 SERVER + 기동 warn)**. 거치는 곳: USER run
+(`POST /api/agent/runs` 요청 필드 `executionSite`)·스케줄러 픽업·회의 소집(`POST /api/agent/meetings` 요청 필드 `executionSite`)·회고/매니저
+cron·자동 에스컬레이션. 계보 run(REVIEW·반려-fix·그 재개)은 다시 풀지 않고 **부모 위치를 승계하고 부모 러너에 고정**한다 — 워커 커밋이
+푸시되지 않고 그 러너 디스크의 워크스페이스에만 있어서다. 일반 TASK 재개·회의 continuation은 위치만 승계하고 고정하지 않는다(새로 clone).
+모르는 위치 값은 400.
+
+**SERVER 실행의 두 형태(D-P4-5 — 2026-09-27 검수 결정)** — `AGENT_IN_PROCESS_EXECUTION`(`platform.agent.execution.in-process`, 기본 true):
+
+| 값 | SERVER run을 도는 곳 | 쓰는 곳 |
+|---|---|---|
+| true | 이 프로세스(`RunService.execute` → `WorkerLauncher.launch`, P3까지와 같다) | 호스트에서 도는 로컬 dev |
+| false | QUEUED로 남기고 **PLATFORM 러너 컨테이너**가 claim | compose 배포 — 워커를 비밀(마스터 키·DB 비밀번호·내부 토큰, `/proc/1/environ`)이 든 서비스 컨테이너 안에서 돌리지 않는다 |
+
+`RunService.runsInProcess(run)` = SERVER && 러너 고정 없음 && in-process on. 드레인·`execute`는 이 조건일 때만 워커를 띄우고, 아니면 QUEUED로
+둔다(러너 대기). 킬 스위치·예산은 인프로세스는 `execute` 진입점, 러너는 claim에서 같은 `BudgetGuard.allow`로 건다.
+
+**러너(D-P4-3, V13 `runner`)** — `kind` PLATFORM|LOCAL, `project_id`(null=플랫폼 전역), `issued_by`, `token_hash`(SHA-256, 원문 미저장),
+`token_prefix`(표시용 앞 8자), `last_heartbeat_at`, `runner_version`·`os`·`max_concurrency`(heartbeat 보고, 1~8), `revoked_at`. 상태는
+파생값: REVOKED / NEVER_CONNECTED / heartbeat가 `AGENT_RUNNER_OFFLINE_AFTER`(기본 90s) 넘게 없으면 OFFLINE / 그 밖 ONLINE.
+
+| | PLATFORM | LOCAL |
+|---|---|---|
+| 집는 run | SERVER만(전 프로젝트), in-process가 켜져 있으면 claim이 항상 204(두 경로가 같은 run을 다투지 않게) | LOCAL만 — 프로젝트 러너는 그 프로젝트, 전역 러너(전역 관리자 발급)는 전체 |
+| 생성 | env `AGENT_PLATFORM_RUNNER_TOKEN`(agr_ + 20자 이상)만 — 기동 시(`ApplicationReadyEvent`) 해시로 행을 만들거나 되살리고 다른 PLATFORM 행은 철회. 비었거나 형식이 틀리면 PLATFORM 러너 없음. 관리 API로 발급·철회 불가(철회 409) | AI 팀 설정에서 발급(`POST /api/agent/runners`) |
+| claim 응답의 LLM 키 | 해석된 키(§8 프로젝트 > 전역 > 서비스 env). 없으면 run을 넘기지 않고 §12와 같은 `MissingLlmKeyException` 문구로 사고형 BLOCKED("서버 실행에는 LLM API 키가 필요합니다 — 전역 또는 프로젝트 키를 설정하세요") — `WORKER_REQUIRE_API_KEY`와 무관하게 항상(서버 실행에는 구독 세션이 없다) | **절대 없음** — 그 PC의 구독·자기 env 키(과금 분리). 원장 `credential_scope=LOCAL` |
+
+**토큰 종류 분리(D-P4-3b)** — 러너 토큰 `agr_`(runner 표)·직원 토큰 `agp_`(pat_token, 사람용)·run 토큰(pat_token, label `run:`). 러너 프로토콜
+경로(`RunnerPaths` — `/api/agent/runners/heartbeat`·`/claim`·`/harness`·`/runs/**`)는 JWT 리소스서버 없는 별도 체인(`SecurityConfig` 순서 2)의
+`RunnerAuthFilter`가 유일한 게이트다 — `agr_` 접두가 아니면 해시 조회 전에 401(`{"error":"유효하지 않은 러너 토큰"}`). MCP 체인의 `PatAuthFilter`와
+`PatService.validate`는 `agr_`를 401로 끊는다. 러너 관리 API(`/api/agent/runners` 컬렉션·`/{id}`)는 러너 체인 매처에 없어 JWT 체인(순서 3)으로 간다.
+MCP 체인과 같은 이유(permitAll ≠ 인증 스킵 — `BearerTokenAuthenticationFilter`가 JWT 아닌 Bearer를 401로 끊는다)로 러너 체인에 JWT를 붙이지 않는다.
+
+**러너 프로토콜(러너 토큰 전용)**
+
+```json
+// POST /api/agent/runners/heartbeat (30초 권장 — 본문 전부 선택)
+{"version": "0.1.0", "os": "Windows 11", "maxConcurrency": 2, "runIds": [812]}
+// 200
+{"runnerId": 3, "kind": "LOCAL", "serverTime": "…", "stopRunIds": [805], "offlineAfterSeconds": 90}
+```
+
+`stopRunIds` = 보고한 run 중 서버에서 CANCELLED·BLOCKED가 됐거나 이 러너 배정이 아닌 것 — 러너는 그 워커를 멈춘다(WAITING_APPROVAL·DONE은 워커가
+마무리 중일 수 있어 멈추지 않는다).
+
+`POST /api/agent/runners/claim`(본문 없음) → 줄 run이 없으면 **204**, 있으면 200:
+
+```json
+{"runId": 812, "issueKey": "AGP-70", "projectId": 1, "attempt": 1, "executionSite": "LOCAL",
+ "spec": {"runId": 812, "runType": "TASK", "workspaceLineage": false, "inheritedWorkspacePath": null, "meeting": false,
+          "repoUrl": "https://github.com/…/agent-service.git", "prompt": "## 작업 이슈\n…runId=812\n", "model": "claude-…",
+          "maxTurns": 80, "allowedTools": "Read,Edit,…,mcp__agent-platform__*", "timeoutMinutes": 40,
+          "mcpUrl": "https://host/api/agent/mcp", "expertise": {"slug": "jiho", "name": "지호", "role": "BACKEND", "skills": "…"} },
+ "runToken": "agp_…", "llmApiKey": null, "credentialScope": "LOCAL",
+ "harness": {"sha256": "…", "path": "/api/agent/runners/harness"},
+ "budget": {"perRunUsdCap": 5, "monthlyUsdCap": 100}}
+```
+
+- 원자적 배정: 후보(QUEUED·위치 일치·고정 러너 없음 또는 이 러너, id 오름차순 20건)마다 `BudgetGuard.allow` → 조건부 UPDATE
+  `RunRepository.claimForRunner`(`… where status=QUEUED and execution_site=? and (runner_id is null or runner_id=?)`, `@Version`도 올림 — 인프로세스
+  `execute`의 낙관적 락과도 배타). 1행을 얻은 쪽만 이긴다(실 PostgreSQL 동시성 테스트 `RunnerClaimRepositoryTest`). 이 러너에 RUNNING이
+  `max_concurrency` 이상이면 204.
+- 배정 뒤: `RunService.prepareJob`(인프로세스 `execute`와 같은 리포 매핑·이슈 claim·코멘트·회의 자료) → (PLATFORM) 키 해석 →
+  `WorkerLauncher.buildSpec`(같은 프롬프트·모델·도구 목록) → run 토큰 발급(`RunTokenService.issueFor`, `run.pat_id`에 기록) → 응답. 어느 단계든 실패하면
+  발급한 토큰을 철회하고 `RunService.failIncident`(인프로세스 실패와 같은 사고형 BLOCKED + 코멘트 + 메일) 후 다음 후보로.
+- `spec.mcpUrl`은 `AGENT_RUNNER_PUBLIC_MCP_URL`(러너가 nginx·게이트웨이를 거쳐 보는 주소) — 비면 `worker.mcp-url`.
+- 하네스: `GET /api/agent/runners/harness` → zip(`.claude/…` + 루트 파일, `settings.local.json`은 어느 깊이든 제외 — AGP-51과 같은 규칙, 최상위 `worktrees/`(Claude Code 워크트리 체크아웃)도 제외, 64MB 상한), ETag =
+  `harness.sha256`. 항목 순서·시각 고정이라 내용이 같으면 해시가 같다(60초 캐시). 러너는 해시가 바뀔 때만 받는다.
+- `toString`은 토큰·키·프롬프트를 싣지 않는다(`RunnerClaimResponse`·`WorkSpec`).
+
+```json
+// POST /api/agent/runners/runs/{id}/result — WorkerExecution의 WorkerResult 모양 + 러너가 파싱한 커밋 링크
+{"exitCode": 0, "timedOut": false, "resultText": "…", "sessionId": "…", "costUsd": 1.23, "inputTokens": 100, "outputTokens": 50,
+ "model": "claude-…", "rawTail": "…", "workspacePath": "C:\\agent-work\\run-812",
+ "commits": [{"issueKey": "AGP-70", "sha": "abc123", "subject": "…", "url": "https://github.com/…/commit/abc123"}]}
+// 200
+{"accepted": true, "duplicate": false, "runStatus": "DONE"}
+```
+
+- 배정받은 러너만(아니면 403 "이 러너가 배정받은 run이 아닙니다"). `exitCode`만 필수(숫자·불리언은 박싱 — Jackson 3 FAIL_ON_NULL_FOR_PRIMITIVES).
+  `sessionId` ≤80, `workspacePath` ≤400, `commits` ≤100(400), `rawTail`은 뒤 2000자·`model`은 60자로 자른다.
+- **멱등**: 조건부 UPDATE `markRunnerResult`(`runner_result_at is null`일 때만) — 두 번째부터 `{"accepted":false,"duplicate":true}`, 처리 없음.
+- 처리: run 토큰 철회 → `RunService.applyExternalOutcome` = 인프로세스와 **같은 `applyOutcome`**(원장·비용 경고·리뷰 상시화·반려 예산·사고형 즉시
+  중단·자동 에스컬레이션). 원장 `credential_scope`는 claim 때 확정한 `run.credential_scope`. 커밋 링크는 러너가 보낸 목록만 쓴다(서버는 러너 디스크를
+  볼 수 없고, 같은 경로가 서버에 우연히 있으면 남의 커밋을 링크한다) — 이슈 키 정규식이 아니면 버리고, http(s)가 아닌 URL은 null(링크 생략).
+- 워커가 run 도중 MCP `report_result`로 스스로 종결했어도 인프로세스와 같다(재조회해 존중).
+
+**생존 판정(D-P4-3)** — `MaintenanceSchedulingConfig`가 `AGENT_RUNNER_LIVENESS_INTERVAL_MS`(기본 30초)마다 `RunnerService.sweepOffline`: 배정
+러너가 없거나·철회됐거나·heartbeat가 offline-after(90초) 넘게 없는 RUNNING run은 run 토큰 철회 + `failIncident("러너 연결 끊김 — …")` →
+사고형 BLOCKED + ⛔ 코멘트 + 메일(INCIDENT) + 자동 에스컬레이션 훅(§5.1·§5.11 그대로). 결과를 받았는데(`runner_result_at`) 반영이 끝나지 않은 채 창이
+지난 RUNNING run도 같은 경로("러너 결과 반영 실패"). 오프라인 러너에 남은 비-RUNNING run의 토큰 참조도 철회한다. claim·결과 보고도 heartbeat로 친다.
+이 주기 작업은 스케줄러 킬스위치와 무관하게 돈다(`AGENT_MAINTENANCE_ENABLED`, 테스트 프로필만 끈다). 러너 run 취소(`POST /runs/{id}/cancel`)는
+run 토큰을 곧바로 철회하고, 러너는 다음 heartbeat의 `stopRunIds`로 멈춘다.
+
+**관리 API(JWT — 권한은 페르소나 관리와 같다, §7)**
+
+| 엔드포인트 | 권한 | 응답 |
+|---|---|---|
+| `POST /api/agent/runners` `{"name": "≤80", "projectId": 7 \| null}` | 그 프로젝트 관리자, projectId null(전역 러너)은 전역 관리자만 | 201 `{id, kind:"LOCAL", name, projectId, token:"agr_…"(이때 한 번만), tokenPrefix, createdAt}` |
+| `GET /api/agent/runners?projectId=` | 없으면 전역 관리자(전체 — PLATFORM 포함), 있으면 그 프로젝트 관리자(그 프로젝트 + 전역 LOCAL 러너) | `[{id, kind, name, projectId, issuedBy, tokenPrefix, createdAt, revokedAt, lastHeartbeatAt, version, os, maxConcurrency, status, currentRunIds[]}]` — 해시·원문 없음 |
+| `DELETE /api/agent/runners/{id}` | 러너 소속 프로젝트 관리자, 전역 러너·PLATFORM·없는 id는 전역 관리자만 | 204(멱등). PLATFORM은 409. 배정돼 돌던 run은 다음 생존 판정에서 BLOCKED, 이 러너에 고정된 QUEUED 계보 run은 "러너 대기"로 남는다(사람이 취소) |
+| `GET /api/agent/execution-site/projects/{projectId}` | 인증 사용자 누구나 | `{projectId, site(저장값, 없으면 null), effectiveSite, defaultSite, inProcess}` |
+| `PUT /api/agent/execution-site/projects/{projectId}` `{"site": "SERVER"\|"LOCAL"\|null}` | 그 프로젝트 관리자 | 위 shape — null은 설정 해제(전역 기본). 이미 만든 run은 안 바뀐다 |
+
+발급·철회는 감사 `runner.create`·`runner.revoke`(SYSTEM, summary는 runnerId·projectId·prefix만).
+
+**사무실(D-P4-4)** — `currentRun.executionSite`·`currentRun.awaitingRunner`(§6). "러너 대기" = QUEUED이고: LOCAL은 범위 안 LOCAL 러너(고정 run은
+그 러너)가 전부 오프라인, SERVER는 in-process가 꺼져 있고 PLATFORM 러너(고정 run은 그 러너)가 오프라인. 판정 스냅샷(`RunnerAvailability`)은 폴링당
+쿼리 1회.
+
+**실행부 분리(러너 jar 재사용 경계)** — `WorkerLauncher`는 이제 조립만 한다: `buildSpec(run, job, mcpUrl)` → `WorkSpec`(DB·Spring 모르는 값) +
+`WorkerExecution.execute(spec, authorizer)`(워크스페이스 준비·clone·하네스·페르소나 스킬·mcp-config 파일(클론 밖, finally 삭제)·`claude -p`·
+JSON 파싱). 인증(run 토큰·워커 env)은 워크스페이스 준비 **뒤**에 `Authorizer` 콜백으로 받는다 — clone 실패면 토큰을 발급하지 않는 P2a 순서 그대로.
+인프로세스 `launch`는 콜백에서 LLM 키 해석 + run 토큰 발급, `finally`에서 철회(분리 전과 같은 순서·같은 테스트). 러너(T3)는 claim 응답의
+`spec`·`runToken`·`llmApiKey`로 같은 `WorkerExecution`을 돌리고, `CommitLinkParser`로 커밋 링크를 뽑아 결과와 함께 보낸다. 러너 모듈이 이 클래스들
+(`WorkSpec`·`WorkerExecution`·`WorkerResult`·`CommandExecutor`·`ProcessCommandExecutor`·`HarnessMaterializer`·`CommitLinkParser`·`WorkerJob.Expertise`)을
+의존할 수 있게 Spring 빈·DB 의존이 없다(현재 단일 모듈 — 서브모듈 분리는 T3 몫).
+
+**설정**
+
+| 키 | env | 기본 | 의미 |
+|---|---|---|---|
+| `execution.default-site` | `AGENT_DEFAULT_EXECUTION_SITE` | `SERVER` | 새 run 전역 기본 위치 |
+| `execution.in-process` | `AGENT_IN_PROCESS_EXECUTION` | `true` | SERVER run 인프로세스 실행. compose는 false(PLATFORM 러너) |
+| `runner.public-mcp-url` | `AGENT_RUNNER_PUBLIC_MCP_URL` | 빈 값(= `worker.mcp-url`) | claim 명세의 MCP 주소 |
+| `runner.offline-after` | `AGENT_RUNNER_OFFLINE_AFTER` | `90s` | 러너 오프라인 판정 |
+| `runner.liveness-interval-ms` | `AGENT_RUNNER_LIVENESS_INTERVAL_MS` | `30000` | 생존 판정 주기 |
+| `runner.platform-token` | `AGENT_PLATFORM_RUNNER_TOKEN` | 빈 값(PLATFORM 러너 없음) | PLATFORM 러너 토큰 — 러너 컨테이너에도 같은 값 |
+| `tokens.expiry-warn-cron` | `AGENT_TOKEN_EXPIRY_WARN_CRON` | `0 0 9 * * *`(Asia/Seoul) | PAT 만료 7일 전 알림 주기, 비우면 꺼짐 |
+| `maintenance.enabled` | `AGENT_MAINTENANCE_ENABLED` | `true` | 생존 판정·만료 알림 주기 작업 |
+
+**사람용 PAT 위생(D-P4-3b)** — §1 참고: 만료 기본 90일·1~365일·무기한은 전역 관리자 명시(`noExpiry`)만, 만료 7일 전 발급자 메일 1회
+(`PatExpiryNotifier` — 발급자별 1통, 넘기지 못하면 표식하지 않고 다음 날 재시도), 목록 `noExpiry`·`expiringSoon`·`kind`. run 토큰은 정책 밖(무기한,
+run 종료 시 철회). V13 `pat_token.expiry_warned_at`·`owner_email`.
+
+**배포 의존·한계(알고 쓸 것)**
+
+- **게이트웨이**: `gateway-server`의 JWT 체인은 `agr_`를 JWT로 디코드하다 401로 끊는다 — 러너가 게이트웨이를 거쳐 오려면 `/api/agent/runners/{heartbeat,claim,harness,runs/**}`를
+  `/api/agent/mcp/**`처럼 JWT 없는 체인으로 빼야 한다(이 리포 밖, 후속). 관리 API(`/api/agent/runners`, `/{id}`)는 기존 JWT 체인 그대로.
+- **compose**: `AGENT_IN_PROCESS_EXECUTION=false`·`AGENT_PLATFORM_RUNNER_TOKEN`·`AGENT_RUNNER_PUBLIC_MCP_URL` 배선과 PLATFORM 러너 컨테이너는
+  infra 몫(AGP-68·T3). in-process=false인데 PLATFORM 러너가 없으면 SERVER run은 전부 "러너 대기"로 멈춘다.
+- 러너 철회 시 그 러너에 고정된 QUEUED 계보 run은 자동으로 풀리지 않는다(다른 러너는 워크스페이스가 없어 어차피 실패한다) — 사람이 취소한다.
+- 러너 run의 OS 프로세스 강제 종료는 러너 몫이다(서버는 `stopRunIds`로 알리기만 한다).
+- 러너 수동 E2E(실 PC → 서버)는 T3 러너 jar 이후. 이 태스크는 단위·통합 테스트(원자성은 실 PostgreSQL)까지.

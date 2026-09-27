@@ -61,7 +61,7 @@ class PatControllerTest {
 
     @Test
     void admin_creates_token_returns_201_with_plaintext_once() throws Exception {
-        given(patService.issue(any(), eq(1L)))
+        given(patService.issueForHuman(any(), eq(1L), any(), org.mockito.ArgumentMatchers.anyBoolean()))
                 .willReturn(new PatCreatedResponse("agp_abcdef", 10L, "ci-token", "qa-bot"));
 
         String body = """
@@ -93,7 +93,7 @@ class PatControllerTest {
     /** 경계값 — 정확히 120자 label은 통과해야 한다. */
     @Test
     void label_at_exact_column_width_is_accepted() throws Exception {
-        given(patService.issue(any(), eq(1L)))
+        given(patService.issueForHuman(any(), eq(1L), any(), org.mockito.ArgumentMatchers.anyBoolean()))
                 .willReturn(new PatCreatedResponse("agp_abcdef", 10L, "l", "qa-bot"));
 
         String body = """
@@ -144,7 +144,7 @@ class PatControllerTest {
         given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.allow());
         personaRepository.save(Persona.of(9711L, "pat-own", PersonaRole.BACKEND, "O", null, null, 7L));
         personaRepository.save(Persona.of(9712L, "pat-shared", PersonaRole.BACKEND, "S", null, null));
-        given(patService.issue(any(), eq(2L))).willReturn(new PatCreatedResponse("agp_x", 11L, "l", "pat-own"));
+        given(patService.issueForHuman(any(), eq(2L), any(), org.mockito.ArgumentMatchers.anyBoolean())).willReturn(new PatCreatedResponse("agp_x", 11L, "l", "pat-own"));
 
         mvc.perform(post("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob")))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"label\":\"l\",\"personaSlug\":\"pat-own\"}"))
@@ -201,5 +201,33 @@ class PatControllerTest {
     void non_admin_cannot_revoke_token() throws Exception {
         mvc.perform(delete("/api/agent/tokens/10").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isForbidden());
+    }
+
+    /** D-P4-3b — 만료 기간은 1~365일. 요청 경계에서 400(서비스까지 가지 않는다). */
+    @Test
+    void expires_in_days_out_of_range_is_400() throws Exception {
+        for (String days : List.of("0", "366")) {
+            mvc.perform(post("/api/agent/tokens").with(authentication(TestAuth.admin(1L, "Admin")))
+                            .contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"label\":\"l\",\"personaSlug\":\"qa-bot\",\"expiresInDays\":" + days + "}"))
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error").value("expiresInDays는 1~365 사이여야 합니다"));
+        }
+        verify(patService, org.mockito.Mockito.never()).issueForHuman(any(), org.mockito.ArgumentMatchers.anyLong(), any(), org.mockito.ArgumentMatchers.anyBoolean());
+    }
+
+    /** D-P4-3b — 컨트롤러는 JWT의 전역 관리자 여부와 email 클레임을 서비스 정책에 넘긴다. */
+    @Test
+    void create_passes_global_admin_flag_and_owner_email_to_policy() throws Exception {
+        given(patService.issueForHuman(any(), eq(2L), any(), org.mockito.ArgumentMatchers.anyBoolean()))
+                .willReturn(new PatCreatedResponse("agp_x", 12L, "l", "qa-bot", Instant.now()));
+        personaRepository.save(Persona.of(9713L, "email-own", PersonaRole.BACKEND, "O", null, null, 7L));
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.allow());
+
+        mvc.perform(post("/api/agent/tokens").with(authentication(TestAuth.user(2L, "Bob")))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"label\":\"l\",\"personaSlug\":\"email-own\"}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.expiresAt").exists());
+        verify(patService).issueForHuman(any(), eq(2L), org.mockito.ArgumentMatchers.isNull(), eq(false));
     }
 }

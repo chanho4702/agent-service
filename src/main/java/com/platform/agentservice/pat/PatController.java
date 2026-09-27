@@ -1,6 +1,8 @@
 package com.platform.agentservice.pat;
 
+import com.platform.agentservice.authz.AgentCaller;
 import com.platform.agentservice.pat.dto.PatCreateRequest;
+import org.springframework.security.core.Authentication;
 import com.platform.agentservice.pat.dto.PatCreatedResponse;
 import com.platform.agentservice.pat.dto.PatSummaryResponse;
 import jakarta.validation.Valid;
@@ -38,8 +40,11 @@ public class PatController {
     @PostMapping
     @PreAuthorize("@agentAuthz.canManagePersonaSlug(authentication, #request.personaSlug())")
     @ResponseStatus(HttpStatus.CREATED)
-    public PatCreatedResponse create(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody PatCreateRequest request) {
-        return patService.issue(request, Long.parseLong(jwt.getSubject()));
+    public PatCreatedResponse create(@AuthenticationPrincipal Jwt jwt, @Valid @RequestBody PatCreateRequest request,
+                                     Authentication authentication) {
+        // D-P4-3b: 만료 기본 90일·1~365일, 무기한은 전역 관리자 명시 선택만. 발급자 메일은 만료 임박 알림 수신자다.
+        return patService.issueForHuman(request, Long.parseLong(jwt.getSubject()), jwt.getClaimAsString("email"),
+                AgentCaller.from(authentication).globalAdmin());
     }
 
     /** projectId 없으면 전체(전역 관리자만), 있으면 그 프로젝트 소속 페르소나의 토큰만. */

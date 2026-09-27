@@ -3,6 +3,9 @@ package com.platform.agentservice.config;
 import com.platform.agentservice.pat.McpPaths;
 import com.platform.agentservice.pat.PatAuthFilter;
 import com.platform.agentservice.pat.PatService;
+import com.platform.agentservice.runner.RunnerAuthFilter;
+import com.platform.agentservice.runner.RunnerPaths;
+import com.platform.agentservice.runner.RunnerService;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 import org.springframework.core.annotation.Order;
@@ -64,9 +67,27 @@ public class SecurityConfig {
         return http.build();
     }
 
-    /** 그 외 모든 경로 — 기존과 동일한 JWT 리소스서버 인증. */
+    /**
+     * 러너 프로토콜 전용 체인(P4a AGP-69) — {@code agr_} 러너 토큰만 받는 {@link RunnerAuthFilter}가 유일한 게이트다. MCP 체인과 같은
+     * 이유로 JWT 리소스서버를 붙이지 않는다(러너 토큰은 JWT가 아니다). 관리 API({@code /api/agent/runners} 컬렉션·{@code /{id}})는
+     * 여기 매처에 없어 아래 JWT 체인으로 간다.
+     */
     @Bean
     @Order(2)
+    SecurityFilterChain runnerFilterChain(HttpSecurity http, RunnerService runnerService) throws Exception {
+        RunnerAuthFilter runnerAuthFilter = new RunnerAuthFilter(runnerService);
+        http
+                .securityMatcher(RunnerPaths.PROTOCOL_MATCHERS)
+                .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .csrf(csrf -> csrf.disable())
+                .authorizeHttpRequests(auth -> auth.anyRequest().permitAll())
+                .addFilterBefore(runnerAuthFilter, AuthorizationFilter.class);
+        return http.build();
+    }
+
+    /** 그 외 모든 경로 — 기존과 동일한 JWT 리소스서버 인증. */
+    @Bean
+    @Order(3)
     SecurityFilterChain filterChain(HttpSecurity http, JwtAuthenticationConverter converter) throws Exception {
         http
                 .sessionManagement(s -> s.sessionCreationPolicy(SessionCreationPolicy.STATELESS))

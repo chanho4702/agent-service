@@ -33,7 +33,8 @@ import java.util.stream.Stream;
 @Component
 public class HarnessMaterializer {
 
-    static final String LOCAL_SETTINGS_FILE = "settings.local.json";
+    /** 러너용 하네스 번들 zip({@code HarnessBundleService})도 같은 제외 규칙을 쓴다. */
+    public static final String LOCAL_SETTINGS_FILE = "settings.local.json";
 
     private final WorkerProperties properties;
 

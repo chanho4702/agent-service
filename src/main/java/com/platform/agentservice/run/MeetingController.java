@@ -33,7 +33,7 @@ public class MeetingController {
     @ResponseStatus(HttpStatus.CREATED)
     public MeetingCreatedResponse create(@Valid @RequestBody MeetingCreateRequest request) {
         MeetingService.MeetingCreated created = meetingService.createMeeting(request.type(), request.projectId(),
-                request.agendaIssueKey(), request.agenda(), request.personaSlugs());
+                request.agendaIssueKey(), request.agenda(), request.personaSlugs(), request.executionSite());
         Run run = created.run();
         try {
             runService.execute(run.getId());

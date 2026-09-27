@@ -37,6 +37,7 @@ import java.util.Optional;
 public class PatAuthFilter extends OncePerRequestFilter {
 
     private static final String BEARER_PREFIX = "Bearer ";
+    static final String RUNNER_TOKEN_PREFIX = "agr_";
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
     private final PatService patService;
@@ -55,7 +56,9 @@ public class PatAuthFilter extends OncePerRequestFilter {
         }
 
         String token = extractBearerToken(request);
-        Optional<PatPrincipal> principal = token.isEmpty() ? Optional.empty() : patService.validate(token);
+        // 러너 토큰(agr_)은 MCP 도구를 부를 수 없다(D-P4-3b) — 해시 조회 전에 접두로 끊는다(러너 표는 pat_token과 따로다).
+        Optional<PatPrincipal> principal = token.isEmpty() || token.startsWith(RUNNER_TOKEN_PREFIX)
+                ? Optional.empty() : patService.validate(token);
 
         if (principal.isEmpty()) {
             writeUnauthorized(response);

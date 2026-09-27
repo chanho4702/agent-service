@@ -166,6 +166,30 @@ platform:
       # 원장 적재용 단가(USD/백만 토큰) — CHAT_MODEL을 바꾸면 그 모델 단가로 같이 바꾼다(기본값은 Haiku 4.5).
       input-usd-per-mtok: ${CHAT_INPUT_USD_PER_MTOK:1}
       output-usd-per-mtok: ${CHAT_OUTPUT_USD_PER_MTOK:5}
+    execution:
+      # 실행 위치(P4a D-P4-1) — 새 run의 기본 위치. 결정 순서: 요청 executionSite > 프로젝트 설정(AI 팀 설정) > 이 값.
+      # SERVER(플랫폼 쪽) | LOCAL(사용자 PC 로컬 러너). 잘못된 값은 SERVER로 본다(기동 warn).
+      default-site: ${AGENT_DEFAULT_EXECUTION_SITE:SERVER}
+      # SERVER run을 이 프로세스 안에서 직접 띄울지(D-P4-5). true = 호스트에서 도는 로컬 dev(기존 동작).
+      # 컨테이너 배포는 false — 워커를 비밀(마스터 키·DB 비밀번호·내부 토큰)이 든 이 컨테이너 안에서 돌리지 않고,
+      # SERVER run은 QUEUED로 남아 PLATFORM 러너 컨테이너(비밀 없음·격리 네트워크)가 claim한다.
+      in-process: ${AGENT_IN_PROCESS_EXECUTION:true}
+    runner:
+      # 러너(P4a AGP-69). claim 명세에 싣는 MCP 주소 — 러너는 nginx·게이트웨이를 거쳐 들어온다(예: https://host/api/agent/mcp).
+      # 비면 worker.mcp-url을 쓴다(호스트 dev에서 러너를 같은 PC에 띄울 때).
+      public-mcp-url: ${AGENT_RUNNER_PUBLIC_MCP_URL:}
+      # heartbeat가 이만큼 끊기면 오프라인 — 그 러너의 RUNNING run은 사고형 BLOCKED("러너 연결 끊김") + 알림.
+      offline-after: ${AGENT_RUNNER_OFFLINE_AFTER:90s}
+      liveness-interval-ms: ${AGENT_RUNNER_LIVENESS_INTERVAL_MS:30000}
+      # PLATFORM 러너 토큰(agr_ + 20자 이상). 기동 시 이 해시로 PLATFORM 러너 행을 맞춘다(교체하면 이전 행 철회). 비면 플랫폼 러너 없음.
+      # 관리 API로는 PLATFORM 러너를 발급할 수 없다 — 이 env가 정본. 러너 컨테이너에도 같은 값을 준다.
+      platform-token: ${AGENT_PLATFORM_RUNNER_TOKEN:}
+    tokens:
+      # 사람용 PAT 만료 임박(7일) 알림 주기(D-P4-3b) — Spring cron 6필드, Asia/Seoul. 비우면 꺼짐.
+      expiry-warn-cron: ${AGENT_TOKEN_EXPIRY_WARN_CRON:0 0 9 * * *}
+    maintenance:
+      # 러너 생존 판정·PAT 만료 알림 주기 작업. 스케줄러 킬스위치와 무관하게 돈다(테스트 프로필만 끈다).
+      enabled: ${AGENT_MAINTENANCE_ENABLED:true}
     budget:
       # 예산 캡(P2a T5) — BudgetService가 BudgetGuardConfig의 permissive 기본값을 대체한다.
       # 월 캡은 캘린더 월(UTC) 누적, 플랫폼 전체와 프로젝트별에 같은 값을 쓴다(P2a 결정,

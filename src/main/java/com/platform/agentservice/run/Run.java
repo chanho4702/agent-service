@@ -1,5 +1,6 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.execution.ExecutionSite;
 import com.platform.common.error.ConflictException;
 import jakarta.persistence.*;
 import lombok.AccessLevel;
@@ -83,6 +84,21 @@ public class Run {
     private Long outputPageId;
     /** 회의 run 참석 페르소나 id 쉼표 목록 — 첫 번째가 진행자(= {@link #personaId}). 회의 run이 아니면 null. */
     @Column(length = 400) private String attendeePersonaIds;
+    /**
+     * 실행 위치(P4a D-P4-1). 새 run은 {@code ExecutionSiteResolver}가 정하고({@link #assignExecutionSite}), 계보 run은 부모 것을
+     * 승계한다 — 워크스페이스가 부모가 돈 곳에 있다.
+     */
+    @Enumerated(EnumType.STRING) @Column(nullable = false, length = 10)
+    private ExecutionSite executionSite = ExecutionSite.SERVER;
+    /**
+     * QUEUED에서는 "이 러너만 집을 수 있음"(계보 run 고정 — 승계 워크스페이스가 그 러너 디스크에 있다), RUNNING 이후는 배정받은 러너.
+     * 인프로세스 실행 run은 null이다.
+     */
+    private Long runnerId;
+    /** 러너 결과 보고 수신 시각 — 조건부 UPDATE로 한 번만 처리한다(중복 보고 멱등, {@code RunRepository#markRunnerResult}). */
+    private Instant runnerResultAt;
+    /** claim 시점에 확정한 LLM 키 출처(PROJECT|PLATFORM|ENV|LOCAL) — 러너 결과를 원장에 쓸 때 쓴다(인프로세스 run은 null). */
+    @Column(length = 10) private String credentialScope;
     private Instant startedAt;
     private Instant endedAt;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
@@ -140,6 +156,7 @@ public class Run {
             r.parentRunId = prior.id;
             r.attendeePersonaIds = prior.attendeePersonaIds;
         }
+        r.inheritSite(prior, prior.isWorkspaceLineage());
         r.rejectCount = prior.rejectCount;
         r.status = RunStatus.QUEUED;
         r.attempt = prior.attempt + 1;
@@ -226,6 +243,7 @@ public class Run {
         r.parentRunId = parent.id;
         // 판정 자체는 부모 TASK 값으로 하지만(ReviewService), 감독 화면·알림이 이 리뷰가 몇 번째 반려 뒤인지 보여 주게 싣는다.
         r.rejectCount = parent.rejectCount;
+        r.inheritSite(parent, true);
         r.status = RunStatus.QUEUED;
         r.attempt = 1;
         return r;
@@ -253,9 +271,42 @@ public class Run {
         r.workspacePath = taskRun.workspacePath;
         r.parentRunId = reviewRunId;
         r.rejectCount = rejectCount;
+        r.inheritSite(taskRun, true);
         r.status = RunStatus.QUEUED;
         r.attempt = taskRun.attempt + 1;
         return r;
+    }
+
+    /**
+     * 실행 위치 승계(P4a). 워크스페이스를 이어 쓰는 run이면 부모가 돈 러너에 고정한다 — 승계 워크스페이스(워커의 푸시되지 않은
+     * 커밋)는 그 러너의 디스크에만 있다. 부모가 인프로세스로 돌았으면(runnerId null) 고정할 러너가 없다.
+     */
+    private void inheritSite(Run parent, boolean pinToParentRunner) {
+        this.executionSite = parent.executionSite;
+        this.runnerId = pinToParentRunner ? parent.runnerId : null;
+    }
+
+    /** 새 run의 실행 위치(요청 &gt; 프로젝트 &gt; 전역, {@code ExecutionSiteResolver}) — 아직 아무도 집지 않은 QUEUED에서만. */
+    public void assignExecutionSite(ExecutionSite site) {
+        requireStatus(RunStatus.QUEUED, "QUEUED 상태에서만 실행 위치를 정할 수 있습니다");
+        this.executionSite = site == null ? ExecutionSite.SERVER : site;
+    }
+
+    /** 러너가 claim한 run에 발급한 run 토큰(PAT id)과 LLM 키 출처를 남긴다 — 결과 보고·생존 판정·취소 때 철회 대상이다. */
+    public void attachRunnerLaunch(long patId, String credentialScope) {
+        requireStatus(RunStatus.RUNNING, "RUNNING 상태에서만 러너 실행 정보를 남길 수 있습니다");
+        this.patId = patId;
+        this.credentialScope = credentialScope;
+    }
+
+    /** run 토큰을 철회한 뒤 참조를 지운다(같은 토큰을 두 번 철회하러 오지 않게). */
+    public void clearRunToken() {
+        this.patId = null;
+    }
+
+    /** 러너에 고정·배정된 run인가 — 인프로세스 실행은 이런 run을 집지 않는다(워크스페이스가 러너 디스크에 있다). */
+    public boolean isRunnerBound() {
+        return runnerId != null;
     }
 
     /**
