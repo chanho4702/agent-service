@@ -29,11 +29,20 @@ public record WorkerJob(String repoUrl, String issueTitle, String issueBody, Lis
     }
 
     /**
-     * 회의 프롬프트 재료(D-P3b-5). {@code recentRuns}는 회고 자료(RETRO만, 그 외 빈 목록), {@code approvedPlan}은
-     * PLAN 게이트 승인 뒤 이어받은 run에서만 채워진다(승인된 요청문 — 있으면 회의를 다시 열지 않는다).
+     * 회의 프롬프트 재료(D-P3b-5). {@code recentRuns}는 회고·매니저 순찰 자료(RETRO·MANAGER만, 그 외 빈 목록),
+     * {@code approvedPlan}은 PLAN 게이트 승인 뒤 이어받은 run에서만 채워진다(승인된 요청문 — 있으면 회의를 다시 열지 않는다).
+     * {@code pendingGates}·{@code blockedRuns}는 매니저 순찰 자료(P3c, D-P3c-3 — MANAGER만) — 워커에는 게이트·run을
+     * 조회하는 도구가 없어서 서버가 요약 라인을 실어 준다.
      */
     public record MeetingContext(long projectId, long spaceId, boolean autoIssue, List<Attendee> attendees,
-                                 List<String> recentRuns, String approvedPlan) {
+                                 List<String> recentRuns, String approvedPlan, List<String> pendingGates,
+                                 List<String> blockedRuns) {
+
+        /** 매니저 순찰 자료가 없는 회의 3종용. */
+        public MeetingContext(long projectId, long spaceId, boolean autoIssue, List<Attendee> attendees,
+                              List<String> recentRuns, String approvedPlan) {
+            this(projectId, spaceId, autoIssue, attendees, recentRuns, approvedPlan, List.of(), List.of());
+        }
     }
 
     /** 참석 페르소나 — 첫 번째가 진행자. {@code voice}는 페르소나 말투(voicePrompt, 없으면 null). */

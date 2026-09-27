@@ -84,8 +84,11 @@ class MeetingRunTest {
     }
 
     @Test
-    void run_type_meeting_set_is_exactly_the_three_meeting_kinds() {
-        assertThat(RunType.MEETING_TYPES).containsExactlyInAnyOrder(RunType.MEETING, RunType.RETRO, RunType.ESCALATION);
+    void run_type_meeting_set_is_the_three_meeting_kinds_plus_manager() {
+        // MANAGER는 회의가 아니지만 clone·claim 없음·pageId 필수 보고·게시판 게시 계약을 그대로 쓴다(D-P3c-1).
+        assertThat(RunType.MEETING_TYPES).containsExactlyInAnyOrder(RunType.MEETING, RunType.RETRO, RunType.ESCALATION,
+                RunType.MANAGER);
+        assertThat(RunType.MANAGER.isMeeting()).isTrue();
         assertThat(RunType.TASK.isMeeting()).isFalse();
         assertThat(RunType.REVIEW.isMeeting()).isFalse();
     }

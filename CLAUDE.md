@@ -76,7 +76,7 @@ curl -s -X POST $GATEWAY/api/wiki/spaces \
   -H "Authorization: Bearer $ADMIN_AT" -H "Content-Type: application/json" \
   -d '{"key":"agp","name":"Agent Platform"}'
 
-# 2) 페르소나 생성 — role은 PLANNER|DESIGNER|FRONTEND|BACKEND|OPS|REVIEWER 중 하나,
+# 2) 페르소나 생성 — role은 PLANNER|DESIGNER|FRONTEND|BACKEND|OPS|REVIEWER|MANAGER 중 하나(MANAGER는 §5.10),
 #    grants.resourceType은 GLOBAL|SPACE|PROJECT, grants.role은 VIEWER|COMMENTER|EDITOR|ADMIN.
 curl -s -X POST $GATEWAY/api/agent/personas \
   -H "Authorization: Bearer $ADMIN_AT" -H "Content-Type: application/json; charset=utf-8" \
@@ -435,13 +435,14 @@ USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogres
 |---|---|---|---|
 | `space-id` | `MEETING_SPACE_ID` | 빈 값 | 회의록 위키 스페이스. 비면 소집 API 400, 회고 cron·자동 에스컬레이션은 건너뜀. 진행자 페르소나에 이 스페이스 EDITOR grant 필요 |
 | `retro-cron` | `MEETING_RETRO_CRON` | 빈 값(off) | Spring cron 6필드, **Asia/Seoul**. `SCHEDULER_ENABLED=false`여도 이것만으로 동작 |
+| `manager-cron` | `MEETING_MANAGER_CRON` | 빈 값(off) | 매니저 순찰 주기(P3c) — 형식·조건은 retro-cron과 같다. §5.10 |
 | `auto-escalation` | `MEETING_AUTO_ESCALATION` | `false` | BLOCKED 승격 시 ESCALATION run 자동 생성(비용 때문에 기본 off) |
 | `auto-issue` | `MEETING_AUTO_ISSUE` | `true` | 결정→이슈를 워커가 `create_issue`로 직접. false면 PLAN 게이트 경유 |
 
 **소집 API — `POST /api/agent/meetings`(ADMIN)**
 
 ```json
-{"type": "MEETING|RETRO|ESCALATION", "projectId": 1, "agendaIssueKey": "선택, 40자", "agenda": "선택, 4000자", "personaSlugs": ["선택, 20명 이하"]}
+{"type": "MEETING|RETRO|ESCALATION|MANAGER", "projectId": 1, "agendaIssueKey": "선택, 40자", "agenda": "선택, 4000자", "personaSlugs": ["선택, 20명 이하"]}
 ```
 
 - 201 응답: `{"run": RunSummaryResponse, "attendees": [{"personaId","slug","name","role","emoji"}]}` — attendees[0]이 진행자.
@@ -491,12 +492,63 @@ USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogres
 가드: **원 run이 회의 3종이면 만들지 않는다**(재귀 방지), 같은 이슈에 활성 ESCALATION이 있으면 건너뛴다. 리뷰 반려의
 "원 run 없음·워크스페이스 없음" BLOCKED는 대상이 아니다(한도 분기만).
 
-**회고 cron** — `retro-cron`이 있을 때만 `MeetingRetroSchedulingConfig`가 등록된다(자체 `@EnableScheduling` — 스케줄러
+**회고 cron** — `retro-cron`이 있을 때만 회고 task가 등록된다(`MeetingSchedulingConfig` — retro·manager cron 중 하나라도 있으면 서는 설정, 자체 `@EnableScheduling` — 스케줄러
 킬스위치와 독립. 이 경우 `Dispatcher.tick`도 스케줄되지만 `enabled` 확인에서 바로 돌아간다). 틱마다 `worker.repos` 매핑의
 프로젝트 키마다 ALM 프로젝트 목록(진행자 명의 1회 조회)으로 id를 풀어 프로젝트별 RETRO run 하나(trigger=SCHEDULER,
-참석=활성 전원, 대표 키 `PROJECT-<id>`). ALM에 없는 키·활성 회의가 있는 프로젝트는 건너뛴다.
+참석=활성 전원 — MANAGER 롤 제외(§5.10), 대표 키 `PROJECT-<id>`). ALM에 없는 키·활성 회의가 있는 프로젝트는 건너뛴다.
 
 **리뷰와의 관계** — 회의 run의 DONE은 REVIEW를 만들지 않는다(`ReviewService.onRunDone`은 TASK만 — 테스트로 고정).
+
+### 5.10 매니저 run (P3c, 2026-09-27, AGP-45 — 스펙 §10.4-3)
+
+"사람은 매니저의 보고를 받는다" — 매니저 페르소나(`PersonaRole.MANAGER`)가 보드를 순찰해 정체를 찾아 독려·정리하고,
+사람에게 필요한 결정을 보고 페이지로 올린다. 새 엔진 없이 §5.9 회의 파이프라인을 재사용한다: `RunType.MANAGER`는
+`MEETING_TYPES`에 들어 있어 **clone 없음·claim 없음·`report_result` pageId 필수·무보고 종료=실패·REVIEW 안 낳음·
+자동 에스컬레이션 대상 아님·사무실 게시판(`boardPosts`) 게시**가 회의 run과 똑같이 따라온다. 다른 것은 참석 규칙·순찰
+자료·프롬프트뿐이다(`MeetingService` + `WorkerLauncher.buildManagerPrompt`).
+
+**설정** — `platform.agent.meetings.manager-cron`(`MEETING_MANAGER_CRON`, 기본 빈 값=off). 형식·시간대(Spring cron 6필드,
+Asia/Seoul)·동작 조건(`SCHEDULER_ENABLED=false`여도 동작)·스페이스 요건(`MEETING_SPACE_ID` — 보고 페이지도 회의록
+스페이스에 쓴다, 매니저에게 EDITOR grant 필요)이 `retro-cron`과 같다. 틱마다 `worker.repos` 매핑 프로젝트별 MANAGER run 하나
+(trigger=SCHEDULER, 지시문=`MeetingService.MANAGER_AGENDA`, 대표 키 `PROJECT-<id>`). 매니저 페르소나에는 대상 프로젝트
+EDITOR 이상 grant가 필요하다(코멘트·우선순위 정정).
+
+**참석** — MANAGER 롤 **활성** 페르소나 **1명 단독**(여럿이면 id 최솟값). 없으면 소집 API 400, cron은 틱 전체를 건너뛰고
+warn 로그. 소집 API에서 `personaSlugs`를 주면 MANAGER 롤 1명이어야 한다(실무 롤·여러 명이면 400) — 매니저가 여럿일 때
+특정 매니저를 고르는 용도. 회고 "전원"에서 MANAGER 롤은 빠진다(매니저는 실무 회고 참석자가 아니라 보고 수신자다).
+계획 회의(PLANNING_ROLES)·에스컬레이션(그 이슈에 TASK/REVIEW run을 돌린 페르소나 — 매니저 run은 회의 계열이라 제외)에도
+기본으로는 앉지 않는다.
+
+**소집** — `POST /api/agent/meetings`에 `"type": "MANAGER"`. RETRO처럼 안건(`agendaIssueKey`·`agenda`) 없이 된다(프로젝트
+전반 순찰이 기본). `agenda`를 주면 `<사용자-지시>`로 실린다(특정 에픽만 보라 등).
+
+**활성 회의 가드 공유** — 매니저 run도 "프로젝트당 활성 회의 계열 run 1건" 가드(`MEETING_TYPES` 기준)에 걸린다. 매니저 순찰과
+실무 회의가 동시에 돌면 같은 보드를 두 run이 건드리고 게시판·예산이 겹치기 때문이다. 순찰 중이면 회의 소집이 409, 회의
+중이면 매니저 cron이 그 프로젝트를 건너뛴다.
+
+**순찰 자료(서버가 프롬프트에 싣는 요약, D-P3c-3)**
+
+- `<최근-run>`: 최근 24시간 그 프로젝트 run(최대 30, 자기 자신 제외) — 회고와 같은 라인.
+- `<대기-게이트>`: 그 프로젝트 run에 걸린 미결 게이트 — `gate <id> · <kind> · run <id> · <issueKey> · 대기 <분>분 · <요청문
+  앞 80자, 한 줄>`. 게이트에는 프로젝트 축이 없어 `findByDecisionIsNull` + run 조인으로 거른다(OfficeService와 같은 방식).
+- `<차단-run>`: 그 프로젝트의 BLOCKED run(기간 무관, 최대 20) — 24시간 창 밖으로 밀려난 정체가 가장 오래된 정체라서.
+- **이슈 단위 정체 신호는 서버가 산출하지 않는다** — "inprogress인데 활성 run 없는 이슈"를 서버가 뽑으려면 ALM 검색
+  페이지 순회 + run 조인 + 경과일 판정(검색 응답에 갱신 시각이 없다)이 필요해서, 프롬프트 규약으로 대체했다: 워커가
+  `search_issues(statuses=[진행 중])` → `get_issue`로 최근 코멘트·진척을 보고 판정한다.
+
+**행동 범위(D-P3c-4, 프롬프트 규약)** — 금지: `claim_issue`·`update_issue_status`·`log_work`·`link_pr`·코드/git·
+`request_gate`(사람 판단이 필요한 것은 보고의 "사람에게 필요한 결정" 절로). 허용: 정체 이슈에 독려·정리 `add_comment`(명령이
+아니라 팀원에게 말 걸듯, 최근 매니저 코멘트가 있으면 되풀이 금지), 우선순위 정정 `update_issue(priority)`+사유 코멘트, 중복
+의심은 닫지 말고 "중복 후보 — 닫기 제안" 코멘트, 담당 제안 코멘트, `create_issue`는 **정리 목적**만(`auto-issue=false`면
+금지 — 보고서에 제안으로). 보고 페이지는 `create_page(spaceId, title="[매니저 보고] <YYYY-MM-DD> <프로젝트 키>")` 한 번,
+템플릿: 보드 현황 요약 / 병목·정체와 조치 / 독려 내역 / 사람에게 필요한 결정. 마감 `report_result(DONE, pageId)`.
+
+**한계(알고 쓸 것)**
+
+- **배분 없음** — 담당자 지정 도구(`assign_issue`)가 없어 담당 제안은 코멘트뿐이다(AGP-61 예정). 라벨 부여도 없다.
+- 금지 목록은 §5.8과 같이 **프롬프트 수준 규약**이다 — 매니저 run 토큰으로도 `claim_issue`·`update_issue_status` 도구
+  호출 자체는 가능하다.
+- 매니저 보고는 회의 계열이라 게시판에 회의록과 같은 줄로 걸린다(프론트가 type=MANAGER로 라벨 구분 — P3c T2).
 
 ## 6. P3a: AI 사무실 감독 API (2026-09-26)
 
@@ -507,7 +559,7 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
   `lastActivity`·`todayCostUsd`) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
   `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래).
-  - `boardPosts`(사무실 게시판, D-P3b-7): 회의 run(MEETING/RETRO/ESCALATION) 중 DONE이고 `output_page_id`가 있는 것
+  - `boardPosts`(사무실 게시판, D-P3b-7): 회의 계열 run(MEETING/RETRO/ESCALATION + P3c MANAGER 보고) 중 DONE이고 `output_page_id`가 있는 것
     `endedAt` 최신순 5건 — `{runId, type, issueKey, projectId, pageId, spaceId, endedAt}`. `spaceId`는 위키 링크
     (`/spaces/:spaceId/pages/:pageId`)용으로 run별 저장 없이 현재 `meetings.space-id` 설정값을 싣는다(미설정이면 null) —
     운영 중 스페이스를 바꾸면 과거 게시물 링크가 깨질 수 있다(최근 5건뿐이라 수용). 제목은 위키를 조회하지 않는다(프론트가

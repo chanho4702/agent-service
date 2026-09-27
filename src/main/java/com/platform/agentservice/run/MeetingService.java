@@ -40,6 +40,10 @@ import java.util.stream.Collectors;
  * 계획=PLANNER·DESIGNER·FRONTEND·BACKEND, 회고=전원, 에스컬레이션=그 이슈에 run을 돌린 페르소나(관련 롤)+REVIEWER를
  * 롤 순서(PLANNER→…→REVIEWER)·id 순으로 세운다. 진행자는 run 소유 페르소나라 run 토큰·기록 명의가 된다.
  *
+ * <p><b>매니저 run(P3c, D-P3c-1·2)</b>: {@link RunType#MANAGER}는 회의가 아니라 매니저 페르소나 한 명의 보드 순찰이다 —
+ * 참석은 MANAGER 롤 활성 페르소나 1명 단독(여럿이면 id 최솟값). 회고 "전원"에서 MANAGER 롤은 빠진다(매니저는 실무 회고
+ * 참석자가 아니라 보고 수신자다). 서버가 최근 run·대기 게이트·BLOCKED run 요약을 순찰 자료로 싣는다.
+ *
  * <p><b>순환 의존</b>: {@link RunService}가 빌드·에스컬레이션 훅으로 이 서비스를 부르고, 이 서비스는 새 run 실행을
  * {@link RunService#execute}(@Async)로 제출한다 — {@link ReviewService}와 같은 이유로 {@link ObjectProvider}로 지연 조회한다.
  */
@@ -51,6 +55,9 @@ public class MeetingService {
             EnumSet.of(PersonaRole.PLANNER, PersonaRole.DESIGNER, PersonaRole.FRONTEND, PersonaRole.BACKEND);
     static final Duration RETRO_WINDOW = Duration.ofHours(24);
     static final String RETRO_AGENDA = "정기 회고 — 최근 24시간 run 결과(완료·실패·반려·차단·게이트)를 돌아보고 개선 이슈를 도출한다.";
+    static final String MANAGER_AGENDA = "정기 매니저 순찰 — 보드를 점검해 정체·병목을 찾아 독려·정리하고, 사람에게 필요한 결정을 보고한다.";
+    static final int GATE_REQUEST_PREVIEW = 80;
+    private static final int BLOCKED_RUNS_LIMIT = 20;
     private static final int RECENT_COMMENTS_LIMIT = 10;
     private static final int ESCALATION_ERROR_TAIL = 1000;
     private static final int ANCESTOR_WALK_LIMIT = 20;
@@ -93,15 +100,16 @@ public class MeetingService {
     public MeetingCreated createMeeting(RunType type, long projectId, String agendaIssueKey, String agenda,
                                         List<String> personaSlugs) {
         if (type == null || !type.isMeeting()) {
-            throw new IllegalArgumentException("회의 종류는 MEETING·RETRO·ESCALATION 중 하나여야 합니다: " + type);
+            throw new IllegalArgumentException("회의 종류는 MEETING·RETRO·ESCALATION·MANAGER 중 하나여야 합니다: " + type);
         }
         if (!meetingProperties.hasSpace()) {
             throw new IllegalArgumentException("회의록 스페이스가 설정되지 않았습니다(platform.agent.meetings.space-id)");
         }
         String issueKeyInput = isBlank(agendaIssueKey) ? null : agendaIssueKey.trim();
         String instruction = isBlank(agenda) ? null : agenda.trim();
-        if (type != RunType.RETRO && issueKeyInput == null && instruction == null) {
-            // 회고는 최근 run 자체가 안건이지만, 계획·에스컬레이션은 무엇을 논의할지 없으면 빈 회의가 예산만 쓴다.
+        if (type != RunType.RETRO && type != RunType.MANAGER && issueKeyInput == null && instruction == null) {
+            // 회고는 최근 run, 매니저는 프로젝트 전반 순찰 자체가 안건이지만, 계획·에스컬레이션은 무엇을 논의할지 없으면
+            // 빈 회의가 예산만 쓴다.
             throw new IllegalArgumentException(type + " 회의에는 agendaIssueKey 또는 agenda가 필요합니다");
         }
 
@@ -153,9 +161,12 @@ public class MeetingService {
                     .map(CommentResponse::body)
                     .toList();
         }
-        List<String> recentRuns = run.getType() == RunType.RETRO ? recentRunLines(run) : List.of();
+        boolean manager = run.getType() == RunType.MANAGER;
+        List<String> recentRuns = run.getType() == RunType.RETRO || manager ? recentRunLines(run) : List.of();
         WorkerJob.MeetingContext meeting = new WorkerJob.MeetingContext(run.getProjectId(), meetingProperties.spaceId(),
-                meetingProperties.autoIssue(), attendeesOf(run), recentRuns, approvedPlan(run));
+                meetingProperties.autoIssue(), attendeesOf(run), recentRuns, approvedPlan(run),
+                manager ? pendingGateLines(run.getProjectId()) : List.of(),
+                manager ? blockedRunLines(run) : List.of());
         return new WorkerJob(null, title, body, recentComments, run.getInstruction(), meeting);
     }
 
@@ -196,22 +207,39 @@ public class MeetingService {
     }
 
     /**
-     * 회고 주기 실행(D-P3b-4②) — 스케줄러 repos 매핑의 프로젝트마다 RETRO run 하나. 프로젝트 키→id는 진행자 명의로
-     * ALM 프로젝트 목록을 한 번 읽어 푼다. 프로젝트 하나의 실패가 다른 프로젝트 회고를 막지 않게 건별로 삼킨다.
+     * 회고 주기 실행(D-P3b-4②) — 스케줄러 repos 매핑의 프로젝트마다 RETRO run 하나. 참석은 활성 전원(MANAGER 롤 제외).
      */
     public void runRetros() {
+        runPerProject(RunType.RETRO, "회고 cron", RETRO_AGENDA);
+    }
+
+    /**
+     * 매니저 순찰 주기 실행(P3c, D-P3c-2) — 회고와 같은 골격으로 프로젝트마다 MANAGER run 하나. 매니저 페르소나가 없으면
+     * 틱 전체를 건너뛴다(로그만 — 설정 누락이 cron 예외로 번지지 않게).
+     */
+    public void runManagerRounds() {
+        runPerProject(RunType.MANAGER, "매니저 cron", MANAGER_AGENDA);
+    }
+
+    /**
+     * 주기 실행 공통 골격. 프로젝트 키→id는 진행자 명의로 ALM 프로젝트 목록을 한 번 읽어 푼다. 활성 회의 가드는 회의 계열
+     * 전체({@link RunType#MEETING_TYPES})를 공유한다 — 매니저 순찰이 실무 회의와 동시에 돌면 같은 보드를 두 run이 동시에
+     * 건드리고 게시판·예산이 겹친다. 프로젝트 하나의 실패가 다른 프로젝트를 막지 않게 건별로 삼킨다.
+     */
+    private void runPerProject(RunType type, String label, String agenda) {
         if (!meetingProperties.hasSpace()) {
-            log.warn("회고 cron 건너뜀 — 회의록 스페이스 미설정(platform.agent.meetings.space-id)");
+            log.warn("{} 건너뜀 — 회의록 스페이스 미설정(platform.agent.meetings.space-id)", label);
             return;
         }
         Map<String, String> repos = workerProperties.repos();
         if (repos == null || repos.isEmpty()) {
-            log.info("회고 cron 건너뜀 — 리포 매핑(platform.agent.worker.repos)에 프로젝트가 없습니다");
+            log.info("{} 건너뜀 — 리포 매핑(platform.agent.worker.repos)에 프로젝트가 없습니다", label);
             return;
         }
-        List<Persona> attendees = defaultAttendees(RunType.RETRO, Set.of());
+        List<Persona> attendees = defaultAttendees(type, Set.of());
         if (attendees.isEmpty()) {
-            log.warn("회고 cron 건너뜀 — 활성 페르소나가 없습니다");
+            log.warn("{} 건너뜀 — {}", label,
+                    type == RunType.MANAGER ? "MANAGER 롤 활성 페르소나가 없습니다" : "활성 페르소나가 없습니다");
             return;
         }
         String bearer = tokenService.bearerFor(attendees.get(0).getMemberId());
@@ -222,20 +250,20 @@ public class MeetingService {
                         .filter(p -> p.key() != null && p.key().equalsIgnoreCase(key))
                         .findFirst().orElse(null);
                 if (project == null) {
-                    log.warn("회고 cron — 프로젝트 키 {}를 ALM에서 찾을 수 없어 건너뜁니다", key);
+                    log.warn("{} — 프로젝트 키 {}를 ALM에서 찾을 수 없어 건너뜁니다", label, key);
                     continue;
                 }
                 if (hasActiveMeeting(project.id())) {
-                    log.info("회고 cron — 프로젝트 {}에 진행 중인 회의가 있어 건너뜁니다", project.key());
+                    log.info("{} — 프로젝트 {}에 진행 중인 회의 run이 있어 건너뜁니다", label, project.key());
                     continue;
                 }
-                Run retro = runRepository.save(Run.queuedMeeting(RunType.RETRO, Run.projectIssueKey(project.id()),
+                Run run = runRepository.save(Run.queuedMeeting(type, Run.projectIssueKey(project.id()),
                         project.id(), ids(attendees), RunTrigger.SCHEDULER, RunService.DEFAULT_HARNESS_REF,
-                        schedulerProperties.modelFor(project.key()), RETRO_AGENDA));
-                log.info("회고 cron — 프로젝트 {} 회고 run={} 생성", project.key(), retro.getId());
-                submit(retro.getId());
+                        schedulerProperties.modelFor(project.key()), agenda));
+                log.info("{} — 프로젝트 {} {} run={} 생성", label, project.key(), type, run.getId());
+                submit(run.getId());
             } catch (Exception e) {
-                log.warn("회고 cron — 프로젝트 {} 회고 생성 실패, 다음 프로젝트로 계속합니다: {}", key, e.getMessage());
+                log.warn("{} — 프로젝트 {} run 생성 실패, 다음 프로젝트로 계속합니다: {}", label, key, e.getMessage());
             }
         }
     }
@@ -261,6 +289,11 @@ public class MeetingService {
                 }
                 picked.add(persona);
             }
+            if (type == RunType.MANAGER
+                    && (picked.size() != 1 || picked.get(0).getRole() != PersonaRole.MANAGER)) {
+                // 매니저 run은 한 명의 순찰이다 — 실무 롤이 매니저 프롬프트를 받거나 여럿이 롤플레이하면 행동 범위(D-P3c-4)가 흐려진다.
+                throw new IllegalArgumentException("MANAGER run의 personaSlugs는 MANAGER 롤 페르소나 1명이어야 합니다");
+            }
             return picked;
         }
         List<Persona> defaults = defaultAttendees(type, relatedPersonaIds);
@@ -272,13 +305,16 @@ public class MeetingService {
 
     /**
      * 롤 기본 참석 규칙. 에스컬레이션의 "관련 롤"은 그 이슈에 run을 돌린 페르소나(작업자·리뷰어)다 — 아무도 없으면(사람이
-     * 이슈 없이 소집 등) 기획이 대신 앉는다. REVIEWER는 항상 참석한다.
+     * 이슈 없이 소집 등) 기획이 대신 앉는다. REVIEWER는 항상 참석한다. 매니저는 MANAGER 롤 1명(id 최솟값)이고,
+     * 회고 "전원"에서는 빠진다(보고 수신자이지 실무 회고 참석자가 아니다).
      */
     List<Persona> defaultAttendees(RunType type, Set<Long> relatedPersonaIds) {
         List<Persona> active = personaRepository.findAll(Sort.by("id")).stream().filter(Persona::isActive).toList();
         List<Persona> picked = switch (type) {
             case MEETING -> active.stream().filter(p -> PLANNING_ROLES.contains(p.getRole())).toList();
-            case RETRO -> active;
+            case RETRO -> active.stream().filter(p -> p.getRole() != PersonaRole.MANAGER).toList();
+            case MANAGER -> active.stream().filter(p -> p.getRole() == PersonaRole.MANAGER)
+                    .min(Comparator.comparing(Persona::getId)).map(List::of).orElse(List.of());
             case ESCALATION -> {
                 List<Persona> related = active.stream().filter(p -> relatedPersonaIds.contains(p.getId())).toList();
                 List<Persona> base = related.isEmpty()
@@ -328,6 +364,58 @@ public class MeetingService {
                 .map(r -> "run " + r.getId() + " · " + r.getType() + " · " + r.getIssueKey() + " · " + r.getStatus()
                         + " · 시도 " + r.getAttempt())
                 .toList();
+    }
+
+    /**
+     * 매니저 순찰 자료 — 이 프로젝트 run에 걸린 미결 게이트. 게이트에는 프로젝트 축이 없어 run을 붙여 거른다(OfficeService와
+     * 같은 방식). 요청문은 앞 {@value #GATE_REQUEST_PREVIEW}자 한 줄로 — 순찰 자료지 게이트 결재가 아니다.
+     */
+    private List<String> pendingGateLines(long projectId) {
+        List<Gate> pending = gateRepository.findByDecisionIsNull();
+        if (pending.isEmpty()) {
+            return List.of();
+        }
+        Map<Long, Run> runsById = runRepository.findAllById(pending.stream().map(Gate::getRunId).distinct().toList())
+                .stream().collect(Collectors.toMap(Run::getId, Function.identity(), (a, b) -> a));
+        Instant now = Instant.now();
+        return pending.stream()
+                .filter(g -> {
+                    Run r = runsById.get(g.getRunId());
+                    return r != null && Objects.equals(r.getProjectId(), projectId);
+                })
+                .sorted(Comparator.comparing(Gate::getId))
+                .map(g -> {
+                    Run r = runsById.get(g.getRunId());
+                    long waited = g.getRequestedAt() == null ? 0 : Duration.between(g.getRequestedAt(), now).toMinutes();
+                    return "gate " + g.getId() + " · " + g.getKind() + " · run " + r.getId() + " · " + r.getIssueKey()
+                            + " · 대기 " + Math.max(0, waited) + "분 · " + preview(g.getRequest());
+                })
+                .toList();
+    }
+
+    /** 매니저 순찰 자료 — 사람 재개를 기다리는 BLOCKED run(기간 무관 — 24시간 창 밖으로 밀려난 정체가 가장 오래된 정체다). */
+    private List<String> blockedRunLines(Run self) {
+        return runRepository.findByStatusInAndProjectIdOrderByIdDesc(Set.of(RunStatus.BLOCKED), self.getProjectId()).stream()
+                .filter(r -> !r.getId().equals(self.getId()))
+                .limit(BLOCKED_RUNS_LIMIT)
+                .map(r -> "run " + r.getId() + " · " + r.getType() + " · " + r.getIssueKey() + " · BLOCKED · 시도 "
+                        + r.getAttempt())
+                .toList();
+    }
+
+    static String preview(String request) {
+        if (request == null || request.isBlank()) {
+            return "(요청문 없음)";
+        }
+        String oneLine = request.replaceAll("\\s+", " ").trim();
+        if (oneLine.length() <= GATE_REQUEST_PREVIEW) {
+            return oneLine;
+        }
+        int end = GATE_REQUEST_PREVIEW;
+        if (Character.isHighSurrogate(oneLine.charAt(end - 1))) {
+            end--;
+        }
+        return oneLine.substring(0, end) + "…";
     }
 
     /**

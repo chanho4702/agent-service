@@ -7,7 +7,7 @@ import jakarta.validation.constraints.Size;
 import java.util.List;
 
 /**
- * {@code POST /api/agent/meetings} 요청(P3b, D-P3b-4①). {@code type}은 MEETING·RETRO·ESCALATION만 받는다(그 밖은 서비스가 400).
+ * {@code POST /api/agent/meetings} 요청(P3b, D-P3b-4①). {@code type}은 MEETING·RETRO·ESCALATION·MANAGER(P3c 매니저 순찰)만 받는다(그 밖은 서비스가 400).
  *
  * <p>{@code agendaIssueKey} 상한은 {@code run.issue_key VARCHAR(40)}과 같다({@code RequestDtoColumnWidthTest}).
  * {@code agenda}는 run.instruction(TEXT)에 저장돼 워커 프롬프트에 통째로 실리므로 USER run 지시문과 같은 애플리케이션 상한을 둔다.

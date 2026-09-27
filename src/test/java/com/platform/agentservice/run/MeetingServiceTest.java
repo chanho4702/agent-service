@@ -67,6 +67,8 @@ class MeetingServiceTest {
     private final Persona ops = persona(5L, "hyun", PersonaRole.OPS, true);
     private final Persona reviewer = persona(6L, "sora", PersonaRole.REVIEWER, true);
     private final Persona retiredBackend = persona(7L, "old", PersonaRole.BACKEND, false);
+    private final Persona manager = persona(8L, "boram", PersonaRole.MANAGER, true);
+    private final Persona secondManager = persona(9L, "hana", PersonaRole.MANAGER, true);
 
     private static Persona persona(long id, String slug, PersonaRole role, boolean active) {
         Persona p = Persona.of(100L + id, slug, role, slug + "-name", "E" + id, null);
@@ -79,7 +81,7 @@ class MeetingServiceTest {
     void setUp() {
         // 저장소는 id 순으로 돌려준다 — 기본 참석 규칙이 롤 순서로 다시 정렬하는지 보려고 백엔드를 앞에 섞어 둔다.
         lenient().when(personaRepository.findAll(any(Sort.class)))
-                .thenReturn(List.of(backend, planner, designer, frontend, ops, reviewer, retiredBackend));
+                .thenReturn(List.of(backend, secondManager, planner, designer, frontend, ops, reviewer, retiredBackend, manager));
         lenient().when(tokenService.bearerFor(anyLong())).thenAnswer(inv -> "Bearer m" + inv.getArgument(0));
         lenient().when(runServiceProvider.getObject()).thenReturn(runService);
         lenient().when(runRepository.save(any(Run.class))).thenAnswer(inv -> {
@@ -143,14 +145,128 @@ class MeetingServiceTest {
     }
 
     @Test
-    void retro_defaults_to_every_active_persona_and_needs_no_agenda() {
+    void retro_defaults_to_every_active_working_persona_and_needs_no_agenda() {
         stubProject();
 
         MeetingService.MeetingCreated created = service(props(false))
                 .createMeeting(RunType.RETRO, PROJECT_ID, null, null, null);
 
+        // 매니저는 실무 회고 참석자가 아니라 보고 수신자다(P3c) — "전원"에서 빠진다.
         assertThat(created.attendees()).containsExactly(planner, designer, frontend, backend, ops, reviewer);
+        assertThat(created.attendees()).doesNotContain(manager, secondManager);
         assertThat(created.run().getInstruction()).isNull();
+    }
+
+    // ---- P3c: 매니저 run ----
+
+    @Test
+    void manager_run_seats_the_single_lowest_id_active_manager_and_needs_no_agenda() {
+        stubProject();
+
+        MeetingService.MeetingCreated created = service(props(false))
+                .createMeeting(RunType.MANAGER, PROJECT_ID, null, null, null);
+
+        assertThat(created.attendees()).containsExactly(manager);
+        Run run = created.run();
+        assertThat(run.getType()).isEqualTo(RunType.MANAGER);
+        assertThat(run.getPersonaId()).isEqualTo(manager.getId());
+        assertThat(run.getAttendeeIds()).containsExactly(8L);
+        assertThat(run.getIssueKey()).isEqualTo("PROJECT-1");
+        assertThat(run.hasAgendaIssue()).isFalse();
+        assertThat(run.getInstruction()).isNull();
+        verify(almClient).getProject(PROJECT_ID, "Bearer m108");
+    }
+
+    @Test
+    void manager_run_without_an_active_manager_is_400_and_saves_nothing() {
+        when(personaRepository.findAll(any(Sort.class))).thenReturn(List.of(planner, reviewer));
+
+        assertThatThrownBy(() -> service(props(false)).createMeeting(RunType.MANAGER, PROJECT_ID, null, null, null))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("MANAGER");
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
+    void manager_run_explicit_slug_must_be_exactly_one_manager() {
+        stubProject();
+        when(personaRepository.findBySlug("hana")).thenReturn(Optional.of(secondManager));
+        when(personaRepository.findBySlug("boram")).thenReturn(Optional.of(manager));
+        when(personaRepository.findBySlug("jiho")).thenReturn(Optional.of(backend));
+        MeetingService service = service(props(false));
+
+        assertThat(service.createMeeting(RunType.MANAGER, PROJECT_ID, null, null, List.of("hana")).attendees())
+                .containsExactly(secondManager);
+        assertThatThrownBy(() -> service.createMeeting(RunType.MANAGER, PROJECT_ID, null, null, List.of("jiho")))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> service.createMeeting(RunType.MANAGER, PROJECT_ID, null, null, List.of("boram", "hana")))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
+    @Test
+    void manager_run_is_blocked_by_an_active_meeting_in_the_same_project() {
+        stubProject();
+        when(runRepository.existsByProjectIdAndTypeInAndStatusIn(PROJECT_ID, RunType.MEETING_TYPES,
+                RunService.ACTIVE_STATUSES)).thenReturn(true);
+
+        assertThatThrownBy(() -> service(props(false)).createMeeting(RunType.MANAGER, PROJECT_ID, null, null, null))
+                .isInstanceOf(ConflictException.class);
+    }
+
+    @Test
+    void build_job_for_manager_carries_recent_runs_project_pending_gates_and_blocked_runs() {
+        Run run = meeting(RunType.MANAGER, "PROJECT-1", List.of(8L));
+        Run task = Run.queued(RunType.TASK, "AGP-9", PROJECT_ID, 4L, RunTrigger.SCHEDULER, "h", null);
+        ReflectionTestUtils.setField(task, "id", 12L);
+        when(runRepository.findTop30ByProjectIdAndUpdatedAtGreaterThanEqualOrderByIdDesc(eq(PROJECT_ID), any(Instant.class)))
+                .thenReturn(List.of(run, task));
+
+        Run gatedHere = Run.queued(RunType.TASK, "AGP-5", PROJECT_ID, 4L, RunTrigger.SCHEDULER, "h", null);
+        ReflectionTestUtils.setField(gatedHere, "id", 20L);
+        Run gatedElsewhere = Run.queued(RunType.TASK, "WEB-1", 2L, 4L, RunTrigger.SCHEDULER, "h", null);
+        ReflectionTestUtils.setField(gatedElsewhere, "id", 21L);
+        Gate here = Gate.request(20L, GateKind.MERGE, "PR #7 머지 승인 요청\n" + "가".repeat(100));
+        ReflectionTestUtils.setField(here, "id", 3L);
+        ReflectionTestUtils.setField(here, "requestedAt", Instant.now().minusSeconds(95 * 60 + 5));
+        Gate elsewhere = Gate.request(21L, GateKind.PLAN, "다른 프로젝트");
+        ReflectionTestUtils.setField(elsewhere, "id", 4L);
+        ReflectionTestUtils.setField(elsewhere, "requestedAt", Instant.now());
+        when(gateRepository.findByDecisionIsNull()).thenReturn(List.of(elsewhere, here));
+        when(runRepository.findAllById(List.of(21L, 20L))).thenReturn(List.of(gatedElsewhere, gatedHere));
+
+        Run blocked = Run.queued(RunType.TASK, "AGP-2", PROJECT_ID, 4L, RunTrigger.SCHEDULER, "h", null);
+        ReflectionTestUtils.setField(blocked, "id", 15L);
+        ReflectionTestUtils.setField(blocked, "attempt", 3);
+        when(runRepository.findByStatusInAndProjectIdOrderByIdDesc(Set.of(RunStatus.BLOCKED), PROJECT_ID))
+                .thenReturn(List.of(blocked));
+        when(personaRepository.findAllById(List.of(8L))).thenReturn(List.of(manager));
+
+        WorkerJob job = service(props(false)).buildJob(run, "Bearer x");
+
+        WorkerJob.MeetingContext ctx = job.meeting();
+        assertThat(ctx.attendees()).extracting(WorkerJob.Attendee::role).containsExactly("MANAGER");
+        assertThat(ctx.recentRuns()).containsExactly("run 12 · TASK · AGP-9 · QUEUED · 시도 1");
+        assertThat(ctx.pendingGates()).hasSize(1);
+        String gateLine = ctx.pendingGates().get(0);
+        assertThat(gateLine).startsWith("gate 3 · MERGE · run 20 · AGP-5 · 대기 95분 · PR #7 머지 승인 요청 가");
+        // 요청 요약은 한 줄·앞 80자 — 순찰 자료지 결재 원문이 아니다.
+        assertThat(gateLine).doesNotContain("\n").endsWith("…");
+        assertThat(gateLine.substring(gateLine.indexOf("PR #7"))).hasSize(MeetingService.GATE_REQUEST_PREVIEW + 1);
+        assertThat(ctx.blockedRuns()).containsExactly("run 15 · TASK · AGP-2 · BLOCKED · 시도 3");
+        // 순찰은 이슈를 건드리지 않는다 — 안건 이슈 없는 대표 키.
+        verifyNoInteractions(almClient);
+    }
+
+    @Test
+    void build_job_for_non_manager_meetings_carries_no_patrol_data() {
+        Run run = meeting(RunType.RETRO, "PROJECT-1", List.of(1L));
+        when(personaRepository.findAllById(List.of(1L))).thenReturn(List.of(planner));
+
+        WorkerJob job = service(props(false)).buildJob(run, "Bearer x");
+
+        assertThat(job.meeting().pendingGates()).isEmpty();
+        assertThat(job.meeting().blockedRuns()).isEmpty();
+        verifyNoInteractions(gateRepository);
     }
 
     @Test
@@ -490,6 +606,42 @@ class MeetingServiceTest {
     void retro_cron_does_nothing_without_space_or_repo_mapping() {
         service(new MeetingProperties(null, "0 0 18 * * *", false, true)).runRetros();
         service(props(false), Map.of()).runRetros();
+
+        verifyNoInteractions(almClient, runService);
+        verify(runRepository, never()).save(any());
+    }
+
+    @Test
+    void manager_cron_creates_one_manager_run_per_mapped_project_sharing_the_meeting_guard() {
+        Map<String, String> repos = new LinkedHashMap<>();
+        repos.put("agp", "https://example.com/agp.git");
+        repos.put("WEB", "https://example.com/web.git");
+        when(almClient.listProjects("Bearer m108")).thenReturn(List.of(
+                new ProjectResponse(1L, "AGP", "agent"), new ProjectResponse(2L, "WEB", "web")));
+        // WEB에는 실무 회의가 돌고 있다 — 매니저 순찰도 같은 "회의 1건" 가드에 걸린다.
+        lenient().when(runRepository.existsByProjectIdAndTypeInAndStatusIn(eq(2L), eq(RunType.MEETING_TYPES), any()))
+                .thenReturn(true);
+
+        service(props(false), repos).runManagerRounds();
+
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, times(1)).save(saved.capture());
+        Run round = saved.getValue();
+        assertThat(round.getType()).isEqualTo(RunType.MANAGER);
+        assertThat(round.getTrigger()).isEqualTo(RunTrigger.SCHEDULER);
+        assertThat(round.getProjectId()).isEqualTo(1L);
+        assertThat(round.getIssueKey()).isEqualTo("PROJECT-1");
+        assertThat(round.getInstruction()).isEqualTo(MeetingService.MANAGER_AGENDA);
+        assertThat(round.getAttendeeIds()).containsExactly(8L);
+        assertThat(round.getModel()).isEqualTo("claude-opus-5-5");
+        verify(runService).execute(900L);
+    }
+
+    @Test
+    void manager_cron_skips_the_whole_tick_without_a_manager_persona() {
+        when(personaRepository.findAll(any(Sort.class))).thenReturn(List.of(planner, backend, reviewer));
+
+        service(props(false)).runManagerRounds();
 
         verifyNoInteractions(almClient, runService);
         verify(runRepository, never()).save(any());

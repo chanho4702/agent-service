@@ -103,6 +103,24 @@ class MeetingControllerTest {
     }
 
     @Test
+    void manager_type_is_accepted_without_agenda() throws Exception {
+        Run run = Run.queuedMeeting(RunType.MANAGER, "PROJECT-1", 1L, List.of(8L), RunTrigger.USER, "harness://default",
+                null, null);
+        ReflectionTestUtils.setField(run, "id", 95L);
+        given(meetingService.createMeeting(RunType.MANAGER, 1L, null, null, null)).willReturn(
+                new MeetingService.MeetingCreated(run, List.of(persona(8L, "boram", PersonaRole.MANAGER, "📋"))));
+
+        mvc.perform(post("/api/agent/meetings").with(authentication(TestAuth.admin(1L, "Admin")))
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"type\":\"MANAGER\",\"projectId\":1}"))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.run.type").value("MANAGER"))
+                .andExpect(jsonPath("$.attendees[0].role").value("MANAGER"));
+
+        verify(runService).execute(95L);
+    }
+
+    @Test
     void submission_rejection_still_returns_201() throws Exception {
         given(meetingService.createMeeting(RunType.RETRO, 1L, null, null, null)).willReturn(created(92L));
         willThrow(new TaskRejectedException("pool full")).given(runService).execute(92L);

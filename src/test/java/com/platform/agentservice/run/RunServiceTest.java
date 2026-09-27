@@ -1310,6 +1310,30 @@ class RunServiceTest {
     }
 
     @Test
+    void manager_run_is_a_claim_free_clone_free_run_built_by_the_meeting_service() {
+        Run run = Run.queuedMeeting(RunType.MANAGER, "PROJECT-1", PROJECT_ID, List.of(PERSONA_ID), RunTrigger.SCHEDULER,
+                "harness://default", null, "정기 매니저 순찰");
+        ReflectionTestUtils.setField(run, "id", 82L);
+        when(runRepository.findById(82L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+        WorkerJob job = meetingJob();
+        when(meetingService.buildJob(run, BEARER)).thenReturn(job);
+        when(workerLauncher.launch(any(Run.class), eq(job))).thenAnswer(inv -> {
+            run.recordOutputPage(601L);
+            run.complete();
+            return new WorkerResult(0, false, "ok", "sess", null, 0L, 0L, null, "raw", "C:/agent-work/run-82");
+        });
+
+        runService.execute(82L);
+
+        assertThat(run.getStatus()).isEqualTo(RunStatus.DONE);
+        assertThat(run.getOutputPageId()).isEqualTo(601L);
+        verify(issueClaimSupport, never()).claim(anyString(), any(), anyString(), anyString());
+        verify(commitLinkParser, never()).parse(any());
+        verify(almClient, never()).getByKey(anyString(), anyString());
+    }
+
+    @Test
     void meeting_run_that_exits_without_report_result_fails_instead_of_completing() {
         Run run = queuedMeetingRun(81L, "AGP-9");
         when(runRepository.findById(81L)).thenReturn(Optional.of(run));
