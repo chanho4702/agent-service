@@ -15,7 +15,9 @@ import java.util.Set;
 final class AvatarConfigValidator {
 
     static final int MAX_BYTES = 1024;
-    static final Set<String> ALLOWED_KEYS = Set.of("v", "skinTone", "hairStyle", "hairColor", "shirtColor", "accessory");
+    static final String SHOW_EMOJI = "showEmoji";
+    static final Set<String> ALLOWED_KEYS =
+            Set.of("v", "skinTone", "hairStyle", "hairColor", "shirtColor", "accessory", SHOW_EMOJI);
 
     private static final ObjectMapper MAPPER = new ObjectMapper();
 
@@ -49,7 +51,12 @@ final class AvatarConfigValidator {
                         ALLOWED_KEYS.stream().sorted().toList()));
             }
             JsonNode value = field.getValue();
-            if (!value.isTextual() && !value.isNumber()) {
+            if (SHOW_EMOJI.equals(field.getKey())) {
+                // 플래그지만 불리언이 아니라 숫자 0|1이다 — 값 타입을 문자열·숫자로 묶은 규칙을 지키려고(디자인 스펙).
+                if (!value.isIntegralNumber() || (value.asLong() != 0 && value.asLong() != 1)) {
+                    throw new IllegalArgumentException("avatarConfig showEmoji는 숫자 0 또는 1이어야 합니다");
+                }
+            } else if (!value.isTextual() && !value.isNumber()) {
                 throw new IllegalArgumentException("avatarConfig 값은 문자열 또는 숫자여야 합니다: " + field.getKey());
             }
         }

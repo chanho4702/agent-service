@@ -3,6 +3,7 @@ package com.platform.agentservice.persona;
 import com.platform.agentservice.client.AuthTokenClient;
 import com.platform.agentservice.client.OrgClient;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
+import com.platform.agentservice.persona.dto.PersonaDetailResponse;
 import com.platform.agentservice.persona.dto.PersonaResponse;
 import com.platform.agentservice.persona.dto.PersonaUpdateRequest;
 import com.platform.agentservice.tools.ToolInputGuard;
@@ -88,8 +89,15 @@ public class PersonaService {
      * 관리자 편집(AGP-62). 전 필드를 먼저 검증한 뒤 한꺼번에 반영한다 — 한 필드가 400이면 아무것도 바뀌지 않는다. 권한은 컨트롤러
      * 앞단({@code AgentAuthz.canManagePersona})이 이미 봤다. 오류 문구에는 입력값을 싣지 않는다(위치·사유만).
      */
+    /** 관리자 전용 상세(AGP-62) — 편집 다이얼로그 프리필. 권한은 컨트롤러 앞단이 봤다. */
+    @Transactional(readOnly = true)
+    public PersonaDetailResponse detail(long id) {
+        return PersonaDetailResponse.from(personaRepository.findById(id)
+                .orElseThrow(() -> new NotFoundException("페르소나를 찾을 수 없습니다: " + id)));
+    }
+
     @Transactional
-    public PersonaResponse edit(long id, PersonaUpdateRequest req) {
+    public PersonaDetailResponse edit(long id, PersonaUpdateRequest req) {
         Persona persona = personaRepository.findById(id)
                 .orElseThrow(() -> new NotFoundException("페르소나를 찾을 수 없습니다: " + id));
         Persona.Edit<String> name = nameEdit(req.name());
@@ -99,7 +107,7 @@ public class PersonaService {
         Persona.Edit<String> skills = textEdit("skills", req.skills());
         Persona.Edit<String> avatarConfig = avatarEdit(req.avatarConfig());
         persona.edit(name, emoji, voicePrompt, defaultModel, skills, avatarConfig);
-        return PersonaResponse.from(persona);
+        return PersonaDetailResponse.from(persona);
     }
 
     /** CLI 인자({@code --model})가 되는 값 — 공백·따옴표는 Windows 인자 재조립에서 깨진다(F1). 실제 모델 id 문자만 허용. */

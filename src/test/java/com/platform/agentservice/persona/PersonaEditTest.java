@@ -14,6 +14,7 @@ import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.setup.MockMvcBuilders;
 import org.springframework.web.context.WebApplicationContext;
 
+import java.util.List;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -159,12 +160,46 @@ class PersonaEditTest {
     }
 
     @Test
-    void list_carries_the_new_fields() throws Exception {
-        patchBody("{\"defaultModel\":\"claude-sonnet-5\",\"avatarConfig\":\"{\\\"v\\\":2}\"}").andExpect(status().isOk());
+    void show_emoji_accepts_only_numeric_zero_or_one() throws Exception {
+        patchBody("{\"avatarConfig\":{\"v\":1,\"showEmoji\":0}}").andExpect(status().isOk());
+        patchBody("{\"avatarConfig\":\"{\\\"v\\\":1,\\\"showEmoji\\\":1,\\\"hairColor\\\":\\\"7\\\"}\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.avatarConfig").value("{\"v\":1,\"showEmoji\":1,\"hairColor\":\"7\"}"));
 
+        for (String bad : List.of("true", "2", "-1", "0.5", "\"1\"", "null")) {
+            patchBody("{\"avatarConfig\":{\"v\":1,\"showEmoji\":" + bad + "}}")
+                    .andExpect(status().isBadRequest())
+                    .andExpect(jsonPath("$.error").value("avatarConfig showEmoji는 숫자 0 또는 1이어야 합니다"));
+        }
+        assertThat(reload().getAvatarConfig()).isEqualTo("{\"v\":1,\"showEmoji\":1,\"hairColor\":\"7\"}");
+    }
+
+    /** 목록은 인증 사용자 누구나 보는 표면 — 아바타만 싣고 말투·기본 모델·스킬 키는 아예 없다(반증). */
+    @Test
+    void list_carries_avatar_only_and_detail_carries_edit_fields() throws Exception {
+        patchBody("{\"defaultModel\":\"claude-sonnet-5\",\"skills\":\"비공개 스킬\",\"avatarConfig\":\"{\\\"v\\\":2}\"}")
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.voicePrompt").value("반말"))
+                .andExpect(jsonPath("$.skills").value("비공개 스킬"));
+
+        String item = "$[?(@.id == " + persona.getId() + ")]";
         mvc.perform(get("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$[?(@.id == " + persona.getId() + ")].defaultModel").value("claude-sonnet-5"))
-                .andExpect(jsonPath("$[?(@.id == " + persona.getId() + ")].avatarConfig").value("{\"v\":2}"));
+                .andExpect(jsonPath(item + ".avatarConfig").value("{\"v\":2}"))
+                .andExpect(jsonPath("$[0].skills").doesNotHaveJsonPath())
+                .andExpect(jsonPath("$[0].defaultModel").doesNotHaveJsonPath())
+                .andExpect(jsonPath("$[0].voicePrompt").doesNotHaveJsonPath())
+                .andExpect(content().string(not(containsString("비공개 스킬"))))
+                .andExpect(content().string(not(containsString("claude-sonnet-5"))));
+
+        mvc.perform(get("/api/agent/personas/" + persona.getId()).with(authentication(TestAuth.admin(1L, "Admin"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.voicePrompt").value("반말"))
+                .andExpect(jsonPath("$.defaultModel").value("claude-sonnet-5"))
+                .andExpect(jsonPath("$.skills").value("비공개 스킬"))
+                .andExpect(jsonPath("$.avatarConfig").value("{\"v\":2}"))
+                .andExpect(jsonPath("$.projectId").value(7));
+        mvc.perform(get("/api/agent/personas/987653").with(authentication(TestAuth.admin(1L, "Admin"))))
+                .andExpect(status().isNotFound());
     }
 }

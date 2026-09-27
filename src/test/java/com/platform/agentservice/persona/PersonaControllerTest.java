@@ -4,6 +4,7 @@ import com.platform.agentservice.TestAuth;
 import com.platform.agentservice.authz.PermissionClient;
 import com.platform.agentservice.authz.PermissionDecision;
 import com.platform.proto.org.v1.ResourceType;
+import com.platform.agentservice.persona.dto.PersonaDetailResponse;
 import com.platform.agentservice.persona.dto.PersonaResponse;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -262,8 +263,8 @@ class PersonaControllerTest {
     void project_admin_edits_own_project_persona() throws Exception {
         projectAdminOf7();
         Persona own = personaRepository.save(Persona.of(9711L, "edit-own", PersonaRole.BACKEND, "O", null, null, 7L));
-        given(personaService.edit(org.mockito.ArgumentMatchers.eq(own.getId()), any())).willReturn(new PersonaResponse(
-                own.getId(), 9711L, "edit-own", PersonaRole.BACKEND, "O2", null, true, 7L, "claude-x", "skill", null));
+        given(personaService.edit(org.mockito.ArgumentMatchers.eq(own.getId()), any())).willReturn(new PersonaDetailResponse(
+                own.getId(), 9711L, "edit-own", PersonaRole.BACKEND, "O2", null, true, 7L, null, null, "claude-x", "skill"));
 
         mvc.perform(patch("/api/agent/personas/" + own.getId()).with(authentication(TestAuth.user(2L, "Bob")))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"O2\",\"defaultModel\":\"claude-x\"}"))
@@ -289,7 +290,7 @@ class PersonaControllerTest {
     void shared_persona_edit_is_global_admin_only() throws Exception {
         projectAdminOf7();
         Persona shared = personaRepository.save(Persona.of(9713L, "edit-shared", PersonaRole.BACKEND, "S", null, null));
-        given(personaService.edit(org.mockito.ArgumentMatchers.eq(shared.getId()), any())).willReturn(PersonaResponse.from(shared));
+        given(personaService.edit(org.mockito.ArgumentMatchers.eq(shared.getId()), any())).willReturn(PersonaDetailResponse.from(shared));
 
         mvc.perform(patch("/api/agent/personas/" + shared.getId()).with(authentication(TestAuth.user(2L, "Bob")))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"X\"}"))
@@ -313,6 +314,35 @@ class PersonaControllerTest {
         mvc.perform(patch("/api/agent/personas/987654").with(authentication(TestAuth.admin(1L, "Admin")))
                         .contentType(MediaType.APPLICATION_JSON).content("{\"name\":\"X\"}"))
                 .andExpect(status().isNotFound());
+    }
+
+    // ---- AGP-62: GET /{id} 관리자 전용 상세 ----
+
+    @Test
+    void detail_is_manager_only_and_shared_persona_detail_is_global_only() throws Exception {
+        projectAdminOf7();
+        given(permissionClient.checkAdmin(3L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.deny("NO_GRANT"));
+        Persona own = personaRepository.save(Persona.of(9721L, "detail-own", PersonaRole.BACKEND, "O", null, null, 7L));
+        Persona shared = personaRepository.save(Persona.of(9722L, "detail-shared", PersonaRole.BACKEND, "S", null, null));
+        given(personaService.detail(own.getId())).willReturn(new PersonaDetailResponse(own.getId(), 9721L, "detail-own",
+                PersonaRole.BACKEND, "O", null, true, 7L, "{\"v\":1}", "반말", "claude-x", "## 스킬"));
+        given(personaService.detail(shared.getId())).willReturn(PersonaDetailResponse.from(shared));
+
+        mvc.perform(get("/api/agent/personas/" + own.getId()).with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.voicePrompt").value("반말"))
+                .andExpect(jsonPath("$.defaultModel").value("claude-x"))
+                .andExpect(jsonPath("$.skills").value("## 스킬"))
+                .andExpect(jsonPath("$.avatarConfig").value("{\"v\":1}"));
+        mvc.perform(get("/api/agent/personas/" + own.getId()).with(authentication(TestAuth.user(3L, "Carol"))))
+                .andExpect(status().isForbidden());
+        mvc.perform(get("/api/agent/personas/" + shared.getId()).with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isForbidden())
+                .andExpect(jsonPath("$.error").value("전사 공용 페르소나는 전역 관리자만 관리할 수 있습니다"));
+        mvc.perform(get("/api/agent/personas/" + shared.getId()).with(authentication(TestAuth.admin(1L, "Admin"))))
+                .andExpect(status().isOk());
+
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.times(1)).detail(own.getId());
     }
 
     @Test

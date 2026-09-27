@@ -93,7 +93,8 @@ curl -s -X POST $GATEWAY/api/agent/tokens \
 PAT 관리: `GET /api/agent/tokens`(관리자만 — AGP-21, 라벨·페르소나·사용 시각도 운영 정보라 일반 사용자에게 닫았다. 해시는
 어느 응답에도 노출 안 함. P3f: 전역 관리자는 전체, 프로젝트 관리자는 `?projectId=`로 자기 프로젝트 페르소나 토큰만) ·
 `DELETE /api/agent/tokens/{id}`(관리자만 — 페르소나 소속 기준). "관리자"의 정의는 §7(P3f). 페르소나 목록: `GET /api/agent/personas`(인증된 사용자
-누구나 — JWT 필요, 슬러그/역할/이름/emoji/active/projectId + AGP-62 편집 필드 defaultModel·skills·avatarConfig). 직원 편집은 §10.
+누구나 — JWT 필요, 슬러그/역할/이름/emoji/active/projectId + AGP-62 avatarConfig만. 말투·기본 모델·스킬은 관리자 전용
+`GET /api/agent/personas/{id}`). 직원 편집은 §10.
 
 페르소나 활성/비활성(AGP-29): `PATCH /api/agent/personas/{id}/active`(관리자만 — §7, 페르소나 소속 프로젝트 기준, body `{"active": true|false}` → 200
 `PersonaResponse`, 없는 id 404, `active` 누락 400). 비활성 페르소나의 **사람용 PAT은 다음 요청부터 401**(`PatService.validate`
@@ -745,7 +746,7 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 |---|---|---|
 | `POST /api/agent/personas` | ADMIN | 새 페르소나: 요청 `projectId`(null=공용→전역만) + 부여 상한. 기존 슬러그 갱신: 그 페르소나의 소속 |
 | `PATCH /api/agent/personas/{id}/active` | ADMIN | `persona.project_id`(null→전역만) |
-| `PATCH /api/agent/personas/{id}`(AGP-62 직원 편집) | — (신설) | `persona.project_id`(null→전역만, 없는 id→전역만) |
+| `PATCH /api/agent/personas/{id}`·`GET /api/agent/personas/{id}`(AGP-62 직원 편집·상세) | — (신설) | `persona.project_id`(null→전역만, 없는 id→전역만) |
 | `POST /api/agent/tokens` | ADMIN | `personaSlug`의 페르소나 소속(null→전역만) |
 | `GET /api/agent/tokens` | ADMIN | `projectId` 없으면 전역만(전체), 있으면 그 프로젝트 관리자 — 그 프로젝트 소속 페르소나 토큰만 |
 | `DELETE /api/agent/tokens/{id}` | ADMIN | 토큰 페르소나 소속(null·없는 id→전역만) |
@@ -756,7 +757,7 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 | `POST /api/agent/kill-switch` | ADMIN | **전역만 유지** |
 | `GET /api/agent/permissions?projectId=` | — (신설) | 인증 사용자 누구나 → `{canManage, isGlobalAdmin}` |
 
-조회 API(`GET` personas·runs·gates·office·budget·kill-switch)는 기존대로 인증 사용자 누구나다. 대상이 없는 id는 전역 관리자만
+조회 API(`GET` personas 목록·runs·gates·office·budget·kill-switch)는 기존대로 인증 사용자 누구나다(페르소나 상세 `GET /{id}`만 관리자). 대상이 없는 id는 전역 관리자만
 통과시킨다 — 프로젝트 관리자에게 "없음(404)"과 "남의 것(403)"을 구분해 주지 않는다(전역 관리자는 서비스의 404를 본다).
 
 **프로젝트 소속 페르소나(D-P3f-3)** — `persona.project_id BIGINT NULL`(V8, FK 없음 — alm 프로젝트 id). null = 전사 공용이고
@@ -966,15 +967,21 @@ Anthropic 호출 대상은 §8의 `AGENT_ANTHROPIC_API_URL`을 같이 쓴다. �
 - `defaultModel`: `[A-Za-z0-9._:@/\[\]-]{1,60}`만(400) — `claude --model` 인자가 되므로 공백·따옴표를 막는다(Windows 인자 재조립, §5.6 F1).
   모델 id가 실제로 있는지는 보지 않는다(없는 모델이면 워커가 실패 → 사고형 BLOCKED).
 - `avatarConfig`: JSON 문자열(정본) 또는 객체. **최상위 JSON 객체 + 키 화이트리스트 `v, skinTone, hairStyle, hairColor, shirtColor,
-  accessory` + 값은 문자열/숫자만**(중첩 객체·배열·불리언·null 거부) + UTF-8 1024바이트 상한 — 그 외 400. 시각 파츠 값 자체(어떤
+  accessory, showEmoji` + 값은 문자열/숫자만**(중첩 객체·배열·불리언·null 거부) + UTF-8 1024바이트 상한 — 그 외 400. `showEmoji`만은
+  **정수 0|1**(`true`·2·0.5·`"1"` 거부 — 플래그지만 값 타입 규칙을 지키려 숫자, 키 부재 = 프론트 기본값). 디자인 스펙상 v는 숫자,
+  나머지는 문자열(hairColor는 `"0"`..`"7"` 문자열 키)이지만 서버는 그 키별 타입까지는 강제하지 않는다. 시각 파츠 값 자체(어떤
   머리 모양·색이 있는지)는 프론트 팔레트가 정본이라 서버는 형태만 본다. 공백 없는 JSON으로 정규화해 저장한다. 요청 바인딩은
   Jackson 3(Spring Boot 4)이라 DTO는 `Object`로 받고(`JsonNode` 금지 — com.fasterxml 타입은 바인딩되지 않는다) 검증은 서비스가 한다.
-- 응답 = `PersonaResponse`(`POST`·`GET` 목록과 같은 shape): 기존 필드 + `defaultModel`·`skills`·`avatarConfig`(미설정 null,
-  avatarConfig는 저장된 JSON 문자열). 단건 GET은 없다(목록에서 찾는다). 없는 id는 전역 관리자에게 404.
+- 응답 = `PersonaDetailResponse`(아래 상세와 같은 shape). 없는 id는 전역 관리자에게 404.
 - 감사 행은 남기지 않는다(관리 REST — 활성 토글과 같다).
 
-**노출 범위** — `GET /api/agent/personas`(인증 사용자 누구나)는 편집 필드 전부를 싣는다. **사무실 `office.personas[]`에는
-`avatarConfig`만** 싣고 skills·defaultModel은 싣지 않는다(§6 — 캐릭터를 그리는 데 필요한 것만).
+**`GET /api/agent/personas/{id}` 상세(관리자 전용)** — 권한은 PATCH와 같다(`canManagePersona`). 편집 다이얼로그 프리필용
+`PersonaDetailResponse` = `{id, memberId, slug, role, name, emoji, active, projectId, avatarConfig, voicePrompt, defaultModel, skills}`
+(미설정 null, avatarConfig는 저장된 JSON 문자열). 없는 id: 전역 관리자 404, 프로젝트 관리자 403.
+
+**노출 범위** — 편집 필드 중 **누구나 보는 표면에는 `avatarConfig`만** 싣는다(카드·캐릭터 렌더용 시각 정보):
+`GET /api/agent/personas` 목록·`POST` 부트스트랩 응답(`PersonaResponse` = 기존 필드 + `avatarConfig`)과 사무실 `office.personas[]`(§6).
+말투(voicePrompt)·기본 모델·스킬은 관리자 전용 상세·PATCH 응답에만 있다(목록에 키 자체가 없음을 테스트로 고정).
 
 **모델 해석 페르소나 층** — §5.1 표. USER 요청 > persona.defaultModel > 프로젝트 맵 > 전역 기본 > null.
 

@@ -3,6 +3,7 @@ package com.platform.agentservice.persona;
 import com.platform.agentservice.authz.AgentCaller;
 import com.platform.agentservice.persona.dto.PersonaActiveRequest;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
+import com.platform.agentservice.persona.dto.PersonaDetailResponse;
 import com.platform.agentservice.persona.dto.PersonaResponse;
 import com.platform.agentservice.persona.dto.PersonaUpdateRequest;
 import jakarta.validation.Valid;
@@ -60,8 +61,15 @@ public class PersonaController {
      */
     @PatchMapping("/{id}")
     @PreAuthorize("@agentAuthz.canManagePersona(authentication, #id)")
-    public PersonaResponse edit(@PathVariable long id, @Valid @RequestBody PersonaUpdateRequest request) {
+    public PersonaDetailResponse edit(@PathVariable long id, @Valid @RequestBody PersonaUpdateRequest request) {
         return personaService.edit(id, request);
+    }
+
+    /** 관리자 전용 상세(AGP-62) — 편집 다이얼로그 프리필. 목록(누구나)에는 없는 말투·기본 모델·스킬을 싣는다. */
+    @GetMapping("/{id}")
+    @PreAuthorize("@agentAuthz.canManagePersona(authentication, #id)")
+    public PersonaDetailResponse detail(@PathVariable long id) {
+        return personaService.detail(id);
     }
 
     @GetMapping
