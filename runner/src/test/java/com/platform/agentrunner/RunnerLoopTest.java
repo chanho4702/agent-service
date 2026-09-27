@@ -53,13 +53,15 @@ class RunnerLoopTest {
         stub.close();
     }
 
+    private static final String RUNNER_SIDE_MCP = "http://runner-side/api/agent/mcp";
+
     private Runner startRunner(Map<String, String> ownEnv) throws Exception {
         RunnerConfig config = new RunnerConfig(stub.uri(), RUNNER_TOKEN, work, 2, "test", FakeExecutor.CLAUDE, List.of(), 7,
                 Duration.ofMillis(100), Duration.ofMillis(50), Duration.ofSeconds(2), false, ownEnv);
         RunnerApi api = new RunnerApi(config.server(), config.token(), "test");
         RunTask.Context ctx = new RunTask.Context(config.workspacesDir(), FakeExecutor.CLAUDE, List.of(), ownEnv,
                 new HarnessCache(config.harnessDir(), api), executor, executor,
-                new ResultReporter(api, config.pendingResultsDir(), Duration.ofMillis(50)), null);
+                new ResultReporter(api, config.pendingResultsDir(), Duration.ofMillis(50)), null, RUNNER_SIDE_MCP);
         runner = new Runner(config, api, ctx, "test", "TestOS");
         runner.start();
         return runner;
@@ -129,7 +131,8 @@ class RunnerLoopTest {
         FakeExecutor.Call claude = executor.claudeCall();
         assertThat(claude.env()).containsExactly(Map.entry("ANTHROPIC_API_KEY", PLATFORM_KEY));
         assertThat(executor.gitClone().env()).isEmpty();
-        assertThat(claude.mcpConfig()).contains("Bearer " + RUN_TOKEN).contains("http://host/api/agent/mcp");
+        assertThat(claude.mcpConfig()).contains("Bearer " + RUN_TOKEN).contains(RUNNER_SIDE_MCP)
+                .as("서버가 보낸 spec.mcpUrl이 아니라 러너 --server 기준 주소").doesNotContain("http://host/api/agent/mcp");
         assertThat(claude.harnessPresent()).as("서버 하네스 zip이 워크스페이스에 실체화된다").isTrue();
         assertThat(claude.command()).doesNotContain(RUN_TOKEN, PLATFORM_KEY);
 
@@ -245,7 +248,7 @@ class RunnerLoopTest {
         RunnerApi api = new RunnerApi(config.server(), config.token(), "test");
         Runner r = new Runner(config, api, new RunTask.Context(config.workspacesDir(), "c", List.of(), Map.of(),
                 new HarnessCache(config.harnessDir(), api), executor, executor,
-                new ResultReporter(api, config.pendingResultsDir(), Duration.ofMillis(50)), null), "test", "os");
+                new ResultReporter(api, config.pendingResultsDir(), Duration.ofMillis(50)), null, null), "test", "os");
 
         org.assertj.core.api.Assertions.assertThatThrownBy(r::start)
                 .isInstanceOf(Runner.FatalStartException.class)

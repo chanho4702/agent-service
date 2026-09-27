@@ -67,7 +67,7 @@ class Runner {
         this.baseContext = new RunTask.Context(contextWithoutGiveUp.workspacesDir(), contextWithoutGiveUp.claudeBin(),
                 contextWithoutGiveUp.extraEnvKeys(), contextWithoutGiveUp.ownEnv(), contextWithoutGiveUp.harness(),
                 contextWithoutGiveUp.executor(), contextWithoutGiveUp.killer(), contextWithoutGiveUp.reporter(),
-                () -> reportGiveUpAt);
+                () -> reportGiveUpAt, contextWithoutGiveUp.mcpUrl());
     }
 
     String kind() {

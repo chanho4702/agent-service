@@ -92,8 +92,10 @@ public final class RunnerMain {
         RunnerApi api = new RunnerApi(config.server(), config.token(), version());
         HarnessCache harness = new HarnessCache(config.harnessDir(), api);
         ResultReporter reporter = new ResultReporter(api, config.pendingResultsDir(), Duration.ofSeconds(2));
+        String mcpUrl = config.server().toString().replaceAll("/+$", "") + "/api/agent/mcp";
+        log.info("워커 MCP 주소 {}", mcpUrl);
         RunTask.Context context = new RunTask.Context(config.workspacesDir(), claude.bin(), config.extraEnvKeys(), env, harness,
-                executor, executor, reporter, null);
+                executor, executor, reporter, null, mcpUrl);
         Runner runner = new Runner(config, api, context, version(), osDescription());
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> runner.shutdown(config.shutdownGrace()), "runner-shutdown"));

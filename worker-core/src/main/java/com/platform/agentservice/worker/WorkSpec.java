@@ -25,6 +25,12 @@ public record WorkSpec(
         WorkerJob.Expertise expertise
 ) {
 
+    /** MCP 주소만 바꾼 사본 — 러너는 서버가 보낸 주소 대신 자기 {@code --server} 기준 주소를 쓴다(플랫폼 러너는 내부 nginx, PC 러너는 공개 주소). */
+    public WorkSpec withMcpUrl(String url) {
+        return new WorkSpec(runId, runType, workspaceLineage, inheritedWorkspacePath, meeting, repoUrl, prompt, model, maxTurns,
+                allowedTools, timeoutMinutes, url, expertise);
+    }
+
     /** 프롬프트는 이슈 본문·코멘트를 담는다 — 로그 한 줄로 통째 새지 않게 요약만. */
     @Override
     public String toString() {

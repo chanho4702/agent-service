@@ -33,9 +33,13 @@ class RunTask implements Runnable {
     private static final int COMMITS_MAX = 100;
 
     /** 실행에 필요한 러너 쪽 부품. */
+    /**
+     * {@code mcpUrl}: 워커 mcp-config에 쓸 주소 — 러너 자신의 {@code --server} + {@code /api/agent/mcp}. 서버가 보낸 {@code spec.mcpUrl}은 서버 설정
+     * 한 값이라 플랫폼 러너(내부 nginx)와 PC 러너(공개 주소)를 동시에 맞출 수 없다. null이면 spec 값을 쓴다.
+     */
     record Context(Path workspacesDir, String claudeBin, List<String> extraEnvKeys, Map<String, String> ownEnv,
                    HarnessCache harness, CommandExecutor executor, ProcessKiller killer, ResultReporter reporter,
-                   Supplier<Instant> reportGiveUpAt) {
+                   Supplier<Instant> reportGiveUpAt, String mcpUrl) {
     }
 
     private final Protocol.ClaimResponse claim;
@@ -94,6 +98,9 @@ class RunTask implements Runnable {
                     claim.credentialScope());
             if (spec == null || claim.runToken() == null) {
                 throw new IllegalStateException("claim 응답에 실행 명세·run 토큰이 없습니다");
+            }
+            if (ctx.mcpUrl() != null) {
+                spec = spec.withMcpUrl(ctx.mcpUrl());
             }
             Workspaces.touch(inheritedWorkspace());
             HarnessCache.Harness harness = ctx.harness().ensure(claim.harness() == null ? null : claim.harness().sha256());
