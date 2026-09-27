@@ -31,13 +31,14 @@ public class PersonaService {
      * <p>슬러그가 이미 존재하면 위 다운스트림 호출을 전부 건너뛰고(멱등) 표시용 필드만
      * 갱신한다 — 재호출마다 org 멤버·grant를 다시 만들려 들지 않는다.
      *
-     * @param adminBearer 호출자(관리자)의 Authorization 헤더 값을 그대로 전달한다.
-     *                    페르소나 자신의 토큰으로는 절대 대체하지 않는다 — auth-server의
-     *                    {@code /api/auth/agents}와 org-service의 등록/grant 모두 ROLE_ADMIN
-     *                    (grant는 대상 리소스 ADMIN)을 요구한다.
+     * <p>관리 권한은 컨트롤러 앞단({@code AgentAuthz})이 이미 판정했다(P3f). 그래서 ①② 등록은 내부 경로(시크릿·토큰)로
+     * 하고, ③ grant만 호출자 bearer로 보내 org가 자원 ADMIN을 다시 판정하게 둔다(이중 방어).
+     *
+     * @param callerBearer 호출자의 Authorization 헤더 값 — grant에만 쓴다. 페르소나 자신의 토큰으로는 절대 대체하지 않는다.
+     * @param actorId      호출자 JWT sub — org 멤버 재활성 이력의 행위자.
      */
     @Transactional
-    public BootstrapResult bootstrap(PersonaCreateRequest req, String adminBearer) {
+    public BootstrapResult bootstrap(PersonaCreateRequest req, String callerBearer, long actorId) {
         var existing = personaRepository.findBySlug(req.slug());
         if (existing.isPresent()) {
             Persona persona = existing.get();
@@ -50,15 +51,15 @@ public class PersonaService {
                 : req.email();
 
         AuthTokenClient.AgentRegistration registration =
-                authTokenClient.registerAgent(req.slug(), req.name(), email, adminBearer);
+                authTokenClient.registerAgent(req.slug(), req.name(), email);
         long memberId = registration.userId();
 
-        orgClient.registerAgentMember(memberId, req.name(), email, adminBearer);
+        orgClient.registerAgentMember(memberId, req.name(), email, actorId);
 
         List<PersonaCreateRequest.GrantRequest> grants = req.grants();
         if (grants != null) {
             for (PersonaCreateRequest.GrantRequest grant : grants) {
-                orgClient.grant(memberId, grant.resourceType(), grant.resourceId(), grant.role(), adminBearer);
+                orgClient.grant(memberId, grant.resourceType(), grant.resourceId(), grant.role(), callerBearer);
             }
         }
 

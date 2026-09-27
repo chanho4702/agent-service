@@ -5,7 +5,6 @@ import com.platform.common.error.ServiceUnavailableException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.client.HttpStatusCodeException;
@@ -13,8 +12,9 @@ import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 /**
- * auth-server 호출 두 가지: 에이전트 페르소나 사용자 등록(관리자 권한 필요)과 페르소나용
- * 서비스 토큰 발급(클러스터 내부 시크릿). 인증 방식이 완전히 다르다 — 절대 섞지 않는다.
+ * auth-server 내부 경로 호출 두 가지 — 에이전트 페르소나 사용자 등록과 페르소나용 서비스 토큰 발급. 둘 다 클러스터 내부
+ * 시크릿({@code X-Internal-Secret})으로만 인증한다. 등록은 P3f부터 사용자 JWT가 아니라 내부 경로다: 관리 권한 판정은
+ * agent-service({@code AgentAuthz})가 하고, 통과한 요청만 이 채널로 등록한다(프로젝트 관리자도 페르소나를 만들 수 있게).
  */
 @Slf4j
 @Component
@@ -29,25 +29,34 @@ public class AuthTokenClient {
         this.internalSecret = internalSecret == null ? "" : internalSecret.trim();
     }
 
-    /** {@code POST /api/auth/agents} 응답 — {@code {userId, slug, created}}. */
+    /** {@code POST /internal/agents} 응답(= {@code /api/auth/agents}와 같은 shape) — {@code {userId, slug, created}}. */
     public record AgentRegistration(long userId, String slug, boolean created) {}
 
     private record CreateAgentRequest(String slug, String name, String email) {}
 
     /**
-     * 호출자(관리자)의 Authorization 헤더를 그대로 전달한다 — 절대 페르소나 토큰을
-     * 대신 넣지 않는다({@code /api/auth/agents}는 ROLE_ADMIN을 요구한다).
+     * {@code POST /internal/agents} — 본문·응답은 {@code POST /api/auth/agents}와 같다. 시크릿이 비면 호출하지 않고 503
+     * (fail-closed, {@link #mint}와 같은 처리). 내부 필터의 403은 시크릿 불일치 = 서비스 간 인증 결함이라 사용자에게
+     * "권한 없음"으로 보이지 않게 {@link DownstreamAuthException}(503)으로 바꾼다.
      */
-    public AgentRegistration registerAgent(String slug, String name, String email, String adminBearer) {
+    public AgentRegistration registerAgent(String slug, String name, String email) {
+        if (internalSecret.isBlank()) {
+            log.warn("에이전트 사용자 등록 불가 — 내부 시크릿(AGENT_INTERNAL_SECRET) 미설정: slug={}", slug);
+            throw new ServiceUnavailableException("에이전트 사용자 등록이 설정되지 않았습니다");
+        }
         try {
             return authRestClient.post()
-                    .uri("/api/auth/agents")
-                    .header(HttpHeaders.AUTHORIZATION, adminBearer)
+                    .uri("/internal/agents")
+                    .header("X-Internal-Secret", internalSecret)
                     .contentType(MediaType.APPLICATION_JSON)
                     .body(new CreateAgentRequest(slug, name, email))
                     .retrieve()
                     .body(AgentRegistration.class);
         } catch (RestClientException e) {
+            log.warn("에이전트 사용자 등록 실패: slug={} 원인={}", slug, describe(e));
+            if (e instanceof HttpStatusCodeException status && status.getStatusCode().value() == 403) {
+                throw new DownstreamAuthException("에이전트 사용자 등록 실패: auth-server가 내부 시크릿을 거부했습니다 — AGENT_INTERNAL_SECRET을 확인하세요");
+            }
             throw DownstreamErrors.map(e, "에이전트 사용자 등록");
         }
     }

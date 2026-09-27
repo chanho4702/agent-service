@@ -1,22 +1,28 @@
 package com.platform.agentservice.client;
 
 import com.platform.agentservice.client.dto.MemberResponse;
+import com.platform.common.error.ServiceUnavailableException;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.core.ParameterizedTypeReference;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
+import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
 import java.util.List;
 
 /**
- * org-service 호출: 에이전트 페르소나를 조직 멤버로 등록하고, 리소스 권한을 부여하고
- * (둘 다 호출자(관리자)의 Authorization 헤더를 그대로 전달 — grant는 대상 리소스의 ADMIN
- * 권한을 요구하므로 페르소나 자신의 토큰으로는 절대 성공하지 않는다), 멤버 명단을 조회한다
+ * org-service 호출: 에이전트 페르소나를 조직 멤버로 등록하고(P3f부터 내부 경로 {@code X-Internal-Token} — 관리 권한
+ * 판정은 agent-service가 한다), 리소스 권한을 부여하고(호출자의 Authorization 헤더를 그대로 전달 — org가 대상 리소스
+ * ADMIN을 스스로 다시 판정하는 이중 방어다. 페르소나 자신의 토큰으로는 절대 성공하지 않는다), 멤버 명단을 조회한다
  * ({@link #listMembers}만 인증만 있으면 되는 조회라 페르소나 토큰으로도 호출된다, S10).
  */
+@Slf4j
 @Component
 public class OrgClient {
 
@@ -24,9 +30,18 @@ public class OrgClient {
             new ParameterizedTypeReference<>() {};
 
     private final RestClient orgRestClient;
+    /** org {@code /internal/org/**} 공유 비밀 — 알림 메일과 같은 ORG_INTERNAL_TOKEN. 비면 내부 등록은 fail-closed. */
+    private final String internalToken;
 
-    public OrgClient(@Qualifier("orgRestClient") RestClient orgRestClient) {
+    public OrgClient(RestClient orgRestClient) {
+        this(orgRestClient, "");
+    }
+
+    @Autowired
+    public OrgClient(@Qualifier("orgRestClient") RestClient orgRestClient,
+                     @Value("${platform.agent.alerts.org-internal-token:}") String internalToken) {
         this.orgRestClient = orgRestClient;
+        this.internalToken = internalToken == null ? "" : internalToken.trim();
     }
 
     /**
@@ -50,19 +65,31 @@ public class OrgClient {
         }
     }
 
-    private record AgentMemberRequest(long id, String displayName, String email) {}
+    private record AgentMemberRequest(long id, String displayName, String email, long actorId) {}
 
-    /** {@code POST /api/org/members/agents} — 이미 있으면 org 쪽이 표시 필드를 갱신한다(멱등). */
-    public void registerAgentMember(long id, String name, String email, String adminBearer) {
+    /**
+     * {@code POST /internal/org/members/agents} — 이미 있으면 org 쪽이 표시 필드를 갱신한다(멱등). 내부 경로엔 JWT가 없어
+     * 재활성 이력의 행위자를 {@code actorId}(요청한 사람의 JWT sub)로 싣는다. 토큰이 비면 호출하지 않고 503, 내부 필터의
+     * 403(토큰 불일치)은 서비스 간 인증 결함이라 {@link DownstreamAuthException}(503)으로 바꾼다.
+     */
+    public void registerAgentMember(long id, String name, String email, long actorId) {
+        if (internalToken.isBlank()) {
+            log.warn("조직 멤버 등록 불가 — 내부 토큰(ORG_INTERNAL_TOKEN) 미설정: memberId={}", id);
+            throw new ServiceUnavailableException("에이전트 조직 멤버 등록이 설정되지 않았습니다");
+        }
         try {
             orgRestClient.post()
-                    .uri("/api/org/members/agents")
-                    .header(HttpHeaders.AUTHORIZATION, adminBearer)
+                    .uri("/internal/org/members/agents")
+                    .header("X-Internal-Token", internalToken)
                     .contentType(MediaType.APPLICATION_JSON)
-                    .body(new AgentMemberRequest(id, name, email))
+                    .body(new AgentMemberRequest(id, name, email, actorId))
                     .retrieve()
                     .toBodilessEntity();
         } catch (RestClientException e) {
+            if (e instanceof HttpStatusCodeException status && status.getStatusCode().value() == 403) {
+                log.warn("조직 멤버 등록 실패 — org가 내부 토큰을 거부: memberId={}", id);
+                throw new DownstreamAuthException("조직 멤버 등록 실패: org-service가 내부 토큰을 거부했습니다 — ORG_INTERNAL_TOKEN을 확인하세요");
+            }
             throw DownstreamErrors.map(e, "조직 멤버 등록");
         }
     }

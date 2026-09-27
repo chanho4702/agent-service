@@ -51,7 +51,8 @@ class PermissionControllerTest {
     @Test
     void non_manager_and_org_failure_both_answer_false_not_error() throws Exception {
         given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "8")).willReturn(PermissionDecision.deny("NO_GRANT"));
-        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "9")).willReturn(PermissionDecision.orgFailure());
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "9"))
+                .willThrow(new com.platform.common.error.ServiceUnavailableException("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"));
 
         mvc.perform(get("/api/agent/permissions").param("projectId", "8").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())

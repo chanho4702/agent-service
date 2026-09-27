@@ -9,6 +9,7 @@ import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.agentservice.run.GateRepository;
 import com.platform.agentservice.run.RunRepository;
 import com.platform.common.error.ForbiddenException;
+import com.platform.common.error.ServiceUnavailableException;
 import com.platform.proto.org.v1.ResourceType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -59,12 +60,21 @@ class AgentAuthzTest {
     }
 
     @Test
-    void org_판정_실패는_거부이고_사유는_연결_실패로_말한다() {
+    void org_판정_실패는_거부이고_사유는_판정_실패로_말한다() {
         given(permissions.checkAdmin(2L, ResourceType.PROJECT, "7")).willReturn(PermissionDecision.orgFailure());
 
         assertThat(authz.canManage(BOB, 7L)).isFalse();
         assertThatThrownBy(() -> authz.requireManageProject(BOB, 7L))
-                .isInstanceOf(ForbiddenException.class).hasMessageContaining("권한 서비스에 연결할 수 없어");
+                .isInstanceOf(ForbiddenException.class).hasMessageContaining("권한 판정에 실패해");
+    }
+
+    /** org 가용성 장애는 "권한 없음"(403)이 아니라 "지금 판정 불가"(503)로 그대로 올라간다. */
+    @Test
+    void org_가용성_장애는_503으로_올라간다() {
+        given(permissions.checkAdmin(2L, ResourceType.PROJECT, "7"))
+                .willThrow(new ServiceUnavailableException("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"));
+
+        assertThatThrownBy(() -> authz.requireManageProject(BOB, 7L)).isInstanceOf(ServiceUnavailableException.class);
     }
 
     @Test

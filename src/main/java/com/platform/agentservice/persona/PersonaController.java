@@ -1,5 +1,6 @@
 package com.platform.agentservice.persona;
 
+import com.platform.agentservice.authz.AgentCaller;
 import com.platform.agentservice.persona.dto.PersonaActiveRequest;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.agentservice.persona.dto.PersonaResponse;
@@ -9,6 +10,7 @@ import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -23,7 +25,7 @@ import java.util.List;
 /**
  * 페르소나 부트스트랩·활성 토글 — 전역 관리자 또는 소속 프로젝트 관리자(P3f, {@link com.platform.agentservice.authz.AgentAuthz}).
  * 공용 페르소나(projectId 없음)는 전역 관리자만. 새 페르소나의 grant는 호출자가 ADMIN인 자원만 줄 수 있다(D-P3f-4).
- * auth-server 사용자 등록·org 멤버 등록은 여전히 다운스트림이 ROLE_ADMIN을 요구한다(CLAUDE.md 권한 절).
+ * 판정을 통과한 요청만 auth·org 내부 경로로 등록한다(CLAUDE.md §7).
  */
 @RestController
 @RequestMapping("/api/agent/personas")
@@ -36,8 +38,10 @@ public class PersonaController {
     @PostMapping
     @PreAuthorize("@agentAuthz.canBootstrapPersona(authentication, #request)")
     public ResponseEntity<PersonaResponse> create(@RequestHeader(HttpHeaders.AUTHORIZATION) String authorization,
-                                                   @Valid @RequestBody PersonaCreateRequest request) {
-        PersonaService.BootstrapResult result = personaService.bootstrap(request, authorization);
+                                                   @Valid @RequestBody PersonaCreateRequest request,
+                                                   Authentication authentication) {
+        PersonaService.BootstrapResult result = personaService.bootstrap(request, authorization,
+                AgentCaller.from(authentication).userId());
         HttpStatus status = result.created() ? HttpStatus.CREATED : HttpStatus.OK;
         return ResponseEntity.status(status).body(result.persona());
     }

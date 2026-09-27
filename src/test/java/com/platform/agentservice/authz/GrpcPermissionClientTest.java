@@ -1,5 +1,6 @@
 package com.platform.agentservice.authz;
 
+import com.platform.common.error.ServiceUnavailableException;
 import com.platform.proto.org.v1.Action;
 import com.platform.proto.org.v1.CheckPermissionRequest;
 import com.platform.proto.org.v1.CheckPermissionResponse;
@@ -21,6 +22,7 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 /** 진짜 스텁을 in-process org 대역에 붙여 요청 모양·캐시·장애 처리(fail-closed, 비캐시)를 본다. */
 class GrpcPermissionClientTest {
@@ -94,11 +96,12 @@ class GrpcPermissionClientTest {
         assertThat(decision.deniedReason()).isEqualTo("NO_GRANT");
     }
 
-    /** 장애 거부를 캐시하면 org가 살아난 뒤에도 30초간 관리자가 막힌다. */
+    /** 가용성 장애는 503(alm 관례). 장애 결과를 캐시하면 org가 살아난 뒤에도 30초간 관리자가 막힌다. */
     @Test
-    void org_장애는_거부이고_캐시하지_않는다() {
+    void org_가용성_장애는_503이고_캐시하지_않는다() {
         org.failWith = Status.UNAVAILABLE;
-        assertThat(client.checkAdmin(2L, ResourceType.PROJECT, "7").deniedReason()).isEqualTo(PermissionDecision.ORG_FAILURE);
+        assertThatThrownBy(() -> client.checkAdmin(2L, ResourceType.PROJECT, "7"))
+                .isInstanceOf(ServiceUnavailableException.class);
 
         org.failWith = null;
         assertThat(client.checkAdmin(2L, ResourceType.PROJECT, "7").allowed()).isTrue();
@@ -106,9 +109,19 @@ class GrpcPermissionClientTest {
     }
 
     @Test
-    void 가용성_외_gRPC_오류도_거부다() {
-        org.failWith = Status.INTERNAL;
+    void 데드라인_초과도_503이다() {
+        org.failWith = Status.DEADLINE_EXCEEDED;
 
-        assertThat(client.checkAdmin(2L, ResourceType.PROJECT, "7").allowed()).isFalse();
+        assertThatThrownBy(() -> client.checkAdmin(2L, ResourceType.PROJECT, "7"))
+                .isInstanceOf(ServiceUnavailableException.class);
+    }
+
+    @Test
+    void 가용성_외_gRPC_오류는_거부이고_캐시하지_않는다() {
+        org.failWith = Status.INTERNAL;
+        assertThat(client.checkAdmin(2L, ResourceType.PROJECT, "7").deniedReason()).isEqualTo(PermissionDecision.ORG_FAILURE);
+
+        org.failWith = null;
+        assertThat(client.checkAdmin(2L, ResourceType.PROJECT, "7").allowed()).isTrue();
     }
 }

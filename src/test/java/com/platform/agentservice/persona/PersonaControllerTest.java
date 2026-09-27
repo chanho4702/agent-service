@@ -52,7 +52,7 @@ class PersonaControllerTest {
     @Test
     void admin_creates_persona_returns_201() throws Exception {
         PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", true, null);
-        given(personaService.bootstrap(any(), any()))
+        given(personaService.bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                 .willReturn(new PersonaService.BootstrapResult(response, true));
 
         String body = """
@@ -70,7 +70,7 @@ class PersonaControllerTest {
     @Test
     void admin_refresh_of_existing_slug_returns_200() throws Exception {
         PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "QA Bot v2", "🤖", true, null);
-        given(personaService.bootstrap(any(), any()))
+        given(personaService.bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                 .willReturn(new PersonaService.BootstrapResult(response, false));
 
         String body = """
@@ -116,7 +116,7 @@ class PersonaControllerTest {
     @Test
     void name_and_emoji_at_exact_column_width_are_accepted() throws Exception {
         PersonaResponse response = new PersonaResponse(1L, 9001L, "qa-bot", PersonaRole.REVIEWER, "n", "e", true, null);
-        given(personaService.bootstrap(any(), any()))
+        given(personaService.bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong()))
                 .willReturn(new PersonaService.BootstrapResult(response, true));
 
         String body = """
@@ -154,7 +154,7 @@ class PersonaControllerTest {
     @Test
     void project_admin_creates_persona_in_own_project_with_grant_on_managed_resource() throws Exception {
         projectAdminOf7();
-        given(personaService.bootstrap(any(), any())).willReturn(new PersonaService.BootstrapResult(
+        given(personaService.bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong())).willReturn(new PersonaService.BootstrapResult(
                 new PersonaResponse(5L, 9005L, "p7-bot", PersonaRole.BACKEND, "P Bot", null, true, 7L), true));
 
         mvc.perform(post("/api/agent/personas").with(authentication(TestAuth.user(2L, "Bob")))
@@ -164,6 +164,10 @@ class PersonaControllerTest {
                                 "{\"resourceType\":\"PROJECT\",\"resourceId\":\"7\",\"role\":\"EDITOR\"}")))
                 .andExpect(status().isCreated())
                 .andExpect(jsonPath("$.projectId").value(7));
+
+        // 내부 등록 경로의 actorId = 호출자 JWT sub
+        org.mockito.Mockito.verify(personaService).bootstrap(any(), org.mockito.ArgumentMatchers.eq("AdminSession bob"),
+                org.mockito.ArgumentMatchers.eq(2L));
     }
 
     @Test
@@ -176,7 +180,7 @@ class PersonaControllerTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("이 프로젝트의 관리자만 할 수 있습니다"));
 
-        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any());
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test
@@ -205,7 +209,7 @@ class PersonaControllerTest {
                 .andExpect(status().isForbidden())
                 .andExpect(jsonPath("$.error").value("관리하지 않는 자원 권한은 부여할 수 없습니다"));
 
-        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any());
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test
@@ -249,7 +253,7 @@ class PersonaControllerTest {
                         .contentType(MediaType.APPLICATION_JSON).content(PROJECT_PERSONA_BODY.formatted("p8-owned", "")))
                 .andExpect(status().isForbidden());
 
-        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any());
+        org.mockito.Mockito.verify(personaService, org.mockito.Mockito.never()).bootstrap(any(), any(), org.mockito.ArgumentMatchers.anyLong());
     }
 
     @Test

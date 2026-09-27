@@ -2,6 +2,7 @@ package com.platform.agentservice.authz;
 
 import com.github.benmanes.caffeine.cache.Cache;
 import com.github.benmanes.caffeine.cache.Caffeine;
+import com.platform.common.error.ServiceUnavailableException;
 import com.platform.proto.org.v1.Action;
 import com.platform.proto.org.v1.CheckPermissionRequest;
 import com.platform.proto.org.v1.CheckPermissionResponse;
@@ -14,7 +15,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.time.Duration;
 import java.util.concurrent.TimeUnit;
 
-/** alm {@code GrpcPermissionClient}와 같은 캐시·데드라인 정책. 다른 점은 장애 처리 하나 — 아래 {@link #checkAdmin}. */
+/** alm {@code GrpcPermissionClient}와 같은 캐시·데드라인·장애 구분 정책. 다른 점은 장애 결과를 캐시하지 않는 것 하나 — 아래 {@link #checkAdmin}. */
 @Slf4j
 public class GrpcPermissionClient implements PermissionClient {
 
@@ -34,8 +35,9 @@ public class GrpcPermissionClient implements PermissionClient {
     }
 
     /**
-     * 판정 실패는 거부로 닫되(D-P3f-2) <b>캐시하지 않는다</b> — 장애 거부를 30초 붙들면 org가 살아난 뒤에도
-     * 관리자가 계속 막힌다. org가 정상적으로 내린 판정만 캐시한다.
+     * alm과 같은 장애 구분: 가용성 장애(UNAVAILABLE·DEADLINE_EXCEEDED)는 503 — "권한 없음"이 아니라 "지금 판정 불가"다.
+     * 그 밖의 gRPC 오류는 거부(fail-closed). 어느 쪽이든 <b>캐시하지 않는다</b> — 장애 결과를 30초 붙들면 org가 살아난 뒤에도
+     * 관리자가 계속 막힌다(alm은 fail-closed 거부를 캐시한다 — 여기서는 의도적으로 다르다). 정상 판정만 캐시한다.
      */
     @Override
     public PermissionDecision checkAdmin(long userId, ResourceType type, String resourceId) {
@@ -59,10 +61,10 @@ public class GrpcPermissionClient implements PermissionClient {
             return decision;
         } catch (Exception e) {
             if (isUnavailable(e)) {
-                log.error("권한 서비스 불가 — fail-closed 거부: user={} resource={}/{}", userId, type, key.resourceId(), e);
-            } else {
-                log.warn("권한 조회 실패 — fail-closed 거부: user={} resource={}/{}", userId, type, key.resourceId(), e);
+                log.error("권한 서비스 불가 — 503 전파: user={} resource={}/{}", userId, type, key.resourceId(), e);
+                throw new ServiceUnavailableException("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요", e);
             }
+            log.warn("권한 조회 실패 — fail-closed 거부: user={} resource={}/{}", userId, type, key.resourceId(), e);
             return PermissionDecision.orgFailure();
         }
     }

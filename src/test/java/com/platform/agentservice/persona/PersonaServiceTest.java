@@ -1,10 +1,10 @@
 package com.platform.agentservice.persona;
 
 import com.platform.agentservice.client.AuthTokenClient;
+import com.platform.agentservice.client.DownstreamAuthException;
 import com.platform.agentservice.client.OrgClient;
 import com.platform.agentservice.persona.dto.PersonaCreateRequest;
 import com.platform.common.error.ConflictException;
-import com.platform.common.error.ForbiddenException;
 import com.platform.common.error.ServiceUnavailableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -22,6 +22,7 @@ import java.util.List;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.header;
+import static org.springframework.test.web.client.match.MockRestRequestMatchers.headerDoesNotExist;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.jsonPath;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.method;
 import static org.springframework.test.web.client.match.MockRestRequestMatchers.requestTo;
@@ -41,6 +42,8 @@ class PersonaServiceTest {
     private PersonaService personaService;
 
     private static final String ADMIN_BEARER = "Bearer admin-token";
+    private static final String ORG_TOKEN = "org-internal-token";
+    private static final long ACTOR_ID = 42L;
 
     @BeforeEach
     void setUp() {
@@ -52,7 +55,7 @@ class PersonaServiceTest {
 
         orgBuilder = RestClient.builder().baseUrl("http://org-service");
         orgServer = MockRestServiceServer.bindTo(orgBuilder).build();
-        OrgClient orgClient = new OrgClient(orgBuilder.build());
+        OrgClient orgClient = new OrgClient(orgBuilder.build(), ORG_TOKEN);
 
         personaService = new PersonaService(authTokenClient, orgClient, personaRepository);
     }
@@ -68,20 +71,23 @@ class PersonaServiceTest {
     // (하드코딩했다면 org 쪽 jsonPath("$.id")/jsonPath("$.subjectId") 검증이 우연히만
     // 맞아떨어질 텐데, auth stub의 userId를 9001이 아닌 값으로 바꾸면 이 테스트가 깨진다).
     void bootstrap_uses_auth_memberId_for_org_member_then_grant_in_order_and_saves_persona() {
-        authServer.expect(requestTo("http://auth-server/api/auth/agents"))
+        authServer.expect(requestTo("http://auth-server/internal/agents"))
                 .andExpect(method(HttpMethod.POST))
-                .andExpect(header("Authorization", ADMIN_BEARER))
+                .andExpect(header("X-Internal-Secret", "internal-secret"))
+                .andExpect(headerDoesNotExist("Authorization"))
                 .andExpect(jsonPath("$.slug").value("qa-bot"))
                 .andExpect(jsonPath("$.name").value("QA Bot"))
                 .andRespond(withSuccess("""
                         {"userId":9001,"slug":"qa-bot","created":true}
                         """, MediaType.APPLICATION_JSON));
 
-        orgServer.expect(requestTo("http://org-service/api/org/members/agents"))
+        orgServer.expect(requestTo("http://org-service/internal/org/members/agents"))
                 .andExpect(method(HttpMethod.POST))
-                .andExpect(header("Authorization", ADMIN_BEARER))
+                .andExpect(header("X-Internal-Token", ORG_TOKEN))
+                .andExpect(headerDoesNotExist("Authorization"))
                 .andExpect(jsonPath("$.id").value(9001))
                 .andExpect(jsonPath("$.displayName").value("QA Bot"))
+                .andExpect(jsonPath("$.actorId").value(ACTOR_ID))
                 .andRespond(withSuccess("""
                         {"id":9001,"displayName":"QA Bot","email":"agents+qa-bot@platform.local","status":"ACTIVE","kind":"AGENT"}
                         """, MediaType.APPLICATION_JSON));
@@ -101,7 +107,7 @@ class PersonaServiceTest {
         var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", "너는 리뷰어다", null,
                 List.of(new PersonaCreateRequest.GrantRequest("PROJECT", "P1", "EDITOR")), 7L);
 
-        PersonaService.BootstrapResult result = personaService.bootstrap(req, ADMIN_BEARER);
+        PersonaService.BootstrapResult result = personaService.bootstrap(req, ADMIN_BEARER, ACTOR_ID);
 
         assertThat(result.created()).isTrue();
         assertThat(result.persona().memberId()).isEqualTo(9001L);
@@ -117,19 +123,19 @@ class PersonaServiceTest {
 
     @Test
     void bootstrap_defaults_synthetic_email_when_absent() {
-        authServer.expect(requestTo("http://auth-server/api/auth/agents"))
+        authServer.expect(requestTo("http://auth-server/internal/agents"))
                 .andExpect(jsonPath("$.email").value("agents+qa-bot@platform.local"))
                 .andRespond(withSuccess("""
                         {"userId":9001,"slug":"qa-bot","created":true}
                         """, MediaType.APPLICATION_JSON));
-        orgServer.expect(requestTo("http://org-service/api/org/members/agents"))
+        orgServer.expect(requestTo("http://org-service/internal/org/members/agents"))
                 .andExpect(jsonPath("$.email").value("agents+qa-bot@platform.local"))
                 .andRespond(withSuccess("""
                         {"id":9001,"displayName":"QA Bot","email":"agents+qa-bot@platform.local","status":"ACTIVE","kind":"AGENT"}
                         """, MediaType.APPLICATION_JSON));
 
         var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
-        personaService.bootstrap(req, ADMIN_BEARER);
+        personaService.bootstrap(req, ADMIN_BEARER, ACTOR_ID);
 
         authServer.verify();
         orgServer.verify();
@@ -140,7 +146,7 @@ class PersonaServiceTest {
         personaRepository.save(Persona.of(9001L, "qa-bot", PersonaRole.REVIEWER, "Old Name", "🙂", "old prompt"));
 
         var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", "🤖", "new prompt", null, null, null);
-        PersonaService.BootstrapResult result = personaService.bootstrap(req, ADMIN_BEARER);
+        PersonaService.BootstrapResult result = personaService.bootstrap(req, ADMIN_BEARER, ACTOR_ID);
 
         assertThat(result.created()).isFalse();
         assertThat(result.persona().memberId()).isEqualTo(9001L);
@@ -154,47 +160,93 @@ class PersonaServiceTest {
         assertThat(personaRepository.findBySlug("qa-bot").get().getName()).isEqualTo("QA Bot");
     }
 
+    /** 내부 경로의 403은 시크릿 불일치(서비스 간 인증 결함) — 사용자에게 "권한 없음"이 아니라 503으로 보인다. */
     @Test
-    void auth_forbidden_maps_to_forbidden_exception() {
-        authServer.expect(requestTo("http://auth-server/api/auth/agents"))
-                .andRespond(withStatus(HttpStatus.FORBIDDEN).contentType(MediaType.APPLICATION_JSON)
-                        .body("{\"error\":\"관리자 권한이 필요합니다\"}"));
+    void internal_secret_rejected_by_auth_maps_to_downstream_auth_503() {
+        authServer.expect(requestTo("http://auth-server/internal/agents"))
+                .andRespond(withStatus(HttpStatus.FORBIDDEN));
 
         var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
 
-        assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER))
-                .isInstanceOf(ForbiddenException.class)
-                .hasMessage("관리자 권한이 필요합니다");
+        assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER, ACTOR_ID))
+                .isInstanceOf(DownstreamAuthException.class)
+                .hasMessageContaining("AGENT_INTERNAL_SECRET");
+    }
+
+    @Test
+    void internal_token_rejected_by_org_maps_to_downstream_auth_503() {
+        authServer.expect(requestTo("http://auth-server/internal/agents"))
+                .andRespond(withSuccess("""
+                        {"userId":9001,"slug":"qa-bot","created":true}
+                        """, MediaType.APPLICATION_JSON));
+        orgServer.expect(requestTo("http://org-service/internal/org/members/agents"))
+                .andRespond(withStatus(HttpStatus.FORBIDDEN));
+
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
+
+        assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER, ACTOR_ID))
+                .isInstanceOf(DownstreamAuthException.class)
+                .hasMessageContaining("ORG_INTERNAL_TOKEN");
+    }
+
+    /** 시크릿·토큰 미설정은 호출 자체를 하지 않고 503(fail-closed — 서비스 토큰 발급과 같은 처리). */
+    @Test
+    void blank_internal_secret_is_503_without_calling_auth() {
+        PersonaService noSecret = new PersonaService(new AuthTokenClient(authBuilder.build(), " "),
+                new OrgClient(orgBuilder.build(), ORG_TOKEN), personaRepository);
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
+
+        assertThatThrownBy(() -> noSecret.bootstrap(req, ADMIN_BEARER, ACTOR_ID))
+                .isInstanceOf(ServiceUnavailableException.class);
+        authServer.verify();
+        orgServer.verify();
+    }
+
+    @Test
+    void blank_org_token_is_503_without_calling_org() {
+        PersonaService noToken = new PersonaService(new AuthTokenClient(authBuilder.build(), "internal-secret"),
+                new OrgClient(orgBuilder.build(), ""), personaRepository);
+        authServer.expect(requestTo("http://auth-server/internal/agents"))
+                .andRespond(withSuccess("""
+                        {"userId":9001,"slug":"qa-bot","created":true}
+                        """, MediaType.APPLICATION_JSON));
+        var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
+
+        assertThatThrownBy(() -> noToken.bootstrap(req, ADMIN_BEARER, ACTOR_ID))
+                .isInstanceOf(ServiceUnavailableException.class)
+                .hasMessageContaining("조직 멤버 등록");
+        orgServer.verify();
+        assertThat(personaRepository.findBySlug("qa-bot")).isEmpty();
     }
 
     @Test
     void org_conflict_maps_to_conflict_exception() {
-        authServer.expect(requestTo("http://auth-server/api/auth/agents"))
+        authServer.expect(requestTo("http://auth-server/internal/agents"))
                 .andRespond(withSuccess("""
                         {"userId":9001,"slug":"qa-bot","created":true}
                         """, MediaType.APPLICATION_JSON));
-        orgServer.expect(requestTo("http://org-service/api/org/members/agents"))
+        orgServer.expect(requestTo("http://org-service/internal/org/members/agents"))
                 .andRespond(withStatus(HttpStatus.BAD_REQUEST).contentType(MediaType.APPLICATION_JSON)
                         .body("{\"error\":\"요청 값이 올바르지 않습니다\"}"));
 
         var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
 
-        assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER))
+        assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER, ACTOR_ID))
                 .isInstanceOf(ConflictException.class);
     }
 
     @Test
     void org_down_maps_to_service_unavailable() {
-        authServer.expect(requestTo("http://auth-server/api/auth/agents"))
+        authServer.expect(requestTo("http://auth-server/internal/agents"))
                 .andRespond(withSuccess("""
                         {"userId":9001,"slug":"qa-bot","created":true}
                         """, MediaType.APPLICATION_JSON));
-        orgServer.expect(requestTo("http://org-service/api/org/members/agents"))
+        orgServer.expect(requestTo("http://org-service/internal/org/members/agents"))
                 .andRespond(withStatus(HttpStatus.SERVICE_UNAVAILABLE));
 
         var req = new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot", null, null, null, null, null);
 
-        assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER))
+        assertThatThrownBy(() -> personaService.bootstrap(req, ADMIN_BEARER, ACTOR_ID))
                 .isInstanceOf(ServiceUnavailableException.class);
     }
 
@@ -207,7 +259,7 @@ class PersonaServiceTest {
 
         // 같은 slug 재부트스트랩은 표시 필드만 갱신한다 — 관리자가 끈 것을 되살리면 안 된다.
         personaService.bootstrap(new PersonaCreateRequest("qa-bot", PersonaRole.REVIEWER, "QA Bot v2", null, null, null, null, null),
-                ADMIN_BEARER);
+                ADMIN_BEARER, ACTOR_ID);
         assertThat(personaRepository.findById(saved.getId()).orElseThrow().isActive()).isFalse();
 
         assertThat(personaService.changeActive(saved.getId(), true).active()).isTrue();

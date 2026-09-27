@@ -664,7 +664,7 @@ run이 사람 손을 기다리게 되면 이슈를 보지 않는 운영자에게
 | 키 | env | 기본 | 의미 |
 |---|---|---|---|
 | `alerts.mail-to` | `AGENT_ALERT_MAIL_TO` | 빈 값 | 수신자 쉼표 목록(trim·중복 제거). 비면 메일 생략(info 로그만) |
-| `alerts.org-internal-token` | `ORG_INTERNAL_TOKEN` | 빈 값 | org `/internal/org/**` 공유 비밀 — **wiki·alm·auth와 같은 env·같은 값**. 비면 메일 생략(warn 로그) |
+| `alerts.org-internal-token` | `ORG_INTERNAL_TOKEN` | 빈 값 | org `/internal/org/**` 공유 비밀 — **wiki·alm·auth와 같은 env·같은 값**. 비면 메일 생략(warn 로그). P3f부터 페르소나 생성(org 내부 멤버 등록)에도 쓰여 비면 생성이 503(§7) |
 
 org의 base URL은 기존 `ORG_BASE_URL`(`platform.agent.org-base-url`)을 그대로 쓴다. 컨테이너 배포에서는 agent-service에
 `ORG_INTERNAL_TOKEN`·`AGENT_ALERT_MAIL_TO` env 배선이 필요하다(infra compose — 이 리포 밖).
@@ -754,17 +754,31 @@ grant는 403 "GLOBAL 권한은 전역 관리자만 부여할 수 있습니다", 
 우회하는 경로를 막는다(org `POST /api/org/grants`도 자원 ADMIN을 요구하지만 부트스트랩 중간에 실패하면 auth·org에 고아
 계정이 남으므로 앞에서 끊는다).
 
-**fail-closed(D-P3f-2)** — org 판정 실패(UNAVAILABLE·DEADLINE_EXCEEDED·그 밖의 gRPC 오류)는 **403 거부**다(alm·wiki는 503 —
-여기서는 계획 결정으로 거부). 사유는 "권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"로 "권한 없음"과
-구분하고, 계정 상태 거부(PENDING·SUSPENDED·DEACTIVATED)도 그 사실을 말한다. 전역 관리자는 org를 부르지 않으므로 org 장애 중에도
-운영이 멈추지 않는다. 판정 캐시는 alm과 같은 30초(grant 회수·계정 정지 반영이 최대 30초 늦다)이고, **판정 실패는 캐시하지
-않는다**(org 복구 직후에도 막히지 않게). 권한 조회 API는 실패 시 403 대신 `canManage=false`로 답한다(화면이 깨지지 않게).
+**부트스트랩 등록은 내부 경로(블로커 판정 (b))** — 판정 지점은 agent-service(`AgentAuthz`) 하나이고, 통과한 요청만 서비스 간
+내부 채널로 등록한다. 다운스트림에 "프로젝트 ADMIN이면 허용" 규칙을 복제하지 않는다.
+
+| 단계 | 경로 | 인증 | 비고 |
+|---|---|---|---|
+| ① 사용자 등록 | auth `POST /internal/agents` | `X-Internal-Secret: AGENT_INTERNAL_SECRET`(서비스 토큰 발급과 같은 시크릿) | 본문·응답 = 기존 `/api/auth/agents` |
+| ② 멤버 등록 | org `POST /internal/org/members/agents` | `X-Internal-Token: ORG_INTERNAL_TOKEN`(알림 메일과 같은 토큰) | 본문 = 기존 + `actorId`(호출자 JWT sub — 재활성 이력 행위자) |
+| ③ grant | org `POST /api/org/grants` | **호출자 bearer 그대로** | org가 자원 ADMIN을 스스로 다시 판정(이중 방어) |
+
+시크릿·토큰이 비면 호출하지 않고 503(fail-closed). 내부 필터의 403(시크릿·토큰 불일치)은 사용자에게 "권한 없음"으로 보이지
+않게 `DownstreamAuthException`(503, 설정 확인 문구)으로 바꾼다. ①이 성공하고 ②가 실패하면 auth에 계정만 남지만, auth 등록이
+멱등(`created=false`)이라 원인을 고친 뒤 같은 슬러그로 다시 부르면 이어서 완료된다(로컬 페르소나는 ②·③ 뒤에야 저장된다).
+그래서 **페르소나 생성에는 이제 `ORG_INTERNAL_TOKEN`이 필수다**(예전엔 알림 메일에만 쓰였다).
+
+**장애 전파(D-P3f-2, alm 관례)** — org 가용성 장애(UNAVAILABLE·DEADLINE_EXCEEDED)는 **503**("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요")
+— 거부 방향(실행 안 함)은 같지만 의미가 "권한 없음"이 아니라 "지금 판정 불가"다. 그 밖의 gRPC 오류는 **403 거부**(fail-closed,
+"권한 판정에 실패해 거부했습니다 — 잠시 후 다시 시도하세요"). 계정 상태 거부(PENDING·SUSPENDED·DEACTIVATED)도 그 사실을 말한다.
+전역 관리자는 org를 부르지 않으므로 org 장애 중에도 운영이 멈추지 않는다. 판정 캐시는 alm과 같은 30초(grant 회수·계정 정지
+반영이 최대 30초 늦다)이고, **장애·판정 실패 결과는 캐시하지 않는다**(alm은 fail-closed 거부를 캐시한다 — org 복구 직후에도
+막히지 않게 여기서는 의도적으로 다르다). 권한 조회 API는 장애·실패 시 503/403 대신 `canManage=false`로 답한다(버튼 노출
+힌트가 깨지면 사무실 화면 전체가 오류가 된다 — 실제 관리 API가 다시 503을 낸다).
 
 **org gRPC 설정** — alm·wiki와 같은 env: `ORG_GRPC_HOST`(기본 localhost) · `ORG_GRPC_PORT`(기본 9131) ·
 `ORG_GRPC_DEADLINE_SECONDS`(기본 5). 컨테이너에서는 `ORG_GRPC_HOST=org-service`가 필요하다(infra compose — 이 리포 밖).
 공유 아티팩트는 다른 서비스와 같은 `common-proto`/`common-starter` 0.16.0.
 
-**알려진 한계(다운스트림)** — 새 페르소나 부트스트랩은 호출자 JWT를 그대로 auth-server `POST /api/auth/agents`와 org
-`POST /api/org/members/agents`에 넘기는데, 두 곳 모두 아직 `ROLE_ADMIN`만 받는다. 그래서 **프로젝트 관리자의 새 페르소나 생성은
-agent-service 인가를 통과해도 다운스트림에서 403으로 막힌다**(기존 슬러그 갱신·활성 토글·PAT·run·게이트·회의는 다운스트림을
-관리자 JWT로 부르지 않아 영향 없음). 해소는 auth·org 쪽 변경(프로젝트 ADMIN 허용 또는 내부 경로) — 이 리포 밖.
+**배포 의존** — ①② 내부 엔드포인트는 auth-server·org-service 쪽 변경(같은 P3f 웨이브)이 먼저 배포돼야 한다. 없으면 새 페르소나
+생성이 404 → 409로 떨어진다(기존 슬러그 갱신·토글·PAT·run·게이트·회의는 영향 없음).

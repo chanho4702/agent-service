@@ -7,6 +7,7 @@ import com.platform.proto.org.v1.ResourceType;
 import com.platform.agentservice.run.dto.RunSummaryResponse;
 import com.platform.common.error.ConflictException;
 import com.platform.common.error.NotFoundException;
+import com.platform.common.error.ServiceUnavailableException;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -181,15 +182,29 @@ class RunControllerTest {
         verify(runService, never()).cancel(other.getId());
     }
 
-    /** org 장애는 거부(fail-closed, D-P3f-2) — 사유는 "권한 없음"이 아니라 연결 실패로 말한다. */
+    /** org 가용성 장애는 503(alm 관례) — 거부 방향(실행 안 함)은 같고 의미가 "권한 없음"이 아니라 "지금 판정 불가"다. */
     @Test
-    void org_failure_denies_project_admin_with_403() throws Exception {
+    void org_unavailable_is_503_and_does_not_cancel() throws Exception {
         Run own = runRepository.save(Run.queuedUser("AGP-11", 13L, 5L, "harness://default", null, null));
-        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "13")).willReturn(PermissionDecision.orgFailure());
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "13"))
+                .willThrow(new ServiceUnavailableException("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"));
+
+        mvc.perform(post("/api/agent/runs/" + own.getId() + "/cancel").with(authentication(TestAuth.user(2L, "Bob"))))
+                .andExpect(status().isServiceUnavailable())
+                .andExpect(jsonPath("$.error").value("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"));
+
+        verify(runService, never()).cancel(anyLong());
+    }
+
+    /** 가용성 외 판정 실패는 거부(fail-closed) — 사유는 "권한 없음"과 구분한다. */
+    @Test
+    void org_judgement_failure_denies_with_403() throws Exception {
+        Run own = runRepository.save(Run.queuedUser("AGP-12", 14L, 5L, "harness://default", null, null));
+        given(permissionClient.checkAdmin(2L, ResourceType.PROJECT, "14")).willReturn(PermissionDecision.orgFailure());
 
         mvc.perform(post("/api/agent/runs/" + own.getId() + "/cancel").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isForbidden())
-                .andExpect(jsonPath("$.error").value("권한 서비스에 연결할 수 없어 거부했습니다 — 잠시 후 다시 시도하세요"));
+                .andExpect(jsonPath("$.error").value("권한 판정에 실패해 거부했습니다 — 잠시 후 다시 시도하세요"));
 
         verify(runService, never()).cancel(anyLong());
     }

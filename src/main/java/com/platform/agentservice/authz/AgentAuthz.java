@@ -28,7 +28,8 @@ import java.util.Optional;
  * 아니면 {@link ForbiddenException}을 던져 {@code {"error": 사유}} 403이 된다(false로 떨어뜨리면 사유 없는 403이 된다).
  * 대상이 없으면(없는 id) 전역 관리자만 통과시킨다: 프로젝트 관리자에게 "없음(404)"과 "남의 것(403)"을 구분해 주지 않는다.
  *
- * <p>org 판정 실패는 거부다(fail-closed, D-P3f-2). 전역 관리자는 org를 부르지 않고 통과한다.
+ * <p>org 가용성 장애는 503({@code ServiceUnavailableException}이 그대로 올라간다 — alm 관례), 그 밖의 판정 실패는 거부
+ * (fail-closed). 전역 관리자는 org를 부르지 않고 통과하므로 org 장애 중에도 운영이 멈추지 않는다.
  */
 @Component("agentAuthz")
 @RequiredArgsConstructor
@@ -48,7 +49,7 @@ public class AgentAuthz {
 
     // ---- 판정(던지지 않음) ----
 
-    /** 권한 조회 API·목록 필터용. org 판정 실패는 false. */
+    /** 권한 조회 API용. 판정 실패는 false, 가용성 장애는 503을 던진다(호출측이 삼킬지 정한다). */
     public boolean canManage(AgentCaller caller, long projectId) {
         return caller.globalAdmin() || projectAdmin(caller, projectId).allowed();
     }
