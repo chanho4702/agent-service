@@ -1195,7 +1195,8 @@ MCP 체인과 같은 이유(permitAll ≠ 인증 스킵 — `BearerTokenAuthenti
 - 배정 뒤: `RunService.prepareJob`(인프로세스 `execute`와 같은 리포 매핑·이슈 claim·코멘트·회의 자료) → (PLATFORM) 키 해석 →
   `WorkerLauncher.buildSpec`(같은 프롬프트·모델·도구 목록) → run 토큰 발급(`RunTokenService.issueFor`, `run.pat_id`에 기록) → 응답. 어느 단계든 실패하면
   발급한 토큰을 철회하고 `RunService.failIncident`(인프로세스 실패와 같은 사고형 BLOCKED + 코멘트 + 메일) 후 다음 후보로.
-- `spec.mcpUrl`은 `AGENT_RUNNER_PUBLIC_MCP_URL`(러너가 nginx·게이트웨이를 거쳐 보는 주소) — 비면 `worker.mcp-url`.
+- `spec.mcpUrl`은 `AGENT_RUNNER_PUBLIC_MCP_URL`(러너가 nginx·게이트웨이를 거쳐 보는 주소) — 비면 `worker.mcp-url`. 러너 jar(d44fc3c 이후)는 이 값을
+  쓰지 않고 자기 `--server` 기준 `<server>/api/agent/mcp`로 덮어쓴다 — 아래 "러너 프로그램"의 MCP 주소. 이 값은 `--server`가 없을 때의 폴백일 뿐이다.
 - 하네스: `GET /api/agent/runners/harness` → zip(`.claude/…` + 루트 파일, `settings.local.json`은 어느 깊이든 제외 — AGP-51과 같은 규칙, 최상위 `worktrees/`(Claude Code 워크트리 체크아웃)도 제외, 64MB 상한), ETag =
   `harness.sha256`. 항목 순서·시각 고정이라 내용이 같으면 해시가 같다(60초 캐시). 러너는 해시가 바뀔 때만 받는다.
 - `toString`은 토큰·키·프롬프트를 싣지 않는다(`RunnerClaimResponse`·`WorkSpec`).
@@ -1313,6 +1314,16 @@ java -jar agent-runner.jar --server https://<플랫폼 호스트>
 재시도하고(서버 멱등), 그 밖의 4xx는 버린다. 보내기 전 `pending-results/<runId>.json`에 적어 두고 다음 시작 때 재전송한다(파일에 토큰 없음).
 SIGINT/SIGTERM: claim 중지 → 진행 중 run을 유예까지 기다림(heartbeat 계속) → 남은 run 중단·"러너 종료" 보고(최대 60초) → 종료.
 
+**MCP 주소(d44fc3c)** — 워커 mcp-config의 MCP 주소는 러너 자신의 `--server`에서 만든 `<server>/api/agent/mcp`다(`RunTask`가 claim의 `spec.mcpUrl`을 이
+값으로 바꿔 쓴다, 시작 로그에 "워커 MCP 주소" 한 줄). 이유: 플랫폼 러너 컨테이너는 격리망에서 `http://nginx`로, 사용자 PC 러너는 공개 주소로 플랫폼을 본다 —
+서버 쪽 설정 하나(`AGENT_RUNNER_PUBLIC_MCP_URL`)로는 둘 다 맞출 수 없다. `spec.mcpUrl`은 `--server`가 없을 때의 폴백으로만 남는다. 워커 MCP 호출도 러너와 같은
+경로(nginx)로 나가므로 러너가 서버에 닿으면 워커도 닿는다. `RunnerLoopTest`가 mcp-config에 spec 값이 아니라 러너 쪽 주소가 실리는 것을 고정한다.
+
+**호출 빈도(nginx 레이트 리밋 — `agr_` 토큰은 IP당 20r/s)** — 평상시 heartbeat 30초 1회 + claim 10초 1회(204일 때)라 초당 0.2회 미만이다. claim 성공 직후에는
+곧바로 다시 claim하지만 `--concurrency`(최대 8)까지만이다. 오류 백오프는 claim 10초→최대 5분(지터), 결과 재시도 2초→최대 60초(지터), 첫 연결 2초→최대 60초.
+하네스는 해시가 바뀔 때만 받는다. 같은 IP 뒤의 러너 여러 대도 합쳐 20r/s에 한참 못 미친다 — 주기를 줄이는 변경(테스트 전용 타이밍 제외)은 이 한도를 다시
+계산하고 한다.
+
 **인증(과금 분리)** — claim에 `llmApiKey`가 있으면(PLATFORM) 워커 호출 env에 `ANTHROPIC_API_KEY`=그 값 **하나만**(러너 env의 다른 인증 키는 싣지 않는다,
 git에는 안 간다). 없으면(LOCAL) 플랫폼 것은 아무것도 넣지 않고, 러너 프로세스 자신의 env에 사람이 둔 `ANTHROPIC_API_KEY`·`CLAUDE_CODE_OAUTH_TOKEN`만
 넘긴다(커튼이 부모 env를 막으므로 넘기지 않으면 사용자 키가 워커에 닿지 않는다) — 둘 다 없으면 그 PC의 구독 로그인(`~/.claude`)으로 돈다. run 토큰은
@@ -1337,10 +1348,11 @@ env 기본값: `RUNNER_WORK_DIR=/work`·`RUNNER_LOG_FORMAT=json`·`CLAUDE_BIN=/u
 **플랫폼 비밀 없음** — 입력은 `RUNNER_SERVER`·`RUNNER_TOKEN` 둘뿐, 하네스 마운트·구독 세션 마운트 없음. 포트 없음, HEALTHCHECK는 `runner.alive` 3분 이내.
 크기 약 860MB(2026-09-28 로컬 빌드 실측).
 
-**compose 배선(infra 몫)** — 러너 컨테이너: `RUNNER_SERVER`(nginx 주소 — 컨테이너 안에서 보이는 이름, 리다이렉트 없는 호스트명) · `RUNNER_TOKEN` =
+**compose 배선(infra 몫)** — 러너 컨테이너: `RUNNER_SERVER=http://nginx`(컨테이너 안에서 보이는 이름 — nginx가 Host `nginx`를 받는다. 점 없는 호스트라
+평문 http 경고도 나지 않는다) · `RUNNER_TOKEN` =
 agent-service의 `AGENT_PLATFORM_RUNNER_TOKEN`과 같은 값 · 명명 볼륨 → `/work` · `stop_grace_period` > `RUNNER_SHUTDOWN_GRACE`+60초 · 플랫폼 내부망(DB·redis·
-내부 API)이 아니라 nginx만 닿는 네트워크. agent-service: `AGENT_IN_PROCESS_EXECUTION=false` · `AGENT_PLATFORM_RUNNER_TOKEN` · `AGENT_RUNNER_PUBLIC_MCP_URL`
-(러너 컨테이너에서 보이는 `<nginx>/api/agent/mcp`). 게이트웨이의 러너 경로 JWT 제외(위 "배포 의존")가 먼저 필요하다 — 없으면 첫 heartbeat 401로 러너가 종료
+내부 API)이 아니라 nginx만 닿는 네트워크. agent-service: `AGENT_IN_PROCESS_EXECUTION=false` · `AGENT_PLATFORM_RUNNER_TOKEN` · (선택) `AGENT_RUNNER_PUBLIC_MCP_URL` — 러너 jar는 `--server`
+기준 주소를 쓰므로 폴백일 뿐이다(위 "MCP 주소"). 게이트웨이의 러너 경로 JWT 제외(위 "배포 의존")가 먼저 필요하다 — 없으면 첫 heartbeat 401로 러너가 종료
 코드 2로 멈춘다.
 
 **테스트** — `runner` 모듈: 스텁 HTTP 서버(JDK HttpServer) + 가짜 git/claude로 claim→실행→결과(커밋 링크 포함), PLATFORM 키는 워커 env에만·LOCAL은
