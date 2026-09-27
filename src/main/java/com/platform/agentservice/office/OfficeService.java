@@ -6,6 +6,7 @@ import com.platform.agentservice.budget.BudgetService;
 import com.platform.agentservice.budget.PersonaCost;
 import com.platform.agentservice.budget.UsageLedgerRepository;
 import com.platform.agentservice.budget.dto.BudgetStatusResponse;
+import com.platform.agentservice.chat.ChatAvailability;
 import com.platform.agentservice.office.dto.AuditEntry;
 import com.platform.agentservice.office.dto.OfficeResponse;
 import com.platform.agentservice.office.dto.PersonaActivityResponse;
@@ -70,22 +71,23 @@ public class OfficeService {
     private final UsageLedgerRepository ledgerRepository;
     private final BudgetService budgetService;
     private final MeetingProperties meetingProperties;
+    private final ChatAvailability chatAvailability;
     private final Clock clock;
 
     @Autowired
     public OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
                          GateRepository gateRepository, ToolCallAuditRepository auditRepository,
                          UsageLedgerRepository ledgerRepository, BudgetService budgetService,
-                         MeetingProperties meetingProperties) {
+                         MeetingProperties meetingProperties, ChatAvailability chatAvailability) {
         this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
-                meetingProperties, Clock.systemUTC());
+                meetingProperties, chatAvailability, Clock.systemUTC());
     }
 
     /** 테스트 전용 — 5분 창·오늘 경계를 고정 시각으로 검증한다. */
     OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
                   GateRepository gateRepository, ToolCallAuditRepository auditRepository,
                   UsageLedgerRepository ledgerRepository, BudgetService budgetService,
-                  MeetingProperties meetingProperties, Clock clock) {
+                  MeetingProperties meetingProperties, ChatAvailability chatAvailability, Clock clock) {
         this.personaRepository = personaRepository;
         this.runRepository = runRepository;
         this.gateRepository = gateRepository;
@@ -93,6 +95,7 @@ public class OfficeService {
         this.ledgerRepository = ledgerRepository;
         this.budgetService = budgetService;
         this.meetingProperties = meetingProperties;
+        this.chatAvailability = chatAvailability;
         this.clock = clock;
     }
 
@@ -150,7 +153,8 @@ public class OfficeService {
         return new OfficeResponse(personas, finished.stream().map(RunSummaryResponse::of).toList(),
                 gates.size(), gates.stream().limit(PENDING_GATE_LIMIT).toList(), budget, now,
                 posts.stream().map(r -> toBoardPost(r, spaceId)).toList(),
-                meeting.map(OfficeService::toActiveMeeting).orElse(null));
+                meeting.map(OfficeService::toActiveMeeting).orElse(null),
+                new OfficeResponse.Features(chatAvailability.available(projectId)));
     }
 
     /** 참석자 컬럼이 비면(회의 계열인데 명단 없이 만들어진 행) 진행자 1인 회의로 본다 — 회의실이 빈 방이 되면 안 된다. */

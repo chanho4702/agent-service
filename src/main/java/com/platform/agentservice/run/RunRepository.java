@@ -29,6 +29,9 @@ public interface RunRepository extends JpaRepository<Run, Long> {
 
     List<Run> findTop20ByPersonaIdOrderByIdDesc(long personaId);
 
+    /** 사무실 수다(P3g) 시스템 프롬프트의 "지금 하는 일" — office currentRun과 같은 판정(활성 상태 중 최신). */
+    Optional<Run> findFirstByPersonaIdAndStatusInOrderByIdDesc(long personaId, Collection<RunStatus> statuses);
+
     // ---- 회의 run(P3b) ----
 
     /** 같은 프로젝트 동시 회의 1건 제한 — 회의 run의 이슈키는 프로젝트 대표 키일 수 있어 이슈 축이 아니라 프로젝트 축으로 본다. */

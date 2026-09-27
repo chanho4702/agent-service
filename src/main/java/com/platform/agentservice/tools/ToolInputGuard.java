@@ -110,7 +110,8 @@ public class ToolInputGuard implements BeanPostProcessor {
         return null;
     }
 
-    static String invalidReason(CharSequence text) {
+    /** 위반 사유(입력값은 싣지 않는다), 없으면 null — REST 입력(P3g 대화)도 같은 규약으로 거른다. */
+    public static String invalidReason(CharSequence text) {
         for (int i = 0; i < text.length(); i++) {
             char c = text.charAt(i);
             if (Character.isHighSurrogate(c)) {

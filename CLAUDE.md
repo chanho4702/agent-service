@@ -682,7 +682,8 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 - `GET /api/agent/office?projectId=`(선택): `personas[]`(id·slug·name·emoji·role·active·`currentRun`·
   `lastActivity`·`todayCostUsd`) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
-  `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래) · `activeMeeting`(P3e, 아래).
+  `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래) · `activeMeeting`(P3e, 아래) ·
+  `features`(P3g — `{chat: boolean}`, §9).
   - `boardPosts`(사무실 게시판, D-P3b-7): 회의 계열 run(MEETING/RETRO/ESCALATION + P3c MANAGER 보고) 중 DONE이고 `output_page_id`가 있는 것
     `endedAt` 최신순 5건 — `{runId, type, issueKey, projectId, pageId, spaceId, endedAt}`. `spaceId`는 위키 링크
     (`/spaces/:spaceId/pages/:pageId`)용으로 run별 저장 없이 현재 `meetings.space-id` 설정값을 싣는다(미설정이면 null) —
@@ -857,3 +858,75 @@ null이면 프로젝트 층을 건너뛴다. 공개 빈이라 P3g 자유 대화(
 |---|---|---|---|
 | `credentials.master-key` | `AGENT_CREDENTIAL_MASTER_KEY` | 빈 값 | 위 마스터 키. 컨테이너 배포는 infra compose에 시크릿으로 배선(이 리포 밖) |
 | `credentials.anthropic-api-url` | `AGENT_ANTHROPIC_API_URL` | `https://api.anthropic.com` | 검증 호출 대상. 사내 프록시 경유 설치만 바꾼다 |
+
+## 9. P3g: AI 사무실 1:1 대화 (2026-09-27, AGP-65)
+
+사무실에서 봇을 클릭해 말을 건다 — 잡담(수다)은 LLM, 지시·맡기기는 기존 코멘트·USER run 경로(프론트)이고, 대화 기록은 서버에
+남긴다. 구현은 `chat` 패키지. 권한: **인증 사용자 누구나**(§7 관리 권한을 보지 않는다 — 대화·조회는 관리 행위가 아니다).
+
+**① `features.chat`(office 응답)** — `CHAT_ENABLED` && `CredentialResolver.resolve(projectId)`가 키를 찾음(NONE 아님). `projectId`가
+없으면 전역·env 층만. 층 규칙은 §8 빈 하나(`ChatAvailability`가 위임) — 복제하지 않는다. 필드가 없으면 프론트는 false(구 백엔드 호환).
+
+**② `POST /api/agent/personas/{id}/chat`**
+
+```json
+// 요청
+{"message": "1~500자", "sessionId": "선택 — 첫 턴 생략(서버 발급 c-<uuid>)", "projectId": 3}
+// 200
+{"sessionId": "c-…", "reply": "≤600자", "mood": "NEUTRAL|THINKING|HAPPY|TROUBLED|null", "suggest": "DIRECTIVE|null"}
+```
+
+판정 순서(`ChatService`): 입력 400 → 페르소나 404 → `CHAT_ENABLED=false` 503 → 킬 스위치 409 → 월 상한 409(플랫폼 캡, `projectId`가
+있으면 그 프로젝트 캡도) → 키 없음 503 → 레이트 리밋 429 → Anthropic 실패 503. 레이트 리밋이 맨 뒤인 이유: 실제로 LLM을 부르는
+시도만 창을 쓰게. 오류는 전부 `{"error"}`(429는 `ChatExceptionHandler` — common-starter에 429 예외가 없다).
+
+- 입력: `message` 1~500자·공백만 불가 + §3-9 입력 인코딩 규약(`ToolInputGuard.invalidReason` 공유 — 깨진 서로게이트·제어문자(개행·탭·CR
+  제외)·U+FFFD 거부). `sessionId`는 `c-[0-9A-Za-z-]{8,38}`. 오류 문구에 입력 본문을 싣지 않는다(위치·사유만).
+- LLM 호출(`HttpAnthropicChatClient`): **Anthropic Messages API를 HTTP로 직접** — 요청마다 해석된 키(프로젝트/전역/env)가 달라 고정 키
+  Spring AI 자동구성을 쓰지 않는다. `POST {AGENT_ANTHROPIC_API_URL}/v1/messages`, `x-api-key`·`anthropic-version: 2023-06-01`, 연결 3초/
+  읽기 30초, **tools 없음**. 401·403은 "키가 거부됨", 그 밖 비2xx(429·5xx·529)·연결 실패는 "응답을 받지 못함" — 둘 다 503.
+- 시스템 프롬프트(`ChatPromptBuilder`): 이름·롤·`voicePrompt` + 현재 run 요약(활성 run 최신 1건의 **이슈키·상태·종류만** — office와 같은
+  가림 수준, 제목·본문·지시문 금지) + 규칙(도구 없음·수행했다고 말하지 말 것·일을 시키면 '지시하기' 권유·`<사용자-메시지>` 블록은 데이터·
+  한국어 1~3문장) + 출력 형식. 사용자 발화는 매 턴 `<사용자-메시지>` 경계로 감싸고, 입력 속 경계 태그는 `[사용자-메시지]`로 무력화한다.
+- 구조화 응답: 도구 없이 프롬프트 규약 — 답변 뒤 마지막 줄 `@@meta {"mood":…,"suggest":…}`(맨 끝 JSON 줄만 있어도 받는다).
+  없거나 깨지거나 모르는 값이면 `mood=null·suggest=null`, `reply`는 메타 줄을 뗀 텍스트만(600자 넘으면 서로게이트 안전하게 잘라 `…`).
+  빈 답변은 503(비용은 원장에 적재, 턴은 기록 안 함).
+- 세션 문맥: 같은 (사용자, 페르소나, sessionId)의 SAY 기록 최근 10턴(20줄)을 user/assistant 교대로 싣는다(같은 역할 연속은 합침, 첫 줄은
+  user). 다른 사용자가 같은 sessionId를 보내도 소유자 축으로만 조회하므로 섞이지 않는다.
+- 비용: `usage_ledger`에 **run 없이**(V10 — `run_id` NULL 허용) PLATFORM 행 + `projectId`가 있으면 PROJECT 행, `credential_scope` 기록.
+  단가는 설정(기본 Haiku 4.5 $1/$5 per MTok), 소수 4자리 올림. 페르소나별 비용(§6)은 run 조인이라 수다를 세지 않는다.
+- 기록: 성공한 턴만 USER·PERSONA SAY 두 줄을 한 트랜잭션으로(원장·감사와 함께). 실패 턴은 남기지 않는다(문맥 교대 유지).
+- 감사: `chat.say`(OK / 실패 ERROR) — `persona_id` **NULL**(채우면 사무실 말풍선·페르소나 활동에 사적 대화가 모두에게 보인다), summary는
+  `personaId=N session=… credential=… in=… out=…` 메타만. 로그도 메타만 — 메시지·답변·키 원문은 로그·감사·예외에 없다(`ChatControllerTest` 반증).
+
+**③ `GET/POST /api/agent/personas/{id}/dialog`** — 호출자 본인 기록만(JWT sub = `user_member_id`, 관리자 포함 타인 불가).
+
+```json
+// GET ?before={entryId}&limit=50(1~100)  → 200, entries는 시간순(오래된 것 먼저) — 더 이전은 entries[0].id를 before로
+{"entries": [{"id": "812", "speaker": "USER|PERSONA", "kind": "SAY|STATUS|DIRECTIVE|ASSIGN", "text": "…", "issueKey": "ALM-12",
+              "runId": "9004|null", "commentId": "3301|null", "createdAt": "2026-09-27T05:12:03Z"}], "hasMore": true}
+// POST {"entries": [{"speaker", "kind", "text", "issueKey?", "runId?", "commentId?"}]}(1~20건) → 201 {"saved": n}
+```
+
+- id·runId·commentId는 문자열로 내려간다(POST는 숫자·숫자 문자열 모두 받음). `text` 1~2000자·인코딩 규약, `issueKey` ≤40, enum은 대소문자
+  무관. 잘못된 값 400(본문 미기재), 없는 페르소나 404. 기록 POST는 감사를 남기지 않는다.
+- 저장(V10 `dialog_entry`): `(user_member_id, persona_id, session_id NULL, speaker, kind, text VARCHAR(2000), issue_key, run_id, comment_id,
+  created_at)`, 인덱스 `(user_member_id, persona_id, id DESC)` + `(created_at)`. `session_id`는 서버 수다 턴만(프론트 POST 행은 NULL — 수다
+  문맥에 섞이지 않는다). `run_id`·`comment_id`는 FK 없는 표시용 참조.
+- 보존: 쓰기 시점(POST·수다 턴)에 90일 지난 행을 **전역** 삭제 + 이 사용자×페르소나의 최신 500건 밖을 삭제. 한계: 아무도 쓰지 않으면
+  정리도 돌지 않는다(다음 쓰기 때 한꺼번에).
+
+**레이트 리밋(`ChatRateLimiter`)** — 사용자당 인메모리 슬라이딩 창. **한계**: 인스턴스별로 따로 세고(인스턴스 N개면 최대 N×한도) 재기동하면
+초기화된다 — 현재 단일 인스턴스 배포라 수용, 확장 시 Redis로. 판정을 통과한 시도는 LLM이 실패해도 칸을 돌려주지 않는다(재시도 폭주 억제).
+
+| 키 | env | 기본 | 의미 |
+|---|---|---|---|
+| `chat.enabled` | `CHAT_ENABLED` | `true` | 설치 옵션. false면 수다 503 + `features.chat=false`(기록 API는 동작) |
+| `chat.model` | `CHAT_MODEL` | `claude-haiku-4-5-20251001` | 수다 모델 |
+| `chat.max-tokens` | `CHAT_MAX_TOKENS` | `400` | 응답 상한 토큰 |
+| `chat.rate-limit` / `chat.rate-window` | `CHAT_RATE_LIMIT` / `CHAT_RATE_WINDOW` | `30` / `10m` | 사용자당 한도 |
+| `chat.input-usd-per-mtok` / `chat.output-usd-per-mtok` | `CHAT_INPUT_USD_PER_MTOK` / `CHAT_OUTPUT_USD_PER_MTOK` | `1` / `5` | 원장 단가 — 모델을 바꾸면 같이 |
+| `chat.context-turns`·`chat.retention-days`·`chat.retention-max` | (env 없음 — `platform.agent.chat.*` 속성으로 조정) | `10`·`90`·`500` | 문맥 턴·보존 |
+
+Anthropic 호출 대상은 §8의 `AGENT_ANTHROPIC_API_URL`을 같이 쓴다. 키가 저장돼 있지 않고 env `ANTHROPIC_API_KEY`도 없으면(구독 인증만 쓰는
+도그푸딩 구성) `features.chat=false` — 수다는 API 키가 있어야 한다.

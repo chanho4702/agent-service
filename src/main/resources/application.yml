@@ -150,6 +150,18 @@ platform:
       master-key: ${AGENT_CREDENTIAL_MASTER_KEY:}
       # PUT validate=true의 검증 호출 대상(GET /v1/models). 사내 프록시를 거치는 설치만 바꾼다.
       anthropic-api-url: ${AGENT_ANTHROPIC_API_URL:https://api.anthropic.com}
+    chat:
+      # AI 사무실 1:1 수다(P3g, AGP-65) — 페르소나와 잡담하는 LLM 호출(도구 없음). 키는 credentials 층 규칙(프로젝트 > 전역 > env)으로
+      # 해석하고, Anthropic 호출 대상은 위 anthropic-api-url을 같이 쓴다. false면 수다 API 503 + office features.chat=false.
+      enabled: ${CHAT_ENABLED:true}
+      model: ${CHAT_MODEL:claude-haiku-4-5-20251001}
+      max-tokens: ${CHAT_MAX_TOKENS:400}
+      # 사용자당 슬라이딩 창 한도(인메모리 — 인스턴스별·재기동 시 초기화). 넘으면 429.
+      rate-limit: ${CHAT_RATE_LIMIT:30}
+      rate-window: ${CHAT_RATE_WINDOW:10m}
+      # 원장 적재용 단가(USD/백만 토큰) — CHAT_MODEL을 바꾸면 그 모델 단가로 같이 바꾼다(기본값은 Haiku 4.5).
+      input-usd-per-mtok: ${CHAT_INPUT_USD_PER_MTOK:1}
+      output-usd-per-mtok: ${CHAT_OUTPUT_USD_PER_MTOK:5}
     budget:
       # 예산 캡(P2a T5) — BudgetService가 BudgetGuardConfig의 permissive 기본값을 대체한다.
       # 월 캡은 캘린더 월(UTC) 누적, 플랫폼 전체와 프로젝트별에 같은 값을 쓴다(P2a 결정,

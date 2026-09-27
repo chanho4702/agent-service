@@ -19,7 +19,8 @@ public class UsageLedger {
     @Id @GeneratedValue(strategy = GenerationType.IDENTITY)
     private Long id;
 
-    @Column(nullable = false) private Long runId;
+    /** P3g 수다 비용은 run 없이 적재되므로 null일 수 있다(V10). */
+    private Long runId;
     @Enumerated(EnumType.STRING) @Column(nullable = false, length = 20) private LedgerScope scope;
     @Column(nullable = false, length = 40) private String scopeId;
     @Column(nullable = false, precision = 10, scale = 4) private BigDecimal costUsd;
@@ -37,6 +38,17 @@ public class UsageLedger {
 
     public static UsageLedger of(long runId, LedgerScope scope, String scopeId, BigDecimal costUsd,
                                   long inputTokens, long outputTokens, String model, String credentialScope) {
+        return build(runId, scope, scopeId, costUsd, inputTokens, outputTokens, model, credentialScope);
+    }
+
+    /** run 없는 비용(P3g 사무실 수다). */
+    public static UsageLedger withoutRun(LedgerScope scope, String scopeId, BigDecimal costUsd,
+                                         long inputTokens, long outputTokens, String model, String credentialScope) {
+        return build(null, scope, scopeId, costUsd, inputTokens, outputTokens, model, credentialScope);
+    }
+
+    private static UsageLedger build(Long runId, LedgerScope scope, String scopeId, BigDecimal costUsd,
+                                     long inputTokens, long outputTokens, String model, String credentialScope) {
         UsageLedger u = new UsageLedger();
         u.runId = runId;
         u.scope = scope;

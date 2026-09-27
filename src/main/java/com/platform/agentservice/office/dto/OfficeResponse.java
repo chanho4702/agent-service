@@ -21,8 +21,16 @@ public record OfficeResponse(
         BudgetStatusResponse budget,
         Instant generatedAt,
         List<BoardPost> boardPosts,
-        ActiveMeeting activeMeeting
+        ActiveMeeting activeMeeting,
+        Features features
 ) {
+
+    /**
+     * 기능 플래그(P3g ①). {@code chat} = 사무실 수다가 동작 가능(설치 옵션 {@code CHAT_ENABLED} on + LLM 키가 해석됨 — projectId가
+     * 있으면 프로젝트 층부터, 없으면 전역·env). 프론트는 필드가 없으면 false로 본다(구 백엔드 호환).
+     */
+    public record Features(boolean chat) {
+    }
 
     /**
      * 회의실 연출(P3e) — 회의 계열(MANAGER 포함) RUNNING run 중 최신 1건, 없으면 null. QUEUED·WAITING_APPROVAL·BLOCKED는

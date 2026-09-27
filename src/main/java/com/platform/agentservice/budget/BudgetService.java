@@ -61,6 +61,18 @@ public class BudgetService implements BudgetGuard {
         return projectSum.compareTo(properties.monthlyUsdCap()) < 0;
     }
 
+    /**
+     * 사무실 수다(P3g) 예산 판정 — 킬 스위치는 호출자가 먼저 따로 본다(거부 문구가 다르다). 프로젝트 문맥이 없으면 플랫폼 캡만 본다.
+     */
+    public boolean withinCap(Long projectId) {
+        Instant since = currentMonthStartUtc();
+        if (monthToDateSum(LedgerScope.PLATFORM, PLATFORM_SCOPE_ID, since).compareTo(properties.monthlyUsdCap()) >= 0) {
+            return false;
+        }
+        return projectId == null
+                || monthToDateSum(LedgerScope.PROJECT, String.valueOf(projectId), since).compareTo(properties.monthlyUsdCap()) < 0;
+    }
+
     public boolean killSwitchOn() {
         return killSwitchOn;
     }

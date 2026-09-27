@@ -4,6 +4,7 @@ import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.audit.ToolCallAudit;
 import com.platform.agentservice.audit.ToolCallAuditRepository;
 import com.platform.agentservice.budget.BudgetService;
+import com.platform.agentservice.chat.ChatAvailability;
 import com.platform.agentservice.budget.LedgerScope;
 import com.platform.agentservice.budget.UsageLedger;
 import com.platform.agentservice.budget.UsageLedgerRepository;
@@ -57,6 +58,7 @@ class OfficeServiceTest {
     @Autowired EntityManager em;
 
     BudgetService budgetService = mock(BudgetService.class);
+    ChatAvailability chatAvailability = mock(ChatAvailability.class);
     Instant now;
     OfficeService service;
 
@@ -65,7 +67,7 @@ class OfficeServiceTest {
         // 자정 근처에 돌아도 "오늘" 경계가 흔들리지 않게 한국 정오로 고정한다(행 시각은 전부 이 값 기준으로 옮긴다).
         now = LocalDate.now(OfficeService.OFFICE_ZONE).atTime(12, 0).atZone(OfficeService.OFFICE_ZONE).toInstant();
         service = new OfficeService(personas, runs, gates, audits, ledger, budgetService,
-                new MeetingProperties(7L, null, false, true), Clock.fixed(now, ZoneOffset.UTC));
+                new MeetingProperties(7L, null, false, true), chatAvailability, Clock.fixed(now, ZoneOffset.UTC));
         given(budgetService.snapshot()).willReturn(
                 new BudgetService.BudgetSnapshot(new BigDecimal("100"), new BigDecimal("12.5"), false));
     }
@@ -425,10 +427,21 @@ class OfficeServiceTest {
         Persona p = persona(1L, "seoyeon", PersonaRole.PLANNER);
         meetingRun(p, RunType.MEETING, 1L, "PROJECT-1", RunStatus.DONE, 500L, now.minusSeconds(100));
         OfficeService noSpace = new OfficeService(personas, runs, gates, audits, ledger, budgetService,
-                new MeetingProperties(null, null, false, true), Clock.fixed(now, ZoneOffset.UTC));
+                new MeetingProperties(null, null, false, true), chatAvailability, Clock.fixed(now, ZoneOffset.UTC));
 
         assertThat(noSpace.office(null).boardPosts()).singleElement()
                 .satisfies(post -> assertThat(post.spaceId()).isNull());
+    }
+
+    // ---- P3g: 기능 플래그 ----
+
+    @Test
+    void features_chat은_projectId_문맥으로_판정한_값이다() {
+        given(chatAvailability.available(3L)).willReturn(true);
+        given(chatAvailability.available(null)).willReturn(false);
+
+        assertThat(service.office(3L).features().chat()).isTrue();
+        assertThat(service.office(null).features().chat()).isFalse();
     }
 
     // ---- P3e: 회의실(activeMeeting) ----

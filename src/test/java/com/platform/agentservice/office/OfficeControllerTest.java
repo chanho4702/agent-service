@@ -73,7 +73,8 @@ class OfficeControllerTest {
                 T,
                 List.of(new OfficeResponse.BoardPost(21L, RunType.MEETING, "AGP-3", 7L, 501L, 9L, T)),
                 new OfficeResponse.ActiveMeeting(30L, RunType.RETRO, RunStatus.RUNNING, "PROJECT-7", 7L, 4L,
-                        List.of(4L, 3L), T));
+                        List.of(4L, 3L), T),
+                new OfficeResponse.Features(true));
         given(officeService.office(7L)).willReturn(res);
 
         mvc.perform(get("/api/agent/office").param("projectId", "7").with(authentication(TestAuth.user(2L, "Bob"))))
@@ -111,13 +112,15 @@ class OfficeControllerTest {
                 .andExpect(jsonPath("$.activeMeeting.hostPersonaId").value(4))
                 .andExpect(jsonPath("$.activeMeeting.attendeePersonaIds[0]").value(4))
                 .andExpect(jsonPath("$.activeMeeting.attendeePersonaIds[1]").value(3))
-                .andExpect(jsonPath("$.activeMeeting.startedAt").value("2026-09-26T03:00:00Z"));
+                .andExpect(jsonPath("$.activeMeeting.startedAt").value("2026-09-26T03:00:00Z"))
+                .andExpect(jsonPath("$.features.chat").value(true));
     }
 
     @Test
     void projectId_없이도_조회된다() throws Exception {
         given(officeService.office(null)).willReturn(new OfficeResponse(List.of(), List.of(), 0, List.of(),
-                new BudgetStatusResponse(BigDecimal.TEN, BigDecimal.ZERO, false), T, List.of(), null));
+                new BudgetStatusResponse(BigDecimal.TEN, BigDecimal.ZERO, false), T, List.of(), null,
+                new OfficeResponse.Features(false)));
 
         mvc.perform(get("/api/agent/office").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())
