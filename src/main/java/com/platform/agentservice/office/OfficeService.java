@@ -37,6 +37,7 @@ import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.stream.Collectors;
@@ -136,10 +137,26 @@ public class OfficeService {
                 : runRepository.findTop5ByTypeInAndStatusAndProjectIdAndOutputPageIdIsNotNullOrderByEndedAtDescIdDesc(
                         RunType.MEETING_TYPES, RunStatus.DONE, projectId);
 
+        Optional<Run> meeting = projectId == null
+                ? runRepository.findFirstByTypeInAndStatusOrderByIdDesc(RunType.MEETING_TYPES, RunStatus.RUNNING)
+                : runRepository.findFirstByTypeInAndStatusAndProjectIdOrderByIdDesc(
+                        RunType.MEETING_TYPES, RunStatus.RUNNING, projectId);
+
         Long spaceId = meetingProperties.hasSpace() ? meetingProperties.spaceId() : null;
         return new OfficeResponse(personas, finished.stream().map(RunSummaryResponse::of).toList(),
                 gates.size(), gates.stream().limit(PENDING_GATE_LIMIT).toList(), budget, now,
-                posts.stream().map(r -> toBoardPost(r, spaceId)).toList());
+                posts.stream().map(r -> toBoardPost(r, spaceId)).toList(),
+                meeting.map(OfficeService::toActiveMeeting).orElse(null));
+    }
+
+    /** 참석자 컬럼이 비면(회의 계열인데 명단 없이 만들어진 행) 진행자 1인 회의로 본다 — 회의실이 빈 방이 되면 안 된다. */
+    private static OfficeResponse.ActiveMeeting toActiveMeeting(Run run) {
+        List<Long> attendees = run.getAttendeeIds();
+        if (attendees.isEmpty()) {
+            attendees = List.of(run.getPersonaId());
+        }
+        return new OfficeResponse.ActiveMeeting(run.getId(), run.getType(), run.getStatus(), run.getIssueKey(),
+                run.getProjectId(), run.getPersonaId(), attendees, run.getStartedAt());
     }
 
     private static OfficeResponse.BoardPost toBoardPost(Run run, Long spaceId) {

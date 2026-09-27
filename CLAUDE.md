@@ -680,13 +680,17 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
 - `GET /api/agent/office?projectId=`(선택): `personas[]`(id·slug·name·emoji·role·active·`currentRun`·
   `lastActivity`·`todayCostUsd`) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
-  `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래).
+  `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래) · `activeMeeting`(P3e, 아래).
   - `boardPosts`(사무실 게시판, D-P3b-7): 회의 계열 run(MEETING/RETRO/ESCALATION + P3c MANAGER 보고) 중 DONE이고 `output_page_id`가 있는 것
     `endedAt` 최신순 5건 — `{runId, type, issueKey, projectId, pageId, spaceId, endedAt}`. `spaceId`는 위키 링크
     (`/spaces/:spaceId/pages/:pageId`)용으로 run별 저장 없이 현재 `meetings.space-id` 설정값을 싣는다(미설정이면 null) —
     운영 중 스페이스를 바꾸면 과거 게시물 링크가 깨질 수 있다(최근 5건뿐이라 수용). 제목은 위키를 조회하지 않는다(프론트가
     type 라벨+시각으로 그림 — 권한 없는 스페이스 제목 노출도 피함). 안건 이슈 없는 회의의 issueKey는 `PROJECT-<projectId>`.
     projectId 필터 적용. 부분 인덱스 `idx_run_board`(V6).
+  - `activeMeeting`(회의실 연출, P3e): 회의 계열(MEETING/RETRO/ESCALATION/MANAGER) 중 **RUNNING**인 run 최신 1건(id 기준, projectId
+    필터 적용), 없으면 null — `{runId, type, status, issueKey, projectId, hostPersonaId, attendeePersonaIds[], startedAt}`.
+    `hostPersonaId`=run 소유 페르소나(진행자, `attendeePersonaIds[0]`과 같지만 명시 계약), 참석자는 `run.attendee_persona_ids` 저장
+    순서 그대로(명단이 비면 진행자 1명). QUEUED·WAITING_APPROVAL·BLOCKED 회의는 싣지 않는다. 쿼리 1회, `run(status)` 인덱스.
   - `currentRun`: `RunService.ACTIVE_STATUSES`(QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED) 중 페르소나별 최신 1건(id 기준), 없으면 null.
     필드: id·status·issueKey·type·trigger·attempt·model·startedAt. 감사 로그(`AuditEntry`)에는 runId가 없다 —
     `tool_call_audit`에 run 축 컬럼이 없어서(스키마 변경 없이 생략).

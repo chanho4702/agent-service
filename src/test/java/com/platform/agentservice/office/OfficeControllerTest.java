@@ -71,7 +71,9 @@ class OfficeControllerTest {
                 List.of(new OfficeResponse.PendingGate(5L, 12L, "AGP-2", 3L, GateKind.MERGE, "머지 승인", T)),
                 new BudgetStatusResponse(new BigDecimal("100"), new BigDecimal("12.5"), false),
                 T,
-                List.of(new OfficeResponse.BoardPost(21L, RunType.MEETING, "AGP-3", 7L, 501L, 9L, T)));
+                List.of(new OfficeResponse.BoardPost(21L, RunType.MEETING, "AGP-3", 7L, 501L, 9L, T)),
+                new OfficeResponse.ActiveMeeting(30L, RunType.RETRO, RunStatus.RUNNING, "PROJECT-7", 7L, 4L,
+                        List.of(4L, 3L), T));
         given(officeService.office(7L)).willReturn(res);
 
         mvc.perform(get("/api/agent/office").param("projectId", "7").with(authentication(TestAuth.user(2L, "Bob"))))
@@ -100,17 +102,27 @@ class OfficeControllerTest {
                 .andExpect(jsonPath("$.boardPosts[0].projectId").value(7))
                 .andExpect(jsonPath("$.boardPosts[0].pageId").value(501))
                 .andExpect(jsonPath("$.boardPosts[0].spaceId").value(9))
-                .andExpect(jsonPath("$.boardPosts[0].endedAt").value("2026-09-26T03:00:00Z"));
+                .andExpect(jsonPath("$.boardPosts[0].endedAt").value("2026-09-26T03:00:00Z"))
+                .andExpect(jsonPath("$.activeMeeting.runId").value(30))
+                .andExpect(jsonPath("$.activeMeeting.type").value("RETRO"))
+                .andExpect(jsonPath("$.activeMeeting.status").value("RUNNING"))
+                .andExpect(jsonPath("$.activeMeeting.issueKey").value("PROJECT-7"))
+                .andExpect(jsonPath("$.activeMeeting.projectId").value(7))
+                .andExpect(jsonPath("$.activeMeeting.hostPersonaId").value(4))
+                .andExpect(jsonPath("$.activeMeeting.attendeePersonaIds[0]").value(4))
+                .andExpect(jsonPath("$.activeMeeting.attendeePersonaIds[1]").value(3))
+                .andExpect(jsonPath("$.activeMeeting.startedAt").value("2026-09-26T03:00:00Z"));
     }
 
     @Test
     void projectId_없이도_조회된다() throws Exception {
         given(officeService.office(null)).willReturn(new OfficeResponse(List.of(), List.of(), 0, List.of(),
-                new BudgetStatusResponse(BigDecimal.TEN, BigDecimal.ZERO, false), T, List.of()));
+                new BudgetStatusResponse(BigDecimal.TEN, BigDecimal.ZERO, false), T, List.of(), null));
 
         mvc.perform(get("/api/agent/office").with(authentication(TestAuth.user(2L, "Bob"))))
                 .andExpect(status().isOk())
-                .andExpect(jsonPath("$.personas").isEmpty());
+                .andExpect(jsonPath("$.personas").isEmpty())
+                .andExpect(jsonPath("$.activeMeeting").value(org.hamcrest.Matchers.nullValue()));
 
         verify(officeService).office(null);
     }

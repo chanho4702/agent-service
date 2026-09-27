@@ -5,6 +5,7 @@ import org.springframework.data.jpa.repository.JpaRepository;
 import java.time.Instant;
 import java.util.Collection;
 import java.util.List;
+import java.util.Optional;
 
 public interface RunRepository extends JpaRepository<Run, Long> {
     List<Run> findByStatus(RunStatus status);
@@ -46,5 +47,12 @@ public interface RunRepository extends JpaRepository<Run, Long> {
             Collection<RunType> types, RunStatus status);
 
     List<Run> findTop5ByTypeInAndStatusAndProjectIdAndOutputPageIdIsNotNullOrderByEndedAtDescIdDesc(
+            Collection<RunType> types, RunStatus status, long projectId);
+
+    // ---- 사무실 회의실(P3e) — RUNNING 행은 소수라 run(status) 인덱스로 충분하다. ----
+
+    Optional<Run> findFirstByTypeInAndStatusOrderByIdDesc(Collection<RunType> types, RunStatus status);
+
+    Optional<Run> findFirstByTypeInAndStatusAndProjectIdOrderByIdDesc(
             Collection<RunType> types, RunStatus status, long projectId);
 }

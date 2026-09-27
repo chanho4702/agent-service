@@ -20,8 +20,26 @@ public record OfficeResponse(
         List<PendingGate> pendingGates,
         BudgetStatusResponse budget,
         Instant generatedAt,
-        List<BoardPost> boardPosts
+        List<BoardPost> boardPosts,
+        ActiveMeeting activeMeeting
 ) {
+
+    /**
+     * 회의실 연출(P3e) — 회의 계열(MANAGER 포함) RUNNING run 중 최신 1건, 없으면 null. QUEUED·WAITING_APPROVAL·BLOCKED는
+     * 회의실에 앉아 있는 상태가 아니라서 뺀다. {@code hostPersonaId}는 run 소유 페르소나(진행자)로
+     * {@code attendeePersonaIds[0]}과 같지만 순서 의존 없이 쓰도록 명시 필드로 둔다. 참석자는 저장 순서 그대로(진행자 먼저).
+     */
+    public record ActiveMeeting(
+            long runId,
+            RunType type,
+            RunStatus status,
+            String issueKey,
+            long projectId,
+            long hostPersonaId,
+            List<Long> attendeePersonaIds,
+            Instant startedAt
+    ) {
+    }
 
     /**
      * 사무실 게시판(P3b D-P3b-7) — 회의록이 보고된 완료 회의 run. 제목은 위키를 조회하지 않고 프론트가 type 라벨 + 시각으로

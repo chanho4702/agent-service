@@ -416,4 +416,77 @@ class OfficeServiceTest {
         assertThat(noSpace.office(null).boardPosts()).singleElement()
                 .satisfies(post -> assertThat(post.spaceId()).isNull());
     }
+
+    // ---- P3e: 회의실(activeMeeting) ----
+
+    private Run liveMeeting(RunType type, long projectId, String issueKey, RunStatus target, Persona... attendees) {
+        Run r = runs.save(Run.queuedMeeting(type, issueKey, projectId,
+                java.util.Arrays.stream(attendees).map(Persona::getId).toList(), RunTrigger.USER,
+                "harness://default", null, "안건"));
+        switch (target) {
+            case QUEUED -> { }
+            case RUNNING -> r.start("pending", null);
+            case WAITING_APPROVAL -> { r.start("pending", null); r.parkForApproval(); }
+            case BLOCKED -> { r.start("pending", null); r.block("사고형 실패"); }
+            default -> throw new IllegalArgumentException(target.name());
+        }
+        return runs.saveAndFlush(r);
+    }
+
+    @Test
+    void 진행_중인_회의가_있으면_activeMeeting에_진행자와_참석자_순서를_싣는다() {
+        Persona planner = persona(1L, "seoyeon", PersonaRole.PLANNER);
+        Persona backend = persona(2L, "jiho", PersonaRole.BACKEND);
+        Persona reviewer = persona(3L, "yuna", PersonaRole.REVIEWER);
+        // 저장 순서가 id 순서와 다르다 — 정렬하지 않고 저장 순서 그대로 나와야 한다.
+        Run meeting = liveMeeting(RunType.MEETING, 1L, "AGP-7", RunStatus.RUNNING, backend, reviewer, planner);
+
+        OfficeResponse.ActiveMeeting m = service.office(null).activeMeeting();
+
+        assertThat(m).isNotNull();
+        assertThat(m.runId()).isEqualTo(meeting.getId());
+        assertThat(m.type()).isEqualTo(RunType.MEETING);
+        assertThat(m.status()).isEqualTo(RunStatus.RUNNING);
+        assertThat(m.issueKey()).isEqualTo("AGP-7");
+        assertThat(m.projectId()).isEqualTo(1L);
+        assertThat(m.hostPersonaId()).isEqualTo(backend.getId());
+        assertThat(m.attendeePersonaIds()).containsExactly(backend.getId(), reviewer.getId(), planner.getId());
+        assertThat(m.startedAt()).isNotNull();
+    }
+
+    @Test
+    void 매니저_순찰도_1인_회의로_잡힌다() {
+        Persona manager = persona(1L, "boss", PersonaRole.MANAGER);
+        liveMeeting(RunType.MANAGER, 1L, "PROJECT-1", RunStatus.RUNNING, manager);
+
+        OfficeResponse.ActiveMeeting m = service.office(null).activeMeeting();
+
+        assertThat(m.type()).isEqualTo(RunType.MANAGER);
+        assertThat(m.issueKey()).isEqualTo("PROJECT-1");
+        assertThat(m.hostPersonaId()).isEqualTo(manager.getId());
+        assertThat(m.attendeePersonaIds()).containsExactly(manager.getId());
+    }
+
+    @Test
+    void 대기_승인대기_차단_회의와_TASK_실행은_회의실에_없다() {
+        Persona p = persona(1L, "seoyeon", PersonaRole.PLANNER);
+        liveMeeting(RunType.MEETING, 1L, "PROJECT-1", RunStatus.QUEUED, p);
+        liveMeeting(RunType.RETRO, 2L, "PROJECT-2", RunStatus.WAITING_APPROVAL, p);
+        liveMeeting(RunType.ESCALATION, 3L, "OPS-1", RunStatus.BLOCKED, p);
+        run(p, 1L, "AGP-1", RunStatus.RUNNING);
+
+        assertThat(service.office(null).activeMeeting()).isNull();
+    }
+
+    @Test
+    void 회의실은_projectId로_좁혀지고_여럿이면_최신_1건이다() {
+        Persona p = persona(1L, "seoyeon", PersonaRole.PLANNER);
+        Persona q = persona(2L, "jiho", PersonaRole.BACKEND);
+        Run agp = liveMeeting(RunType.MEETING, 1L, "PROJECT-1", RunStatus.RUNNING, p);
+        Run ops = liveMeeting(RunType.RETRO, 2L, "PROJECT-2", RunStatus.RUNNING, q);
+
+        assertThat(service.office(null).activeMeeting().runId()).isEqualTo(ops.getId());
+        assertThat(service.office(1L).activeMeeting().runId()).isEqualTo(agp.getId());
+        assertThat(service.office(3L).activeMeeting()).isNull();
+    }
 }
