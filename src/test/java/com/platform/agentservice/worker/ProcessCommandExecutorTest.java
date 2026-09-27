@@ -91,7 +91,7 @@ class ProcessCommandExecutorTest {
 
     @Test
     void worker_properties_default_extra_env_keys_to_empty_when_unbound() {
-        WorkerProperties props = new WorkerProperties("w", "b", List.of(), "claude", 1, 1, "Read", "u", Map.of(), null);
+        WorkerProperties props = new WorkerProperties("w", "b", List.of(), "claude", 1, 1, "Read", "u", Map.of(), null, false);
 
         assertThat(props.extraEnvKeys()).isEmpty();
     }

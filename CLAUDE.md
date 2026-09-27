@@ -220,7 +220,9 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
 3. `AGENT_INTERNAL_SECRET` — auth-server와 반드시 같은 값(비면 페르소나/run 토큰 발급이
    fail-closed로 전부 막힌다).
 4. 워커 인증: 같은 사용자 구독을 재사용하거나(검증됨 — `%USERPROFILE%\.claude` 자격증명 파일)
-   `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`를 이 서비스의 프로세스 env로 둔다.
+   `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`를 이 서비스의 프로세스 env로 둔다 — **로컬 dev 한정**.
+   서버 실행은 agent-service 컨테이너 안이 아니라 별도 플랫폼 러너 컨테이너(AGP-69)에서 하고, LLM API 키만 쓴다
+   (구독 세션 마운트 금지, `WORKER_REQUIRE_API_KEY=true` — §12).
    **env 화이트리스트 커튼(AGP-48)**: `ProcessCommandExecutor`는 자식 프로세스(워커 `claude -p`·
    `git clone`·커밋 수확 git — 모든 자식이 이 한 지점을 지난다)에 부모 env를 상속하지 않는다.
    `environment().clear()` 후 다음만 넣는다.
@@ -232,7 +234,8 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
      없으면 git이 `~/.gitconfig`(user.name/email 등)를 못 읽어 워커 커밋이 실패하고, LANG이 없으면
      C 로케일로 한글 경로가 이스케이프된다. 전부 경로·로케일 값이라 비밀 차단 목적과 충돌 없음.
      2026-09-26 Windows 세트로 `git clone`·`claude --version`·헤드리스 `claude -p`(구독 인증)·
-     워커 `Bash(git *)` 도구·`gradlew`가 도는 것을 실측했다(Linux 세트는 P2b 컨테이너화 때 실측 예정).
+     워커 `Bash(git *)` 도구·`gradlew`가 도는 것을 실측했다. Linux 세트는 2026-09-27 러너 이미지 시안(§12)에서
+     같은 최소 env(`PATH`·`HOME`·`LANG`)로 `claude --version`·`git init/commit`을 실측했다.
    - 인증 2종은 커튼 목록에 없다 — `WorkerLauncher.workerEnv()`가 **워커 호출에만** extraEnv로
      싣는다(`git clone`에는 안 간다). 이것이 인증 키가 워커에 닿는 유일한 경로다. P3h부터 이 자리에서
      DB에 저장된 프로젝트·전역 LLM 키가 run별로 우선 주입된다(§8).
@@ -367,6 +370,8 @@ run을 띄운다.
 
 ### 5.6 워커 계약 요약
 
+- 실행 위치: 로컬 dev는 호스트 프로세스. 서버 실행은 **agent-service 컨테이너 안에서 금지**이고 비밀 없는 별도 플랫폼 러너
+  컨테이너(AGP-69, 진행 중)가 맡는다(§12). agent-service 이미지는 서비스 전용(JRE + jar)이다.
 - 헤드리스 `claude -p`를 **비-bare로** 실행한다: `--permission-mode dontAsk
   --permission-prompts none --allowedTools <허용목록> --strict-mcp-config --mcp-config <파일>
   --output-format json --max-turns N [--model M]`.
@@ -861,7 +866,8 @@ B의 run이 A의 키(= A의 과금)로 돈다. 묶어 두면 옮겨진 행은 �
 + warn(키 하나가 깨졌다고 그 프로젝트 run이 전부 멈추지 않게, 그러나 과금 층이 바뀐 것은 로그·effective로 드러나게). `projectId`가
 null이면 프로젝트 층을 건너뛴다. 공개 빈이라 P3g 자유 대화(D-P3h-5)도 같은 빈을 쓴다 — 층 규칙을 복제하지 말 것.
 
-**워커 적용(D-P3h-4, `WorkerLauncher`)** — run 토큰 발급 직전에 `run.projectId`로 해석한다.
+**워커 적용(D-P3h-4, `WorkerLauncher`)** — launch 맨 앞(워크스페이스·clone·run 토큰 발급 전, AGP-68에서 앞당김)에
+`run.projectId`로 해석한다. 서버 모드(`WORKER_REQUIRE_API_KEY=true`, §12)에서 결과가 NONE이면 여기서 끝난다(워커 없이 BLOCKED).
 
 - 저장 키(PROJECT·PLATFORM)가 해석되면 워커 호출 extraEnv에 **`ANTHROPIC_API_KEY`=그 값 하나만** 싣는다 — 호스트
   `CLAUDE_CODE_OAUTH_TOKEN`을 함께 넘기면 어느 인증으로 과금할지가 CLI 우선순위에 맡겨져 프로젝트 과금 분리가 흐려진다.
@@ -1046,3 +1052,51 @@ Anthropic 호출 대상은 §8의 `AGENT_ANTHROPIC_API_URL`을 같이 쓴다. �
 - `run_id`는 FK 없는 표시용 참조다(run 행이 지워져도 감사는 남는다).
 - 가림 규칙(`AuditSummaryRedactor`, §6)은 origin과 무관하게 같다.
 - 한계: 외부 MCP 쪽 비용은 우리 원장에 없다(호출자 과금). 외부 호출에도 예산·리뷰를 걸려면 별도 정책이 필요하다(현재 없음).
+
+## 12. 서버 실행 환경 — 방침 (2026-09-27, AGP-68 · 설계 D-P4-2, 실행은 AGP-69)
+
+**agent-service 컨테이너 안에서 워커를 돌리지 않는다(금지).** 워커는 이슈 본문·코멘트(외부 입력)로 프롬프트가 구성되는 LLM이 임의 명령을
+도는 프로세스다. 서비스와 같은 컨테이너·같은 uid로 돌면:
+
+- `/proc/1/environ`(같은 uid면 읽힌다)에서 서비스 비밀이 전부 보인다 — `AGENT_CREDENTIAL_MASTER_KEY`·DB 비밀번호·`ORG_INTERNAL_TOKEN`·
+  `AGENT_INTERNAL_SECRET` 등. §5.1 env 커튼은 자식 env만 비울 뿐 `/proc`는 못 막는다.
+- 플랫폼 네트워크에 붙어 postgres·redis(Streams 주입)·내부 API(`/internal/**`)에 직접 닿는다.
+
+프롬프트 인젝션 한 번이 플랫폼 전체 비밀 유출로 이어지므로 구조로 막는다. **서버 사이트 run은 플랫폼 러너 컨테이너**(AGP-69 러너 프로그램,
+진행 중)가 실행한다 — 플랫폼 비밀을 하나도 갖지 않고, 격리 네트워크에 있으며, agent-service에는 nginx/게이트웨이 경유로만 닿는다.
+그래서 agent-service 이미지(`Dockerfile`)는 서비스 전용이다: `eclipse-temurin:24-jre` + jar, non-root 사용자 `agent`(10001). git·node·claude·JDK를
+다시 넣지 말 것.
+
+**서비스 쪽 준비(이 리포, AGP-68에서 들어간 것)** — 서버 모드 키 가드: `WORKER_REQUIRE_API_KEY=true`
+(`platform.agent.worker.require-api-key`, yml 기본 false = 로컬 dev 구독 재사용 유지)이면 해석 결과가 NONE인 run을 `WorkerLauncher.launch`
+맨 앞(워크스페이스·clone·run 토큰 발급 전)에서 `MissingLlmKeyException`으로 끊고, `RunService`가 "실행 인프라 오류" 접두 없이 그대로
+사고형 BLOCKED 사유로 싣는다: **"사고형 실패 — 즉시 중단: 서버 실행에는 LLM API 키가 필요합니다 — 전역 또는 프로젝트 키를 설정하세요"**
+(이슈 ⛔ 코멘트·알림 동일). 가드가 없으면 claude가 exit 1 + `"result":"Not logged in · Please run /login"`을 긴 JSON 속에 내고 BLOCKED 요약(120자)에서
+그 문구가 잘린다(2026-09-27 실측). 구독 세션 파일(`~/.claude`) 마운트는 서버에서 금지(P2 결정). 이슈 claim은 launch 전(`buildJob`)이라
+이슈는 진행 중으로 남는다(다른 사고형 실패와 같다). 복구: 전역/프로젝트 키 저장 → 재개(§5.4).
+
+**러너 이미지 지침(AGP-69가 따를 것 — 2026-09-27 시안 실측)**
+
+| 층 | 내용 | 이유 |
+|---|---|---|
+| `node:24-bookworm-slim` 빌드 단계 | `npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`(npm fetch 재시도 5회) | 런타임에는 node 바이너리와 전역 `node_modules`만 옮긴다 |
+| 베이스 `eclipse-temurin:24-jdk` | JRE 아님 | 워커가 대상 리포에서 `./gradlew build`(javac)를 돈다 |
+| apt | `git` `ca-certificates`만(`--no-install-recommends`, 목록 삭제, `Acquire::Retries=5`) | clone·커밋 수확 |
+| Node LTS 24 + npm·npx·corepack(pnpm) | 워커의 `Bash(npm *)`·`Bash(pnpm *)` | pnpm 실물은 corepack이 첫 사용 때 받는다 |
+| `git config --system user.name/email` | 워커 커밋 신원 기본값 | 컨테이너에 `~/.gitconfig`가 없어 커밋이 실패한다 |
+| non-root 사용자, 전역 `node_modules`는 root 소유 | 워커가 CLI 자체를 못 바꾼다 | |
+| `DISABLE_AUTOUPDATER=1` | 고정 버전 유지 | 커튼을 넘기려면 `WORKER_EXTRA_ENV_KEYS`에 이름을 넣는다 |
+
+시안 크기 약 971MB(claude 네이티브 바이너리 약 241MB·node 127MB·JDK·git). 시안 Dockerfile은 팀 리드 보관(러너 이미지 출발점).
+러너 쪽 배선 메모: 계보 워크스페이스는 재생성에도 남는 볼륨, 하네스는 infra-settings의 `.claude/agents`·`.claude/skills`·루트
+`CLAUDE.md`·`AGENTS.md`만 읽기 전용 마운트(`.claude` 통째 금지 — 운영자 개인 `settings.local.json`이 워커 경로에 오지 않게).
+
+**CLI 버전 고정·갱신 절차(러너 이미지)** — `ARG CLAUDE_CODE_VERSION`(시안 기준 **2.1.283**). latest 금지: 같은 커밋의 이미지가 빌드 시점마다
+다른 CLI를 싣고, `--output-format json` shape가 바뀌면 `WorkerLauncher.toWorkerResult` 파싱이 조용히 깨진다. 갱신: ① 로컬에서 새 버전으로 헤드리스
+`claude -p ... --output-format json`을 돌려 `result`·`session_id`·`total_cost_usd`·`usage` 필드 확인 ② `ARG` 변경 ③ 이미지 빌드 후
+`claude --version` ④ 커밋.
+
+**리포 clone·패키지 자격증명** — 공개 리포만(자격증명 없음). 비공개 리포·GitHub Packages(`common-starter` 의존 Java 리포 — 이 리포 포함)의
+`./gradlew build`는 run 범위 토큰 주입이 후속이다(env 커튼 때문에 호스트 env 토큰은 닿지 않는다).
+
+**CI** — `ci.yml`이 main 푸시에서 buildx + GitHub Actions 캐시(`type=gha`)로 이미지를 만든다.

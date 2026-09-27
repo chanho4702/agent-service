@@ -99,7 +99,7 @@ class MeetingServiceTest {
 
     private MeetingService service(MeetingProperties props, Map<String, String> repos) {
         WorkerProperties workerProperties = new WorkerProperties("C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read", "http://localhost/api/agent/mcp", repos, List.of());
+                "Read", "http://localhost/api/agent/mcp", repos, List.of(), false);
         SchedulerProperties schedulerProperties = new SchedulerProperties(false, 60000L, 2, 1, "jiho", 3,
                 "claude-sonnet-5", Map.of("AGP", "claude-opus-5-5"));
         return new MeetingService(runRepository, personaRepository, gateRepository, almClient, tokenService, props,

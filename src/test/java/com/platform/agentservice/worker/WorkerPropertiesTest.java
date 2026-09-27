@@ -16,7 +16,7 @@ class WorkerPropertiesTest {
 
     private WorkerProperties propertiesWithRepos(Map<String, String> repos) {
         return new WorkerProperties("C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", repos, List.of());
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", repos, List.of(), false);
     }
 
     @Test

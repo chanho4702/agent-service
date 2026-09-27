@@ -88,6 +88,15 @@ public class WorkerLauncher {
     }
 
     public WorkerResult launch(Run run, WorkerJob job) {
+        // 워크스페이스·clone보다 먼저 해석한다 — 해석이 던지거나(DB 장애) 서버 모드에 키가 없으면 clone·토큰 발급 전에 끝난다.
+        // 실패를 env 폴백으로 삼키지 않는 이유: 프로젝트 키가 있는데 조용히 전역·호스트 인증으로 돌면 과금 주체가 바뀐다
+        // (실행 인프라 오류 → 사고형 BLOCKED가 맞다).
+        ResolvedCredential credential = credentialResolver.resolve(run.getProjectId());
+        if (properties.requireApiKey() && !credential.present()) {
+            throw new MissingLlmKeyException();
+        }
+        log.info("run={} LLM 키 출처={}", run.getId(), credential.source());
+
         Path inherited = run.isWorkspaceLineage() ? existingWorkspace(run) : null;
         if (run.isWorkspaceLineage() && inherited == null) {
             // 새로 clone하면 origin/main..HEAD가 비어 리뷰어가 빈 변경을 통과시킬 수 있다 — 검증 없는 확정이 되므로
@@ -124,11 +133,6 @@ public class WorkerLauncher {
         // 계보 run도 쓴다 — REVIEW는 작업자와 다른 페르소나(리뷰어)라 승계 워크스페이스에 리뷰어 스킬이 있어야 한다(AGP-62).
         harnessMaterializer.materializePersonaSkill(workspace, job.expertise());
 
-        // 토큰 발급 전에 해석한다 — 해석이 던지면(DB 장애) 철회할 토큰이 아직 없다. 실패를 env 폴백으로 삼키지 않는 이유:
-        // 프로젝트 키가 있는데 조용히 전역·호스트 인증으로 돌면 과금 주체가 바뀐다(실행 인프라 오류 → 사고형 BLOCKED가 맞다).
-        ResolvedCredential credential = credentialResolver.resolve(run.getProjectId());
-        log.info("run={} LLM 키 출처={}", run.getId(), credential.source());
-
         RunTokenService.IssuedRunToken issued = runTokenService.issueFor(run);
         Path mcpConfigPath = mcpConfigDir.resolve(MCP_CONFIG_FILENAME);
         try {
@@ -141,6 +145,18 @@ public class WorkerLauncher {
         } finally {
             runTokenService.revoke(issued.patId());
             deleteRecursivelyQuietly(mcpConfigDir);
+        }
+    }
+
+    /**
+     * 서버 모드({@link WorkerProperties#requireApiKey()})에서 LLM API 키가 하나도 해석되지 않았다(AGP-68). 컨테이너에는 구독 세션이
+     * 없으므로 그대로 띄우면 claude 인증 실패로 모호하게 죽는다 — 대신 이 메시지가 사고형 BLOCKED 사유·이슈 코멘트·알림에 그대로 실린다.
+     */
+    public static final class MissingLlmKeyException extends IllegalStateException {
+        public static final String MESSAGE = "서버 실행에는 LLM API 키가 필요합니다 — 전역 또는 프로젝트 키를 설정하세요";
+
+        public MissingLlmKeyException() {
+            super(MESSAGE);
         }
     }
 

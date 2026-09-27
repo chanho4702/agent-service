@@ -84,7 +84,7 @@ class RunServiceTest {
         schedulerProperties = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3);
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of());
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of(), false);
         budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
@@ -174,7 +174,7 @@ class RunServiceTest {
     private RunService serviceWith(SchedulerProperties props) {
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of());
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of(), false);
         return new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, props, budgetProperties,
                 commitLinkParser, budgetGuard, reviewService, meetingService, alertService);
@@ -1026,7 +1026,7 @@ class RunServiceTest {
     void execute_resolves_repo_mapping_even_when_map_key_is_lowercased_by_env_binding() {
         WorkerProperties lowercasedRepos = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("agp", "https://example.com/agp.git"), List.of());
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("agp", "https://example.com/agp.git"), List.of(), false);
         RunService serviceWithLowercasedRepos = new RunService(runRepository, almClient, issueClaimSupport,
                 tokenService, personaRepository, workerLauncher, lowercasedRepos, usageLedgerRepository,
                 schedulerProperties, new com.platform.agentservice.budget.BudgetProperties(
@@ -1074,6 +1074,30 @@ class RunServiceTest {
         runService.execute(42L);
 
         assertIncidentBlocked(run, "실행 인프라 오류: 워크스페이스 생성 실패");
+    }
+
+    @Test
+    void execute_missing_llm_key_in_server_mode_blocks_with_the_actionable_reason() {
+        Run run = queuedRun(42L);
+        when(runRepository.findById(42L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(almClient.addComment(eq(1L), anyString(), eq(BEARER)))
+                .thenReturn(new CommentResponse(9L, 1L, PERSONA_MEMBER_ID, "body", null, null));
+
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
+                .thenThrow(new WorkerLauncher.MissingLlmKeyException());
+
+        runService.execute(42L);
+
+        // 설정 누락은 인프라 장애가 아니다 — "실행 인프라 오류" 접두 없이 할 일이 그대로 사유·코멘트에 실린다.
+        assertIncidentBlocked(run, WorkerLauncher.MissingLlmKeyException.MESSAGE);
+        assertThat(run.getError()).doesNotContain("실행 인프라 오류");
+        verify(almClient).addComment(eq(1L), org.mockito.ArgumentMatchers.contains("전역 또는 프로젝트 키를 설정하세요"), eq(BEARER));
     }
 
     // ---- execute: run not found / not QUEUED ----

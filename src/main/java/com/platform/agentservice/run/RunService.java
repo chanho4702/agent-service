@@ -236,6 +236,10 @@ public class RunService {
         try {
             Run runningRun = runRepository.findById(runId).orElseThrow();
             result = workerLauncher.launch(runningRun, job);
+        } catch (WorkerLauncher.MissingLlmKeyException e) {
+            // 인프라 장애가 아니라 설정 누락이다 — "실행 인프라 오류" 접두 없이 해야 할 일을 그대로 BLOCKED 사유로 싣는다(AGP-68).
+            finishFailed(runId, e.getMessage());
+            return;
         } catch (Exception e) {
             finishFailed(runId, "실행 인프라 오류: " + e.getMessage());
             return;

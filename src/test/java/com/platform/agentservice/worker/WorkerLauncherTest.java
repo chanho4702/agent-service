@@ -79,7 +79,7 @@ class WorkerLauncherTest {
                 40,
                 "Read,Edit,Write,Bash(git *)",
                 "http://localhost/api/agent/mcp",
-                Map.of(), List.of());
+                Map.of(), List.of(), false);
         HarnessMaterializer materializer = new HarnessMaterializer(properties);
         RunTokenService runTokenService = new RunTokenService(patService, personaRepository);
         launcher = new WorkerLauncher(properties, materializer, commandExecutor, runTokenService,
@@ -169,7 +169,59 @@ class WorkerLauncherTest {
         assertThatThrownBy(() -> failing.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of())))
                 .isInstanceOf(IllegalStateException.class);
         org.mockito.Mockito.verifyNoInteractions(patService);
-        assertThat(commandExecutor.calls).hasSize(1); // clone만, 워커는 뜨지 않음
+        assertThat(commandExecutor.calls).isEmpty(); // 해석이 clone보다 먼저다 — 워크스페이스·clone·워커 모두 없음
+    }
+
+    // ---- AGP-68: 서버 모드는 API 키 필수 ----
+
+    private WorkerLauncher serverModeLauncher() {
+        WorkerProperties server = new WorkerProperties(workDir.toString(), workDir.resolve("no-bundle-here").toString(),
+                List.of(), "claude", 80, 40, "Read,Edit,Write,Bash(git *)", "http://localhost:9160/api/agent/mcp",
+                Map.of(), List.of(), true);
+        return new WorkerLauncher(server, new HarnessMaterializer(server), commandExecutor,
+                new RunTokenService(patService, personaRepository), new ReviewProperties(false, null, null), resolver);
+    }
+
+    @Test
+    void server_mode_without_any_key_is_rejected_with_a_clear_reason_before_clone_or_token() throws Exception {
+        resolved = ResolvedCredential.NONE;
+
+        assertThatThrownBy(() -> serverModeLauncher().launch(run(null),
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of())))
+                .isInstanceOf(WorkerLauncher.MissingLlmKeyException.class)
+                .hasMessage("서버 실행에는 LLM API 키가 필요합니다 — 전역 또는 프로젝트 키를 설정하세요");
+        assertThat(commandExecutor.calls).isEmpty(); // claude 인증 실패로 모호하게 죽기 전에 — clone조차 하지 않는다
+        org.mockito.Mockito.verifyNoInteractions(patService);
+        try (var entries = java.nio.file.Files.list(workDir)) {
+            assertThat(entries).isEmpty(); // 워크스페이스도 만들지 않는다
+        }
+    }
+
+    @Test
+    void server_mode_with_a_service_env_key_runs_normally() {
+        resolved = new ResolvedCredential("sk-ant-api03-env-secret-ABCD", CredentialSource.ENV);
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"done\"}", "", false));
+
+        WorkerResult result = serverModeLauncher().launch(run(null),
+                new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(commandExecutor.calls).hasSize(2);
+        assertThat(result.credentialScope()).isEqualTo("ENV");
+    }
+
+    @Test
+    void local_mode_without_a_key_keeps_the_subscription_passthrough() {
+        resolved = ResolvedCredential.NONE; // 기본 properties는 requireApiKey=false(로컬 dev)
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"done\"}", "", false));
+
+        WorkerResult result = launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(commandExecutor.calls).hasSize(2);
+        assertThat(result.credentialScope()).isEqualTo("NONE");
     }
 
     @Test
@@ -721,7 +773,7 @@ class WorkerLauncherTest {
         Files.writeString(claudeMd, "platform rules");
         WorkerProperties withRootFile = new WorkerProperties(workDir.toString(),
                 workDir.resolve("no-bundle-here").toString(), List.of(claudeMd.toString()), "claude", 80, 40,
-                "Read,Edit,Write,Bash(git *)", "http://localhost/api/agent/mcp", Map.of(), List.of());
+                "Read,Edit,Write,Bash(git *)", "http://localhost/api/agent/mcp", Map.of(), List.of(), false);
         WorkerLauncher meetingLauncher = new WorkerLauncher(withRootFile, new HarnessMaterializer(withRootFile),
                 commandExecutor, new RunTokenService(patService, personaRepository), new ReviewProperties(true, "sora", null), resolver);
         stubTokenIssuance();

@@ -94,7 +94,7 @@ class RunServiceOptimisticLockingTest {
 
         WorkerProperties workerProperties = new WorkerProperties(
                 "C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
-                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of());
+                "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of(), false);
         SchedulerProperties schedulerProperties = new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3);
         BudgetProperties budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         BudgetGuard budgetGuard = Mockito.mock(BudgetGuard.class);

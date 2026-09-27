@@ -93,6 +93,10 @@ platform:
       # 자격증명 키를 넣으면 워커(외부 입력으로 프롬프트가 구성되는 LLM)에 그대로 노출된다는 점을 알고 넣을 것.
       # env: WORKER_EXTRA_ENV_KEYS=HTTP_PROXY,HTTPS_PROXY,NO_PROXY
       extra-env-keys: ${WORKER_EXTRA_ENV_KEYS:}
+      # 서버 실행 모드(AGP-68) — true면 LLM API 키(프로젝트·전역 저장 키 또는 서비스 env ANTHROPIC_API_KEY)가 없는 run을
+      # 워커를 띄우기 전에 사고형 BLOCKED로 막는다. 서버에는 구독 세션이 없어서(마운트 금지) 그대로 띄우면 claude 인증
+      # 실패로 모호하게 죽는다. 서버 실행 배치(러너, AGP-69 — CLAUDE.md §12)에서 켠다. 로컬 dev(구독 세션 재사용)는 false.
+      require-api-key: ${WORKER_REQUIRE_API_KEY:false}
     scheduler:
       # 디스패처(P2a T4) — 무인 자동화 루프. 기본 OFF(킬스위치), 반드시 명시적으로 켠다.
       enabled: ${SCHEDULER_ENABLED:false}
