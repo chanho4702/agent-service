@@ -232,7 +232,8 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
      2026-09-26 Windows 세트로 `git clone`·`claude --version`·헤드리스 `claude -p`(구독 인증)·
      워커 `Bash(git *)` 도구·`gradlew`가 도는 것을 실측했다(Linux 세트는 P2b 컨테이너화 때 실측 예정).
    - 인증 2종은 커튼 목록에 없다 — `WorkerLauncher.workerEnv()`가 **워커 호출에만** extraEnv로
-     싣는다(`git clone`에는 안 간다). 이것이 인증 키가 워커에 닿는 유일한 경로다.
+     싣는다(`git clone`에는 안 간다). 이것이 인증 키가 워커에 닿는 유일한 경로다. P3h부터 이 자리에서
+     DB에 저장된 프로젝트·전역 LLM 키가 run별로 우선 주입된다(§8).
    - 이스케이프 해치 `WORKER_EXTRA_ENV_KEYS`(`platform.agent.worker.extra-env-keys`, 쉼표 목록,
      기본 빈): 온프렘 변형용 — 프록시(`HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY`), 사내 CA
      (`NODE_EXTRA_CA_CERTS`/`GIT_SSL_CAINFO`), Git Bash 위치(`CLAUDE_CODE_GIT_BASH_PATH`) 등.
@@ -782,3 +783,77 @@ grant는 403 "GLOBAL 권한은 전역 관리자만 부여할 수 있습니다", 
 
 **배포 의존** — ①② 내부 엔드포인트는 auth-server·org-service 쪽 변경(같은 P3f 웨이브)이 먼저 배포돼야 한다. 없으면 새 페르소나
 생성이 404 → 409로 떨어진다(기존 슬러그 갱신·토글·PAT·run·게이트·회의는 영향 없음).
+
+## 8. P3h: LLM 키 2층 — 전역·프로젝트 (2026-09-27, AGP-66)
+
+"키 넣는 것도 설정에 — 전역 설정과 프로젝트 설정으로 나눠서"(사용자 지시). 스펙 §3 Credential(3층)의 PLATFORM·PROJECT 층
+선구현이다(USER 층은 AGP-18 후속). 구현은 `credential` 패키지.
+
+**원문 비노출 원칙** — 키 원문은 어떤 응답·로그·감사 summary·예외 메시지·원장에도 싣지 않는다. 밖으로 나가는 것은 끝 4자
+힌트(`keyHint`)와 출처(scope)뿐이다. 이를 구조로 지키려고 원문을 들고 다니는 타입(`CredentialPutRequest`·`ResolvedCredential`·
+`CredentialProperties`)은 `toString`을 가리고, 요청 DTO에 빈 검증 애너테이션을 달지 않는다(검증 실패 응답에 거부값이 실릴 수
+있어서 — 서비스가 입력을 싣지 않는 고정 문구로 직접 검사한다). 테스트가 응답 JSON·로그(OutputCapture)·감사 summary·저장
+바이트에 키 문자열이 없음을 반증 단언으로 고정한다(`CredentialControllerTest`).
+
+**저장(V9 `credential`)** — `(id, scope PLATFORM|PROJECT, scope_id VARCHAR(40) NULL, provider ANTHROPIC, ciphertext BYTEA, iv BYTEA,
+key_hint VARCHAR(8), updated_by, updated_at)`, `UNIQUE(scope, scope_id, provider)` + CHECK(PLATFORM⇔scope_id NULL). UNIQUE는 NULL을
+서로 다른 값으로 보므로 PLATFORM 행 중복은 부분 유니크 인덱스 `uq_credential_platform(scope, provider) WHERE scope_id IS NULL`로
+막는다(`NULLS NOT DISTINCT`는 PG15+ 전용이라 쓰지 않음). 프로젝트 id는 alm 프로젝트 id(FK 없음 — 서비스 경계).
+
+**암호화(`CredentialCipher`)** — AES-256-GCM, 행별 랜덤 IV 12바이트, 태그 128비트, AAD=`agent-credential:v1|scope|scopeId|provider`.
+AAD를 행 좌표에 묶는 이유: DB 쓰기만 가진 쪽이 A 프로젝트 암호문을 B 프로젝트·전역 행으로 옮기면 AAD 없이는 그대로 복호화돼
+B의 run이 A의 키(= A의 과금)로 돈다. 묶어 두면 옮겨진 행은 태그 검증에서 떨어져 해석에서 빠질 뿐 다른 층 키로 둔갑하지 않는다.
+
+**마스터 키 운영** — `AGENT_CREDENTIAL_MASTER_KEY`(`platform.agent.credentials.master-key`) = base64 32바이트(`openssl rand -base64 32`).
+
+| 상태 | 저장(PUT) | 조회(GET) | 워커 해석 |
+|---|---|---|---|
+| 미설정·base64 아님·32바이트 아님 | 503 `{"error"}`(검증 호출 전에 끊는다) | 정상(저장된 메타데이터 표시) | DB 층 전부 복호화 실패 → env 경로 |
+| 정상 | 동작 | 정상 | 프로젝트 > 전역 > env |
+| 교체(값 변경) | 동작(새 키로 암호화) | 기존 행도 `set:true`로 보인다(effective는 아래 층) | 기존 행 복호화 실패 → 제외 + warn |
+
+기동은 막지 않는다(키 설정은 선택 기능) — 기동 시 warn 한 줄. **교체하면 기존 저장 키는 못 쓰게 되므로 교체 직후 전역·프로젝트 키를
+다시 저장한다**(재암호화 마이그레이션 도구는 없다). 프로젝트 GET의 `effective.scope`가 실제 적용 층을 보여 주므로 교체 후 누락을 거기서
+확인한다. 마스터 키를 잃으면 저장 키는 복구 불가(다시 입력).
+
+**API(D-P3h-2)** — 조회도 관리자 전용(힌트·갱신자도 운영 정보 — PAT 목록과 같은 기준).
+
+| 엔드포인트 | 권한(§7) | 응답 |
+|---|---|---|
+| `GET /api/agent/credentials/platform` | 전역 관리자(`@agentAuthz.canManageGlobal`) | `{set, provider, keyHint, updatedBy, updatedAt}`(미설정이면 set=false, 나머지 null) |
+| `PUT /api/agent/credentials/platform` | 전역 관리자 | 본문 `{provider:"ANTHROPIC", apiKey, validate?}` → 위 shape |
+| `DELETE /api/agent/credentials/platform` | 전역 관리자 | 204(없어도 204 — 멱등) |
+| `GET /api/agent/credentials/projects/{projectId}` | 그 프로젝트 관리자(`canManageProject`) | `{project: {위 shape}, effective: {scope: PROJECT\|PLATFORM\|ENV\|NONE, keyHint}}` |
+| `PUT`·`DELETE /api/agent/credentials/projects/{projectId}` | 그 프로젝트 관리자 | 위 shape / 204 |
+
+- `keyHint` = 원문 끝 4자(앞 "…"는 프론트가 붙인다). `effective`는 복호화 가능한 키만 센다.
+- 입력: `provider`는 ANTHROPIC만(그 밖 400), `apiKey`는 앞뒤 공백 제거 후 8~512자·공백/제어/비ASCII 불가(400 — 워커 env 값이 되므로).
+- `validate=true` → `GET {AGENT_ANTHROPIC_API_URL}/v1/models?limit=1`(`x-api-key`·`anthropic-version: 2023-06-01`, 토큰 과금 없음,
+  연결 3초/읽기 10초). 2xx·429 = 유효(429는 인증 통과), 401·403·그 밖 4xx = 400 "키 검증 실패 — Anthropic이 이 키를 거부했습니다…",
+  5xx·연결 실패 = 503. 실패 시 저장하지 않는다.
+- 같은 층 첫 저장이 동시에 겹쳐 유니크 제약에 걸리면 409(다시 시도하면 교체). 기존 행 교체끼리는 나중 저장이 이긴다.
+- 감사: `tool_call_audit`에 `credential.put`(OK/검증 실패 ERROR)·`credential.delete`(실제로 지운 경우만) — `persona_id` NULL,
+  `actor_member_id`=호출자, summary는 층·프로젝트 id·provider·힌트만(`scope=PROJECT projectId=7 provider=ANTHROPIC keyHint=1234`).
+
+**해석 순서(D-P3h-3, `CredentialResolver.resolve(projectId)`)** — 프로젝트 키 > 전역 키 > 서비스 프로세스 env `ANTHROPIC_API_KEY`(P3h 이전
+호환) > NONE. 결과 `ResolvedCredential{apiKey(메모리에서만), source}`. 복호화 실패 행은 그 층이 없는 것으로 보고 다음 층으로 내려간다
++ warn(키 하나가 깨졌다고 그 프로젝트 run이 전부 멈추지 않게, 그러나 과금 층이 바뀐 것은 로그·effective로 드러나게). `projectId`가
+null이면 프로젝트 층을 건너뛴다. 공개 빈이라 P3g 자유 대화(D-P3h-5)도 같은 빈을 쓴다 — 층 규칙을 복제하지 말 것.
+
+**워커 적용(D-P3h-4, `WorkerLauncher`)** — run 토큰 발급 직전에 `run.projectId`로 해석한다.
+
+- 저장 키(PROJECT·PLATFORM)가 해석되면 워커 호출 extraEnv에 **`ANTHROPIC_API_KEY`=그 값 하나만** 싣는다 — 호스트
+  `CLAUDE_CODE_OAUTH_TOKEN`을 함께 넘기면 어느 인증으로 과금할지가 CLI 우선순위에 맡겨져 프로젝트 과금 분리가 흐려진다.
+  `git clone`·커밋 수확 git에는 여전히 싣지 않는다(§5.1 커튼 규약 그대로). 명령행·프롬프트·mcp-config 파일에도 없다.
+- ENV·NONE이면 P3h 이전과 같은 호스트 passthrough(`CLAUDE_CODE_OAUTH_TOKEN`·`ANTHROPIC_API_KEY` 있는 것만) — 도그푸딩 구독
+  경로(C 혼용 결정)를 보존한다.
+- 해석 자체가 예외(DB 장애)면 env로 폴백하지 않고 launch가 던진다 → 실행 인프라 오류 → 사고형 BLOCKED(§5.1). 조용히 호스트
+  인증으로 돌면 과금 주체가 바뀌기 때문이다. 토큰 발급 전이라 철회할 것이 없다.
+- 출처 기록: info 로그 `run=N LLM 키 출처=PROJECT` + `usage_ledger.credential_scope`(V9, PROJECT|PLATFORM|ENV|NONE — 두 원장 행
+  모두, P3h 이전 행은 NULL). 한계: 워커 프로세스 밖에 `%USERPROFILE%\.claude` 구독 자격증명이 있어도 CLI는 env API 키를 우선하므로
+  저장 키가 있으면 그 키로 과금된다 — 반대로 ENV/NONE run은 `NONE`이 "API 키 없음 = 구독 세션"을 뜻한다.
+
+| 키 | env | 기본 | 의미 |
+|---|---|---|---|
+| `credentials.master-key` | `AGENT_CREDENTIAL_MASTER_KEY` | 빈 값 | 위 마스터 키. 컨테이너 배포는 infra compose에 시크릿으로 배선(이 리포 밖) |
+| `credentials.anthropic-api-url` | `AGENT_ANTHROPIC_API_URL` | `https://api.anthropic.com` | 검증 호출 대상. 사내 프록시 경유 설치만 바꾼다 |

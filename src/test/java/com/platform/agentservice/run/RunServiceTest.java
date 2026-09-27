@@ -421,7 +421,8 @@ class RunServiceTest {
                 new CommentResponse(1L, 1L, PERSONA_MEMBER_ID, "댓글1", null, null)));
 
         WorkerResult result = new WorkerResult(0, false, "작업 완료했습니다", "sess-1",
-                new BigDecimal("1.2345"), 100L, 200L, "claude-opus-5", "raw", "C:\\agent-work\\run-42");
+                new BigDecimal("1.2345"), 100L, 200L, "claude-opus-5", "raw", "C:\\agent-work\\run-42")
+                .withCredentialScope("PROJECT");
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(result);
 
         when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
@@ -440,6 +441,9 @@ class RunServiceTest {
 
         verify(usageLedgerRepository).save(argThatLedger(LedgerScope.PROJECT, String.valueOf(PROJECT_ID)));
         verify(usageLedgerRepository).save(argThatLedger(LedgerScope.PLATFORM, "platform"));
+        // P3h: 두 원장 행 모두 어떤 층 키로 돌았는지 싣는다(원문 아님).
+        verify(usageLedgerRepository, times(2)).save(org.mockito.ArgumentMatchers.<UsageLedger>argThat(
+                u -> u != null && "PROJECT".equals(u.getCredentialScope())));
         verify(almClient).addComment(eq(1L), org.mockito.ArgumentMatchers.contains("작업 완료했습니다"), eq(BEARER));
     }
 

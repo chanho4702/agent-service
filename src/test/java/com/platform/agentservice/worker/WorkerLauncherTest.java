@@ -1,5 +1,8 @@
 package com.platform.agentservice.worker;
 
+import com.platform.agentservice.credential.CredentialResolver;
+import com.platform.agentservice.credential.CredentialSource;
+import com.platform.agentservice.credential.ResolvedCredential;
 import com.platform.agentservice.pat.PatService;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
@@ -51,6 +54,16 @@ class WorkerLauncherTest {
     @TempDir Path workDir;
 
     private FakeCommandExecutor commandExecutor;
+    /** 해석 결과를 테스트가 정한다 — 해석 규칙 자체는 CredentialResolverTest 몫. */
+    private ResolvedCredential resolved = ResolvedCredential.NONE;
+    private Long resolvedFor;
+    private final CredentialResolver resolver = new CredentialResolver(null, null) {
+        @Override
+        public ResolvedCredential resolve(Long projectId) {
+            resolvedFor = projectId;
+            return resolved;
+        }
+    };
     private WorkerLauncher launcher;
     private WorkerProperties properties;
 
@@ -70,7 +83,7 @@ class WorkerLauncherTest {
         HarnessMaterializer materializer = new HarnessMaterializer(properties);
         RunTokenService runTokenService = new RunTokenService(patService, personaRepository);
         launcher = new WorkerLauncher(properties, materializer, commandExecutor, runTokenService,
-                new ReviewProperties(false, null, null));
+                new ReviewProperties(false, null, null), resolver);
     }
 
     private Run run(String model) {
@@ -84,6 +97,79 @@ class WorkerLauncherTest {
         when(personaRepository.findById(PERSONA_ID)).thenReturn(Optional.of(persona));
         when(patService.issue(any(PatCreateRequest.class), org.mockito.ArgumentMatchers.eq(RunTokenService.SYSTEM_MEMBER_ID)))
                 .thenReturn(new PatCreatedResponse("agp_secret-token", 9L, "run:" + RUN_ID, "bot-a"));
+    }
+
+    // ---- P3h: LLM 키 2층 — run별 주입(D-P3h-4) ----
+
+    private static final String STORED_KEY = "sk-ant-api03-project-secret-XYZ9";
+
+    @Test
+    void stored_key_is_injected_as_the_only_auth_env_of_the_worker_call_and_scope_is_reported() {
+        resolved = new ResolvedCredential(STORED_KEY, CredentialSource.PROJECT);
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"done\",\"total_cost_usd\":0.1}", "", false));
+
+        WorkerResult result = launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(resolvedFor).isEqualTo(1L); // run.projectId로 해석
+        FakeCommandExecutor.Call cloneCall = commandExecutor.calls.get(0);
+        FakeCommandExecutor.Call claudeCall = commandExecutor.calls.get(1);
+        assertThat(cloneCall.extraEnv()).isEmpty(); // clone에는 키가 가지 않는다
+        // 저장 키가 있으면 호스트 OAuth 토큰을 같이 넘기지 않는다 — 과금 주체가 CLI 우선순위에 맡겨지지 않게.
+        assertThat(claudeCall.extraEnv()).containsExactly(Map.entry("ANTHROPIC_API_KEY", STORED_KEY));
+        // 원문은 명령행(프롬프트 포함)·mcp-config 파일에 실리지 않는다.
+        assertThat(String.join(" ", claudeCall.command())).doesNotContain(STORED_KEY);
+        assertThat(commandExecutor.mcpConfigContentAtCall).doesNotContain(STORED_KEY);
+        assertThat(result.credentialScope()).isEqualTo("PROJECT");
+    }
+
+    @Test
+    void platform_key_is_injected_too() {
+        resolved = new ResolvedCredential(STORED_KEY, CredentialSource.PLATFORM);
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"done\"}", "", false));
+
+        WorkerResult result = launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        assertThat(commandExecutor.calls.get(1).extraEnv()).containsEntry("ANTHROPIC_API_KEY", STORED_KEY);
+        assertThat(result.credentialScope()).isEqualTo("PLATFORM");
+    }
+
+    @Test
+    void without_stored_key_the_worker_env_is_the_legacy_host_passthrough() {
+        resolved = ResolvedCredential.NONE;
+        stubTokenIssuance();
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"done\"}", "", false));
+
+        WorkerResult result = launcher.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of()));
+
+        Map<String, String> env = commandExecutor.calls.get(1).extraEnv();
+        // 주입값이 아니라 호스트 env 그대로(대개 없음) — P3h 이전 동작과 같다.
+        assertThat(env.get("ANTHROPIC_API_KEY")).isEqualTo(System.getenv("ANTHROPIC_API_KEY"));
+        assertThat(env.get("CLAUDE_CODE_OAUTH_TOKEN")).isEqualTo(System.getenv("CLAUDE_CODE_OAUTH_TOKEN"));
+        assertThat(env.values()).doesNotContain(STORED_KEY);
+        assertThat(result.credentialScope()).isEqualTo("NONE");
+    }
+
+    @Test
+    void resolution_failure_fails_the_launch_before_a_run_token_is_issued() {
+        CredentialResolver broken = new CredentialResolver(null, null) {
+            @Override
+            public ResolvedCredential resolve(Long projectId) {
+                throw new IllegalStateException("db down");
+            }
+        };
+        WorkerLauncher failing = new WorkerLauncher(properties, new HarnessMaterializer(properties), commandExecutor,
+                new RunTokenService(patService, personaRepository), new ReviewProperties(false, null, null), broken);
+        commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "cloned", "", false));
+
+        assertThatThrownBy(() -> failing.launch(run(null), new WorkerJob("https://example.com/repo.git", "t", "b", List.of())))
+                .isInstanceOf(IllegalStateException.class);
+        org.mockito.Mockito.verifyNoInteractions(patService);
+        assertThat(commandExecutor.calls).hasSize(1); // clone만, 워커는 뜨지 않음
     }
 
     @Test
@@ -438,7 +524,7 @@ class WorkerLauncherTest {
 
     private WorkerLauncher launcherWithReview(boolean enabled) {
         return new WorkerLauncher(properties, new HarnessMaterializer(properties), commandExecutor,
-                new RunTokenService(patService, personaRepository), new ReviewProperties(enabled, "sora", null));
+                new RunTokenService(patService, personaRepository), new ReviewProperties(enabled, "sora", null), resolver);
     }
 
     /** 실경로가 기록된 DONE TASK(id=10) — REVIEW·반려-fix의 부모. */
@@ -637,7 +723,7 @@ class WorkerLauncherTest {
                 workDir.resolve("no-bundle-here").toString(), List.of(claudeMd.toString()), "claude", 80, 40,
                 "Read,Edit,Write,Bash(git *)", "http://localhost/api/agent/mcp", Map.of(), List.of());
         WorkerLauncher meetingLauncher = new WorkerLauncher(withRootFile, new HarnessMaterializer(withRootFile),
-                commandExecutor, new RunTokenService(patService, personaRepository), new ReviewProperties(true, "sora", null));
+                commandExecutor, new RunTokenService(patService, personaRepository), new ReviewProperties(true, "sora", null), resolver);
         stubTokenIssuance();
         commandExecutor.enqueue(new CommandExecutor.ExecResult(0, "{\"result\":\"ok\"}", "", false));
 

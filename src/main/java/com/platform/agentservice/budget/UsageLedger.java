@@ -26,10 +26,17 @@ public class UsageLedger {
     @Column(nullable = false) private long inputTokens;
     @Column(nullable = false) private long outputTokens;
     @Column(length = 60) private String model;
+    /** 어떤 층 LLM 키로 돈 run인지(P3h — PROJECT|PLATFORM|ENV|NONE). 원문·힌트는 싣지 않는다. P3h 이전 행은 null. */
+    @Column(length = 10) private String credentialScope;
     @CreationTimestamp @Column(nullable = false, updatable = false) private Instant createdAt;
 
     public static UsageLedger of(long runId, LedgerScope scope, String scopeId, BigDecimal costUsd,
                                   long inputTokens, long outputTokens, String model) {
+        return of(runId, scope, scopeId, costUsd, inputTokens, outputTokens, model, null);
+    }
+
+    public static UsageLedger of(long runId, LedgerScope scope, String scopeId, BigDecimal costUsd,
+                                  long inputTokens, long outputTokens, String model, String credentialScope) {
         UsageLedger u = new UsageLedger();
         u.runId = runId;
         u.scope = scope;
@@ -38,6 +45,7 @@ public class UsageLedger {
         u.inputTokens = inputTokens;
         u.outputTokens = outputTokens;
         u.model = model;
+        u.credentialScope = credentialScope;
         return u;
     }
 }

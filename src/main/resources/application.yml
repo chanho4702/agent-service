@@ -143,6 +143,13 @@ platform:
       auto-escalation: ${MEETING_AUTO_ESCALATION:false}
       # 회의 결정→이슈를 워커가 create_issue로 직접 만든다. false면 PLAN 게이트로 사람 승인 후 이어받은 run이 만든다.
       auto-issue: ${MEETING_AUTO_ISSUE:true}
+    credentials:
+      # LLM 키 2층(P3h, AGP-66) — 전역·프로젝트 키를 AES-256-GCM으로 agentdb에 저장한다. 마스터 키는 base64 32바이트
+      # (예: `openssl rand -base64 32`). 비었거나 형식이 틀리면 저장 API만 503이고 워커는 기존 env 인증 경로로 돈다.
+      # 바꾸면 기존 저장 키는 복호화되지 않아 해석에서 제외된다(warn) — 교체 후 키를 다시 저장할 것.
+      master-key: ${AGENT_CREDENTIAL_MASTER_KEY:}
+      # PUT validate=true의 검증 호출 대상(GET /v1/models). 사내 프록시를 거치는 설치만 바꾼다.
+      anthropic-api-url: ${AGENT_ANTHROPIC_API_URL:https://api.anthropic.com}
     budget:
       # 예산 캡(P2a T5) — BudgetService가 BudgetGuardConfig의 permissive 기본값을 대체한다.
       # 월 캡은 캘린더 월(UTC) 누적, 플랫폼 전체와 프로젝트별에 같은 값을 쓴다(P2a 결정,

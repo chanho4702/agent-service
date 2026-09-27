@@ -450,9 +450,9 @@ public class RunService {
         }
         if (result.costUsd() != null && result.costUsd().compareTo(BigDecimal.ZERO) > 0) {
             usageLedgerRepository.save(UsageLedger.of(runId, LedgerScope.PROJECT, String.valueOf(run.getProjectId()),
-                    result.costUsd(), result.inputTokens(), result.outputTokens(), result.model()));
+                    result.costUsd(), result.inputTokens(), result.outputTokens(), result.model(), result.credentialScope()));
             usageLedgerRepository.save(UsageLedger.of(runId, LedgerScope.PLATFORM, "platform",
-                    result.costUsd(), result.inputTokens(), result.outputTokens(), result.model()));
+                    result.costUsd(), result.inputTokens(), result.outputTokens(), result.model(), result.credentialScope()));
         }
     }
 

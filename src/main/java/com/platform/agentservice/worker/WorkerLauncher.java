@@ -2,6 +2,8 @@ package com.platform.agentservice.worker;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.platform.agentservice.credential.CredentialResolver;
+import com.platform.agentservice.credential.ResolvedCredential;
 import com.platform.agentservice.run.ReviewProperties;
 import com.platform.agentservice.run.Run;
 import com.platform.agentservice.run.RunTokenService;
@@ -71,16 +73,18 @@ public class WorkerLauncher {
     private final CommandExecutor commandExecutor;
     private final RunTokenService runTokenService;
     private final ReviewProperties reviewProperties;
+    private final CredentialResolver credentialResolver;
     private final ObjectMapper objectMapper = new ObjectMapper();
 
     public WorkerLauncher(WorkerProperties properties, HarnessMaterializer harnessMaterializer,
                            CommandExecutor commandExecutor, RunTokenService runTokenService,
-                           ReviewProperties reviewProperties) {
+                           ReviewProperties reviewProperties, CredentialResolver credentialResolver) {
         this.properties = properties;
         this.harnessMaterializer = harnessMaterializer;
         this.commandExecutor = commandExecutor;
         this.runTokenService = runTokenService;
         this.reviewProperties = reviewProperties;
+        this.credentialResolver = credentialResolver;
     }
 
     public WorkerResult launch(Run run, WorkerJob job) {
@@ -118,6 +122,11 @@ public class WorkerLauncher {
             mcpConfigDir = mcpConfigDirFor(workspace);
         }
 
+        // 토큰 발급 전에 해석한다 — 해석이 던지면(DB 장애) 철회할 토큰이 아직 없다. 실패를 env 폴백으로 삼키지 않는 이유:
+        // 프로젝트 키가 있는데 조용히 전역·호스트 인증으로 돌면 과금 주체가 바뀐다(실행 인프라 오류 → 사고형 BLOCKED가 맞다).
+        ResolvedCredential credential = credentialResolver.resolve(run.getProjectId());
+        log.info("run={} LLM 키 출처={}", run.getId(), credential.source());
+
         RunTokenService.IssuedRunToken issued = runTokenService.issueFor(run);
         Path mcpConfigPath = mcpConfigDir.resolve(MCP_CONFIG_FILENAME);
         try {
@@ -125,8 +134,8 @@ public class WorkerLauncher {
             writeMcpConfigFile(mcpConfigPath, issued.token());
             List<String> command = buildCommand(run, buildPrompt(run, job), mcpConfigPath);
             CommandExecutor.ExecResult execResult = commandExecutor.exec(
-                    command, workspace, workerEnv(), Duration.ofMinutes(properties.timeoutMinutes()));
-            return toWorkerResult(execResult, workspace);
+                    command, workspace, workerEnv(credential), Duration.ofMinutes(properties.timeoutMinutes()));
+            return toWorkerResult(execResult, workspace).withCredentialScope(credential.source().name());
         } finally {
             runTokenService.revoke(issued.patId());
             deleteRecursivelyQuietly(mcpConfigDir);
@@ -175,7 +184,19 @@ public class WorkerLauncher {
      */
     static final List<String> WORKER_AUTH_ENV_KEYS = List.of("CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_API_KEY");
 
-    private Map<String, String> workerEnv() {
+    static final String API_KEY_ENV = "ANTHROPIC_API_KEY";
+
+    /**
+     * DB에 저장된 키(프로젝트·전역, D-P3h-4)가 해석되면 run별 {@code ANTHROPIC_API_KEY} <b>하나만</b> 싣는다 — 호스트의
+     * {@code CLAUDE_CODE_OAUTH_TOKEN}을 함께 넘기면 CLI가 어느 인증으로 과금할지가 CLI 우선순위에 맡겨져 프로젝트 과금 분리가
+     * 흐려진다. 저장 키가 없으면(ENV·NONE) P3h 이전과 같은 호스트 passthrough — 도그푸딩 구독 경로(C 혼용 결정)를 보존한다.
+     */
+    Map<String, String> workerEnv(ResolvedCredential credential) {
+        if (credential.stored()) {
+            Map<String, String> env = new HashMap<>();
+            env.put(API_KEY_ENV, credential.apiKey());
+            return env;
+        }
         Map<String, String> env = new HashMap<>();
         for (String key : WORKER_AUTH_ENV_KEYS) {
             putIfPresent(env, key);

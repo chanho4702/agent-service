@@ -74,6 +74,12 @@ public class AgentAuthz {
 
     // ---- @PreAuthorize 진입점 ----
 
+    /** 전사 범위 설정(전역 LLM 키 등, P3h) — 프로젝트 축이 없으니 전역 관리자만. */
+    public boolean canManageGlobal(Authentication authentication) {
+        requireGlobal(AgentCaller.from(authentication));
+        return true;
+    }
+
     public boolean canManageProject(Authentication authentication, Long projectId) {
         AgentCaller caller = AgentCaller.from(authentication);
         if (projectId == null) {

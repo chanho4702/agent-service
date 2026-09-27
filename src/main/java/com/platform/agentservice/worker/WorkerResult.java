@@ -25,8 +25,23 @@ public record WorkerResult(
         long outputTokens,
         String model,
         String rawTail,
-        String workspacePath
+        String workspacePath,
+        String credentialScope
 ) {
+
+    /**
+     * {@code credentialScope}(P3h — 어떤 층 LLM 키로 돌았는지, {@code CredentialSource} 이름)는 워커 실행 뒤에야 붙으므로
+     * 그 전 단계 생성은 null로 둔다.
+     */
+    public WorkerResult(int exitCode, boolean timedOut, String resultText, String sessionId, BigDecimal costUsd,
+                        long inputTokens, long outputTokens, String model, String rawTail, String workspacePath) {
+        this(exitCode, timedOut, resultText, sessionId, costUsd, inputTokens, outputTokens, model, rawTail, workspacePath, null);
+    }
+
+    public WorkerResult withCredentialScope(String scope) {
+        return new WorkerResult(exitCode, timedOut, resultText, sessionId, costUsd, inputTokens, outputTokens, model, rawTail,
+                workspacePath, scope);
+    }
 
     /**
      * clone 실패·타임아웃·비정상 종료·JSON 파싱 실패 등 "결과를 못 얻은" 경우의 공통 생성. 워크스페이스가
