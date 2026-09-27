@@ -24,7 +24,7 @@ import java.util.List;
  * 죽이지는 않는다({@link RunService#cancel} 참고, P2a 범위 밖). 목록 조회는 인증된
  * 사용자 누구나(일반 JWT 체인 — {@code SecurityConfig}의 {@code anyRequest().authenticated()}).
  *
- * <p><b>재개(fix round 2, P2a T7 재리뷰)</b>: 재시도 한도를 소진해 BLOCKED가 된 run은
+ * <p><b>재개(fix round 2, P2a T7 재리뷰)</b>: 사고형 실패·반려 한도 소진으로 BLOCKED가 된 run은
  * 게이트 승인 흐름({@link GateController})과는 별개로, 관리자가 사람 확인 후 재개할 수
  * 있어야 한다 — 그 전까지는 Dispatcher가 영구히 손을 떼고, 사람은 그 run이 왜 멈췄는지
  * 확인할 방법만 있고 다시 굴릴 방법이 없는 막다른 골목이었다. {@link RunResumeService#resume}

@@ -17,9 +17,9 @@ import java.util.stream.Collectors;
 
 /**
  * 에이전트 실행 한 건 — 스펙 D9·§10.5. QUEUED에서 시작해 RUNNING을 거쳐 종단(DONE/CANCELLED)
- * 또는 일시정지·재시도 대기(WAITING_APPROVAL/BLOCKED/FAILED)로 간다. 이 재시도 대기 상태들을
- * 다시 진행시키는 것은 같은 행을 되돌리는 게 아니라 {@link #continuation(Run)}으로 attempt를
- * 올린 새 Run을 만드는 것이다(감사 추적 보존) — FAILED에서의 재시도도 continuation이다.
+ * 또는 일시정지(WAITING_APPROVAL/BLOCKED/FAILED)로 간다. 일시정지를 다시 진행시키는 것은 같은 행을
+ * 되돌리는 게 아니라 {@link #continuation(Run)}으로 attempt를 올린 새 Run을 만드는 것이다(감사 추적
+ * 보존). P3d부터 continuation은 게이트 승인과 사람 재개에서만 생긴다 — 사고형 실패의 자동 재시도는 없다.
  */
 @Entity
 @Table(name = "run")
@@ -29,10 +29,10 @@ public class Run {
 
     /**
      * 취소 가능 상태 — 취소는 "종단이 아닌 run을 닫는다"는 뜻이다.
-     * {@code BLOCKED}(fix round 2, P2a T7 재리뷰: 재시도 한도 소진, 사람 확인 대기)와
+     * {@code BLOCKED}(사고형 실패·반려 한도 소진, 사람 확인 대기)와
      * {@code FAILED}(최종 리뷰 I1: 워커가 스스로 {@code report_result(FAILED)}로 종결한
-     * 직후 {@code RunService.handleRetryOrBlock}이 곧바로 QUEUED-continuation이나 BLOCKED로
-     * 옮기지만, 그 처리 자체가 예외로 실패하는 잔여 케이스에서는 FAILED에 멈출 수 있다 —
+     * 직후 {@code RunService.blockIncident}가 곧바로 BLOCKED로 옮기지만, 그 처리 자체가
+     * 예외로 실패하는 잔여 케이스에서는 FAILED에 멈출 수 있다 —
      * 그때도 사람이 손 놓지 않도록 닫을 수 있어야 한다) 둘 다 종단이 아니다.
      * {@link RunResumeService#resume}이 BLOCKED·FAILED 둘 다 사람 확인 후 재개할 때
      * continuation을 먼저 만들고 원 run을 {@link #cancelWithNote}로 닫는 데 쓴다
@@ -63,14 +63,20 @@ public class Run {
     private Long patId;
     /** 워커가 {@code claude -p --model}에 넘길 페르소나별 모델 지정. 미지정 시 워커 기본값을 쓴다. */
     @Column(length = 60) private String model;
+    /** 계보 순번(1부터). P3d부터 예산이 아니다 — 사고형 실패는 재시도하지 않고 반려 예산은 {@link #rejectCount}가 따로 센다. */
     @Column(nullable = false) private int attempt = 1;
+    /**
+     * 이 작업 계보의 리뷰 반려 누적(P3d, D-P3d-2). 반려-fix는 원 TASK +1, 그 밖의 continuation·REVIEW는 직전 값을 승계한다 —
+     * 사람 재개로 한도가 초기화되면 BLOCKED가 "한 번 더"가 아니라 "처음부터 다시"가 된다.
+     */
+    @Column(nullable = false) private int rejectCount = 0;
     @Column(columnDefinition = "text") private String error;
-    /** USER 트리거 run의 사람 지시문 — 재시도 continuation·반려-fix continuation까지 승계된다(지시 맥락을 잃지 않게). */
+    /** USER 트리거 run의 사람 지시문 — 재개·게이트 승인 continuation·반려-fix continuation까지 승계된다(지시 맥락을 잃지 않게). */
     @Column(columnDefinition = "text") private String instruction;
     /**
-     * REVIEW run → 검증 대상 TASK run, 반려-fix continuation → 반려한 REVIEW run. 일반 TASK의 재시도
-     * continuation에는 비워 두고, REVIEW·반려-fix의 재시도는 부모를 그대로 잇는다({@link #continuation}).
-     * 회의 run의 continuation(재시도·게이트 승인·재개)은 직전 회의 run을 부모로 둔다.
+     * REVIEW run → 검증 대상 TASK run, 반려-fix continuation → 반려한 REVIEW run. 일반 TASK의 재개
+     * continuation에는 비워 두고, REVIEW·반려-fix의 재개는 부모를 그대로 잇는다({@link #continuation}).
+     * 회의 run의 continuation(게이트 승인·재개)은 직전 회의 run을 부모로 둔다.
      */
     private Long parentRunId;
     /** 워커가 {@code report_result(pageId=)}로 보고한 산출물 위키 페이지(회의록·보고서, D-P3b-3). */
@@ -105,9 +111,8 @@ public class Run {
     }
 
     /**
-     * 게이트 승인/차단 해제 또는 실패 재시도 후 "재개"는 같은 행을 되돌리지 않고 새 Run을 만든다
-     * (스펙 D9) — WAITING_APPROVAL·BLOCKED·FAILED에서만 이어갈 수 있다. FAILED에서의 재시도도
-     * continuation이다(컨트롤러 판정 I1) — 별도 retry() 메서드를 두지 않는다.
+     * 게이트 승인 또는 사람 재개(BLOCKED·FAILED)는 같은 행을 되돌리지 않고 새 Run을 만든다
+     * (스펙 D9) — WAITING_APPROVAL·BLOCKED·FAILED에서만 이어갈 수 있다. 반려 누적은 그대로 승계한다.
      */
     public static Run continuation(Run prior) {
         if (!CONTINUABLE.contains(prior.status)) {
@@ -121,11 +126,11 @@ public class Run {
         r.trigger = prior.trigger;
         r.harnessRef = prior.harnessRef;
         r.model = prior.model;
-        // 재시도·게이트 승인·사람 재개도 같은 USER 요청의 연장이라 지시문을 잃으면 안 된다.
+        // 게이트 승인·사람 재개도 같은 USER 요청의 연장이라 지시문을 잃으면 안 된다.
         r.instruction = prior.instruction;
         if (prior.isWorkspaceLineage()) {
-            // REVIEW·반려-fix는 푸시되지 않은 앞선 커밋 위에서만 의미가 있다(D-P2c-1) — 재시도가 새로 clone하면
-            // 검증·수정 대상이 사라진다. 계보(parentRunId)도 이어야 REVIEW 재시도 후 반려 시 원 TASK를 찾는다.
+            // REVIEW·반려-fix는 푸시되지 않은 앞선 커밋 위에서만 의미가 있다(D-P2c-1) — 재개가 새로 clone하면
+            // 검증·수정 대상이 사라진다. 계보(parentRunId)도 이어야 REVIEW 재개 후 반려 시 원 TASK를 찾는다.
             r.workspacePath = prior.workspacePath;
             r.parentRunId = prior.parentRunId;
         }
@@ -135,14 +140,15 @@ public class Run {
             r.parentRunId = prior.id;
             r.attendeePersonaIds = prior.attendeePersonaIds;
         }
+        r.rejectCount = prior.rejectCount;
         r.status = RunStatus.QUEUED;
         r.attempt = prior.attempt + 1;
         return r;
     }
 
     /**
-     * 원 TASK의 워크스페이스를 이어 쓰는 run인가 — REVIEW 전부, 그리고 부모가 있는 TASK(반려-fix와 그 재시도).
-     * 부모 없는 일반 TASK는 재시도 시 새로 clone한다(P2a 동작 유지).
+     * 원 TASK의 워크스페이스를 이어 쓰는 run인가 — REVIEW 전부, 그리고 부모가 있는 TASK(반려-fix와 그 재개).
+     * 부모 없는 일반 TASK는 재개 시 새로 clone한다(P2a 동작 유지).
      */
     public boolean isWorkspaceLineage() {
         return type == RunType.REVIEW || (type == RunType.TASK && parentRunId != null);
@@ -218,18 +224,19 @@ public class Run {
         r.instruction = parent.instruction;
         r.workspacePath = parent.workspacePath;
         r.parentRunId = parent.id;
+        // 판정 자체는 부모 TASK 값으로 하지만(ReviewService), 감독 화면·알림이 이 리뷰가 몇 번째 반려 뒤인지 보여 주게 싣는다.
+        r.rejectCount = parent.rejectCount;
         r.status = RunStatus.QUEUED;
         r.attempt = 1;
         return r;
     }
 
     /**
-     * 리뷰 반려 후 원 페르소나가 같은 워크스페이스에서 지적을 고치는 TASK run(D-P2c-2). attempt는
-     * {@link #continuation}과 같은 규칙(+1)이라 재시도 한도가 반려 루프에도 그대로 걸린다. 단
-     * {@link #continuation}과 달리 워크스페이스를 승계한다 — 재시도는 새로 clone해야 하지만
-     * 반려-fix는 앞선 커밋 위에서 이어가야 하기 때문이다.
+     * 리뷰 반려 후 원 페르소나가 같은 워크스페이스에서 지적을 고치는 TASK run(D-P2c-2). attempt는 계보 순번(+1)이고,
+     * 반려 예산은 {@code rejectCount}(호출자가 원 TASK 값 +1로 계산해 넘긴다, D-P3d-2)가 따로 센다. {@link #continuation}과
+     * 달리 워크스페이스를 승계한다 — 일반 재개는 새로 clone해야 하지만 반려-fix는 앞선 커밋 위에서 이어가야 하기 때문이다.
      */
-    public static Run fixContinuation(Run taskRun, long reviewRunId) {
+    public static Run fixContinuation(Run taskRun, long reviewRunId, int rejectCount) {
         if (taskRun.type != RunType.TASK || taskRun.status != RunStatus.DONE) {
             throw new ConflictException("DONE 상태의 TASK run만 반려-fix로 이어갈 수 있습니다: "
                     + taskRun.type + "/" + taskRun.status);
@@ -245,6 +252,7 @@ public class Run {
         r.instruction = taskRun.instruction;
         r.workspacePath = taskRun.workspacePath;
         r.parentRunId = reviewRunId;
+        r.rejectCount = rejectCount;
         r.status = RunStatus.QUEUED;
         r.attempt = taskRun.attempt + 1;
         return r;

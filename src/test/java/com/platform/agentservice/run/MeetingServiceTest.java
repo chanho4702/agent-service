@@ -495,13 +495,13 @@ class MeetingServiceTest {
         ReflectionTestUtils.setField(r, "attempt", 3);
         r.start("pending", null);
         r.fail("테스트 실패: NPE in LoginService");
-        r.block("3회 실패 — 사람 확인 필요");
+        r.block("사고형 실패 — 즉시 중단: boom");
         return r;
     }
 
     @Test
     void auto_escalation_off_does_nothing() {
-        service(props(false)).onBlocked(blockedTask(RunTrigger.SCHEDULER), "3회 실패 — 사람 확인 필요");
+        service(props(false)).onBlocked(blockedTask(RunTrigger.SCHEDULER), "사고형 실패 — 즉시 중단: boom");
 
         verifyNoInteractions(runRepository, runService, almClient);
     }
@@ -512,7 +512,7 @@ class MeetingServiceTest {
         when(runRepository.findTop50ByIssueKeyOrderByIdDesc("AGP-9")).thenReturn(List.of(blocked));
         when(almClient.getByKey(eq("AGP-9"), anyString())).thenReturn(issue("AGP-9", PROJECT_ID));
 
-        service(props(true)).onBlocked(blocked, "3회 실패 — 사람 확인 필요");
+        service(props(true)).onBlocked(blocked, "사고형 실패 — 즉시 중단: boom");
 
         ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
         verify(runRepository).save(saved.capture());
@@ -524,9 +524,9 @@ class MeetingServiceTest {
         assertThat(escalation.getAttendeeIds()).containsExactly(backend.getId(), reviewer.getId());
         assertThat(escalation.getModel()).isEqualTo("claude-opus-5-5");
         assertThat(escalation.getInstruction())
-                .startsWith("AGP-9 3회 실패/반려 — 원인 분석과 사람에게 물을 질문 목록\n")
+                .startsWith("AGP-9 자동 진행 중단 — 원인 분석과 사람에게 물을 질문 목록\n")
                 .contains("원 run: 30(TASK)")
-                .contains("차단 사유: 3회 실패 — 사람 확인 필요")
+                .contains("차단 사유: 사고형 실패 — 즉시 중단: boom")
                 .contains("NPE in LoginService");
         verify(runService).execute(900L);
         verify(almClient).addComment(eq(11L), org.mockito.ArgumentMatchers.contains("자동 에스컬레이션 회의 run 900"), anyString());
@@ -539,9 +539,9 @@ class MeetingServiceTest {
         ReflectionTestUtils.setField(escalation, "id", 31L);
         escalation.start("pending", null);
         escalation.fail("x");
-        escalation.block("3회 실패 — 사람 확인 필요");
+        escalation.block("사고형 실패 — 즉시 중단: boom");
 
-        service(props(true)).onBlocked(escalation, "3회 실패 — 사람 확인 필요");
+        service(props(true)).onBlocked(escalation, "사고형 실패 — 즉시 중단: boom");
 
         verifyNoInteractions(runRepository, runService, almClient);
     }
@@ -551,7 +551,7 @@ class MeetingServiceTest {
         when(runRepository.existsByIssueKeyAndTypeAndStatusIn("AGP-9", RunType.ESCALATION, RunService.ACTIVE_STATUSES))
                 .thenReturn(true);
 
-        service(props(true)).onBlocked(blockedTask(RunTrigger.USER), "3회 실패 — 사람 확인 필요");
+        service(props(true)).onBlocked(blockedTask(RunTrigger.USER), "사고형 실패 — 즉시 중단: boom");
 
         verify(runRepository, never()).save(any());
         verifyNoInteractions(runService);

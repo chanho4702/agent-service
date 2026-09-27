@@ -1,5 +1,6 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.alert.AlertService;
 import com.platform.agentservice.budget.BudgetProperties;
 import com.platform.agentservice.budget.UsageLedgerRepository;
 import com.platform.agentservice.client.AlmClient;
@@ -19,7 +20,6 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
 import org.springframework.test.context.ActiveProfiles;
@@ -38,15 +38,16 @@ import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.when;
 
 /**
- * fix round(P2a T7, F2): 재시도 상한 도달(attempt==한도)이 실제로 BLOCKED에 도달하는지를
- * <b>진짜 JPA {@code @Version} 낙관적 락</b> 아래에서 검증한다.
+ * fix round(P2a T7, F2): 실패 → BLOCKED 승격(fail+save 뒤 block+save)이 <b>진짜 JPA {@code @Version} 낙관적 락</b>
+ * 아래에서 실제로 BLOCKED에 도달하는지를 검증한다. P2a 당시엔 재시도 한도(attempt==3)에서만 이 경로를 탔고, P3d부터는
+ * 사고형 즉시 중단이라 첫 실패부터 같은 두 번 저장 경로를 탄다.
  *
- * <p>순수 Mockito {@code RunServiceTest}(예: {@code execute_failure_at_max_attempts_...})는
+ * <p>순수 Mockito {@code RunServiceTest}는
  * {@code runRepository.save(any())}를 "인자를 그대로 돌려준다"로 스텁한다 — 그래서 같은
  * (버전이 갱신되지 않은) 엔티티 인스턴스로 두 번 저장해도 아무 문제가 없어 보인다. 하지만
  * 실제 Hibernate는 두 번째 저장에서 낙관적 락 충돌로 예외를 던진다({@code finishFailed}가
  * {@code run.fail()+save()} 한 뒤 반환값을 버리고, 그 "버전이 안 갱신된" 같은 인스턴스를
- * {@code handleRetryOrBlock}에 넘겨 {@code block()+save()}를 한 번 더 하기 때문 — 두 save가
+ * 차단 단계에 넘겨 {@code block()+save()}를 한 번 더 하기 때문 — 두 save가
  * 같은 in-memory 버전 값으로 DB를 두 번 갱신하려 든다). task-7 E2E(dev agentdb, run id=3)에서
  * 정확히 이 지점의 {@code ObjectOptimisticLockingFailureException}이 로그로 관찰됐고, 그 결과
  * run은 FAILED에 멈춘 채 BLOCKED로 승격되지 못했다(15개 run, 5회 attempt 1→2→3 반복, BLOCKED
@@ -87,7 +88,7 @@ class RunServiceOptimisticLockingTest {
         when(almClient.getByKey(anyString(), anyString())).thenReturn(issue);
         when(almClient.addComment(anyLong(), anyString(), anyString()))
                 .thenReturn(new CommentResponse(1L, 1L, PERSONA_MEMBER_ID, "b", null, null));
-        // 워커가 실패로 죽었다고 가정 — attempt==한도에서 BLOCKED 승격 경로를 타게 한다.
+        // 워커가 실패로 죽었다고 가정 — 사고형 즉시 중단(BLOCKED 승격) 경로를 타게 한다.
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
                 .thenReturn(WorkerResult.failure(1, false, "boom", null));
 
@@ -99,14 +100,12 @@ class RunServiceOptimisticLockingTest {
         BudgetGuard budgetGuard = Mockito.mock(BudgetGuard.class);
         ReviewService reviewService = Mockito.mock(ReviewService.class);
         MeetingService meetingService = Mockito.mock(MeetingService.class);
+        AlertService alertService = Mockito.mock(AlertService.class);
         when(budgetGuard.allow(anyLong())).thenReturn(true);
-        @SuppressWarnings("unchecked")
-        ObjectProvider<RunService> selfProvider = Mockito.mock(ObjectProvider.class);
-        when(selfProvider.getObject()).thenReturn(Mockito.mock(RunService.class));
 
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
+                commitLinkParser, budgetGuard, reviewService, meetingService, alertService);
     }
 
     @AfterEach
@@ -132,9 +131,8 @@ class RunServiceOptimisticLockingTest {
      */
     @Test
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
-    void attempt_reaching_retry_cap_actually_lands_on_blocked_under_real_optimistic_locking() {
+    void first_failure_actually_lands_on_blocked_under_real_optimistic_locking() {
         Run run = Run.queued(RunType.TASK, ISSUE_KEY, 1L, persona.getId(), RunTrigger.SCHEDULER, "harness://default", null);
-        ReflectionTestUtils.setField(run, "attempt", 3); // schedulerProperties.retryMaxAttempts()와 동일 — 한도
         run = runRepository.save(run);
 
         // 이 호출이 실제 Hibernate @Version 아래서 예외 없이 끝나야 하고(수정 전에는
@@ -144,6 +142,28 @@ class RunServiceOptimisticLockingTest {
 
         Run reloaded = runRepository.findById(run.getId()).orElseThrow();
         assertThat(reloaded.getStatus()).isEqualTo(RunStatus.BLOCKED);
-        assertThat(reloaded.getError()).contains("3회 실패");
+        assertThat(reloaded.getError()).contains("사고형 실패 — 즉시 중단: boom");
+        // continuation 행이 생기지 않는다 — 재시도가 없다.
+        assertThat(runRepository.count()).isEqualTo(1);
+    }
+
+    /** V7 reject_count가 실제 매핑으로 저장·재조회되고, 사람 재개 continuation에 승계된다(D-P3d-2). */
+    @Test
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
+    void reject_count_round_trips_through_the_database_and_survives_resume() {
+        Run task = Run.queued(RunType.TASK, ISSUE_KEY, 1L, persona.getId(), RunTrigger.SCHEDULER, "harness://default", null);
+        task.start("C:\\agent-work\\run-1", null);
+        task.complete();
+        task = runRepository.save(task);
+        Run fix = runRepository.save(Run.fixContinuation(task, 99L, 2));
+
+        Run reloaded = runRepository.findById(fix.getId()).orElseThrow();
+        assertThat(reloaded.getRejectCount()).isEqualTo(2);
+
+        reloaded.start("pending", null);
+        reloaded.block("사고형 실패 — 즉시 중단: x");
+        reloaded = runRepository.save(reloaded);
+        Run resumed = runRepository.save(Run.continuation(reloaded));
+        assertThat(runRepository.findById(resumed.getId()).orElseThrow().getRejectCount()).isEqualTo(2);
     }
 }

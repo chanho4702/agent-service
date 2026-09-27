@@ -24,10 +24,10 @@ class RunErrorLogTest {
     void fail_then_block_keeps_the_cause_first_and_the_block_reason_after_a_separator() {
         Run r = running();
         r.fail("시간 초과");
-        r.block("3회 실패 — 사람 확인 필요");
+        r.block("사고형 실패 — 즉시 중단: boom");
 
         assertThat(r.getError()).startsWith("시간 초과\n--- [");
-        assertThat(r.getError()).endsWith("] ---\n3회 실패 — 사람 확인 필요");
+        assertThat(r.getError()).endsWith("] ---\n사고형 실패 — 즉시 중단: boom");
     }
 
     @Test

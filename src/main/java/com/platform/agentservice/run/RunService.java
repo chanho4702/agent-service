@@ -1,5 +1,7 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.alert.AlertKind;
+import com.platform.agentservice.alert.AlertService;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.IssueClaimSupport;
 import com.platform.agentservice.client.TokenService;
@@ -20,8 +22,6 @@ import com.platform.agentservice.worker.WorkerResult;
 import com.platform.common.error.ConflictException;
 import com.platform.common.error.NotFoundException;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.beans.factory.ObjectProvider;
-import org.springframework.core.task.TaskRejectedException;
 import org.springframework.scheduling.annotation.Async;
 import org.springframework.stereotype.Service;
 
@@ -62,7 +62,7 @@ public class RunService {
     /**
      * {@link Run#existsByIssueKeyAndStatusIn} / {@link Dispatcher#pickNewIssue}의 "이미
      * 진행 중이라 재선택하면 안 되는" 상태 — WAITING_APPROVAL(사람 승인 대기)뿐 아니라
-     * {@code BLOCKED}도 포함한다(fix round, P2a T7, F2b). BLOCKED는 재시도 한도를 다 쓰고
+     * {@code BLOCKED}도 포함한다(fix round, P2a T7, F2b). BLOCKED는 사고형 실패·반려 한도 소진으로
      * 사람 확인이 필요한 상태라 "끝난 것"이 아니다 — 여기 빠져 있으면 다음 Dispatcher 틱이
      * 사람이 보기도 전에 같은 이슈를 attempt=1부터 완전히 새로 픽업해 버린다(task-7 E2E
      * 실측: BLOCKED 승격이 안 되던 버그와 겹쳐서 15개 run에 걸쳐 1→2→3→(재시작)1→2→3...
@@ -96,15 +96,14 @@ public class RunService {
     private final BudgetGuard budgetGuard;
     private final ReviewService reviewService;
     private final MeetingService meetingService;
-    /** 재시도 continuation을 {@code @Async} 프록시로 제출하기 위한 자기 지연 조회 — {@code this.execute()}는 프록시를 타지 않는다. */
-    private final ObjectProvider<RunService> selfProvider;
+    private final AlertService alertService;
 
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
                        SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
                        CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService,
-                       MeetingService meetingService, ObjectProvider<RunService> selfProvider) {
+                       MeetingService meetingService, AlertService alertService) {
         this.runRepository = runRepository;
         this.almClient = almClient;
         this.issueClaimSupport = issueClaimSupport;
@@ -119,7 +118,7 @@ public class RunService {
         this.budgetGuard = budgetGuard;
         this.reviewService = reviewService;
         this.meetingService = meetingService;
-        this.selfProvider = selfProvider;
+        this.alertService = alertService;
     }
 
     /** Dispatcher가 새 이슈를 픽업할 때 넘기는 최소 참조. */
@@ -190,7 +189,7 @@ public class RunService {
      * 진입점 자체(여기)에서 한 번 더 확인한다 — 거부되면 QUEUED로 그대로 남겨 둔다(RUNNING
      * 전이 자체를 하지 않는다). run을 실패 처리하지 않는 이유: 킬 스위치/예산 캡은 일시적
      * 상태이고, 풀리면 다음 Dispatcher 드레인 틱이 이 QUEUED run을 다시 집어 처리하면
-     * 되기 때문이다(재시도 카운트 소모 없음).
+     * 되기 때문이다.
      */
     @Async("workerExecutor")
     public void execute(long runId) {
@@ -204,7 +203,7 @@ public class RunService {
             return;
         }
         if (!budgetGuard.allow(run.getProjectId())) {
-            log.info("킬 스위치/예산 캡으로 실행을 보류합니다 — QUEUED로 남겨 다음 드레인 틱이 재시도합니다: id={}", runId);
+            log.info("킬 스위치/예산 캡으로 실행을 보류합니다 — QUEUED로 남겨 다음 드레인 틱이 다시 집어갑니다: id={}", runId);
             return;
         }
 
@@ -310,11 +309,10 @@ public class RunService {
      *
      * <p><b>self-FAILED 데드엔드 수정(최종 리뷰 I1)</b>: 워커가 launch() 반환 전에 MCP
      * {@code report_result(status=FAILED)}를 스스로 불렀으면 재조회 시 상태가 FAILED다 —
-     * 예전에는 "RUNNING 아니면 물러난다" 가드에 걸려 여기서 그냥 반환했고, 그러면 재시도도
-     * BLOCKED 승격도 전혀 일어나지 않아 그 run은 FAILED에 영원히 멈췄다(재개 API도 원래
-     * BLOCKED만 받아서 막다른 골목이었다 — {@link RunResumeService}도 함께 넓혔다). FAILED는
-     * {@code Run}의 차단 가능·이어가기 가능 상태 집합 둘 다에 이미 포함돼 있으므로
-     * {@link #handleRetryOrBlock}을 그대로 태울 수 있다.
+     * 예전에는 "RUNNING 아니면 물러난다" 가드에 걸려 여기서 그냥 반환했고, 그러면 BLOCKED
+     * 승격이 전혀 일어나지 않아 그 run은 FAILED에 영원히 멈췄다(재개 API도 원래 BLOCKED만
+     * 받아서 막다른 골목이었다 — {@link RunResumeService}도 함께 넓혔다). FAILED는 {@code Run}의
+     * 차단 가능 상태 집합에 포함돼 있으므로 {@link #blockIncident}를 그대로 태울 수 있다.
      *
      * <p><b>방어적 래핑(최종 리뷰 I2)</b>: {@link #recordSessionAndLedger}/{@link
      * #warnIfOverPerRunBudget}는 (DB 순간 장애·낙관적 락 등으로) 던질 수 있는데, 이 메서드는
@@ -326,9 +324,9 @@ public class RunService {
      * 더는 이 메서드가 할 수 있는 게 없다).
      *
      * <p><b>검증 흐름(P2c T3)</b>: 이 메서드가 두 종결 경로의 합류점이라 리뷰 훅도 여기에만 건다 — DONE이면
-     * {@link ReviewService#onRunDone}(TASK만 REVIEW를 낳는다), 리뷰어의 self-FAILED는 재시도가 아니라
+     * {@link ReviewService#onRunDone}(TASK만 REVIEW를 낳는다), 리뷰어의 self-FAILED는 사고가 아니라 판정이라
      * {@link ReviewService#onReviewRejected}. REVIEW의 인프라 실패(시간 초과·비정상 종료·판정 없는 종료)는
-     * 기존 재시도 경로를 타고, {@link Run#continuation}이 워크스페이스를 승계한다.
+     * 다른 run과 같이 사고형 즉시 중단이다(P3d) — 사람이 재개하면 {@link Run#continuation}이 워크스페이스를 승계한다.
      */
     private void applyOutcome(long runId, WorkerResult result) {
         try {
@@ -339,12 +337,12 @@ public class RunService {
             Run run = runRepository.findById(runId).orElseThrow();
             if (run.getStatus() == RunStatus.FAILED) {
                 if (run.getType() == RunType.REVIEW) {
-                    // 리뷰어의 FAILED는 인프라 실패가 아니라 판정(반려)이다(D-P2c-2) — 재시도하지 않고 반려-fix로 넘긴다.
+                    // 리뷰어의 FAILED는 인프라 실패가 아니라 판정(반려)이다(D-P2c-2) — 사고형 중단이 아니라 반려 예산 판단으로 넘긴다.
                     safelyOnReviewRejected(run);
                     return;
                 }
-                log.debug("워커가 스스로 report_result(FAILED)로 종결했습니다(run={}) — 재시도/차단 판단을 이어갑니다.", runId);
-                handleRetryOrBlock(run);
+                log.debug("워커가 스스로 report_result(FAILED)로 종결했습니다(run={}) — 사고형 즉시 중단합니다.", runId);
+                blockIncident(run, "워커가 실패를 보고함(report_result FAILED)");
                 return;
             }
             if (run.getStatus() != RunStatus.RUNNING) {
@@ -364,7 +362,7 @@ public class RunService {
                 return;
             }
             if (run.getType() == RunType.REVIEW) {
-                // 판정 없이 끝난 리뷰를 통과로 치면 검증 없는 확정이 된다 — 인프라 실패로 보고 재시도(워크스페이스 승계)한다.
+                // 판정 없이 끝난 리뷰를 통과로 치면 검증 없는 확정이 된다 — 인프라 실패(사고형)로 본다.
                 finishFailed(runId, "리뷰 판정(report_result) 없이 종료");
                 return;
             }
@@ -535,16 +533,16 @@ public class RunService {
     }
 
     /**
-     * RUNNING일 때만 FAILED로 옮기고 재시도/차단을 판단한다(이미 다른 상태면 손대지 않는다).
+     * RUNNING일 때만 FAILED로 옮기고 사고형 즉시 중단한다(이미 다른 상태면 손대지 않는다).
      *
      * <p><b>fix round(P2a T7, F2a)</b>: {@code run = runRepository.save(run)}로 반환값을
      * 반드시 다시 담는다 — {@code save()}는 detached 엔티티를 merge하며, DB에 반영된 최신
      * {@code @Version}을 담은 "새" 인스턴스를 돌려준다(원래 인자 {@code run}의 in-memory
-     * version 필드는 그대로 남는다). 이 재할당 없이 그대로 {@code handleRetryOrBlock(run)}에
-     * 넘기면, attempt==한도 분기에서 그 stale-version 인스턴스로 {@code block()+save()}를
-     * 한 번 더 시도하다 {@code ObjectOptimisticLockingFailureException}을 던진다 — task-7
-     * E2E 실측(run id=3)에서 정확히 이 지점에서 터졌고, run이 FAILED에 멈춘 채 BLOCKED로
-     * 승격되지 못한 원인이었다(재현: {@code RunServiceOptimisticLockingTest}).
+     * version 필드는 그대로 남는다). 이 재할당 없이 그대로 {@code blockIncident(run)}에
+     * 넘기면 그 stale-version 인스턴스로 {@code block()+save()}를 한 번 더 시도하다
+     * {@code ObjectOptimisticLockingFailureException}을 던진다 — task-7 E2E 실측(run id=3)에서
+     * 정확히 이 지점에서 터졌고, run이 FAILED에 멈춘 채 BLOCKED로 승격되지 못한 원인이었다
+     * (재현: {@code RunServiceOptimisticLockingTest}).
      */
     private void finishFailed(long runId, String error) {
         Run run = runRepository.findById(runId).orElseThrow();
@@ -553,31 +551,21 @@ public class RunService {
         }
         run.fail(error);
         run = runRepository.save(run);
-        handleRetryOrBlock(run);
+        blockIncident(run, error);
     }
 
     /**
-     * attempt &lt; 한도면 continuation(QUEUED)을 저장하고 곧바로 실행 제출한다. 한도에 닿으면
-     * BLOCKED로 에스컬레이션한다.
-     *
-     * <p>드레인에만 맡기면 스케줄러가 꺼진 환경(USER·REVIEW run만 도는 설치)에서는 continuation이
-     * 영원히 QUEUED다 — 활성 상태라 같은 이슈 POST도 409, resume은 BLOCKED·FAILED만 받아 복구
-     * 경로가 없다. 스케줄러가 켜져 있으면 드레인 틱도 같은 run을 집을 수 있지만, {@link #execute}의
-     * QUEUED 가드와 RUNNING 선커밋 + {@code @Version} 낙관적 락이 이중 실행을 막는다.
+     * 사고형 실패 즉시 중단(P3d, D-P3d-1 — 2026-09-27 사용자 결정 AGP-55, P2a "재시도 3회" 대체). 인프라 실패는 같은 조건에서
+     * 다시 돌려도 대개 같은 이유로 또 실패하면서 예산만 태운다 — continuation을 만들지 않고 곧바로 BLOCKED + 이슈 코멘트 + 메일
+     * 알림 + 자동 에스컬레이션 훅. 복구는 사람 재개({@link RunResumeService})뿐이다.
      */
-    private void handleRetryOrBlock(Run failedRun) {
-        int maxAttempts = schedulerProperties.retryMaxAttempts();
-        if (failedRun.getAttempt() < maxAttempts) {
-            Run next = runRepository.save(Run.continuation(failedRun));
-            commentBestEffort(failedRun, "🔁 재시도 " + next.getAttempt() + "/" + maxAttempts);
-            submitRetry(next.getId());
-        } else {
-            String blockReason = maxAttempts + "회 실패 — 사람 확인 필요";
-            failedRun.block(blockReason);
-            runRepository.save(failedRun);
-            commentBestEffort(failedRun, "⛔ " + blockReason);
-            safelyEscalate(failedRun, blockReason);
-        }
+    private void blockIncident(Run failedRun, String cause) {
+        String blockReason = "사고형 실패 — 즉시 중단: " + AlertService.summarize(cause);
+        failedRun.block(blockReason);
+        runRepository.save(failedRun);
+        commentBestEffort(failedRun, "⛔ " + blockReason + " — 사람 확인 후 재개(/resume)가 필요합니다.");
+        alertService.notifyBlocked(failedRun, blockReason, AlertKind.INCIDENT);
+        safelyEscalate(failedRun, blockReason);
     }
 
     /** BLOCKED는 이미 커밋됐다 — 자동 에스컬레이션(D-P3b-4③) 실패가 run 처리 흐름을 망치지 않게 삼킨다. */
@@ -586,15 +574,6 @@ public class RunService {
             meetingService.onBlocked(blockedRun, reason);
         } catch (Exception e) {
             log.warn("run={} 자동 에스컬레이션 생성 실패 — BLOCKED로 남아 사람 재개 대상입니다: {}", blockedRun.getId(), e.getMessage());
-        }
-    }
-
-    private void submitRetry(long runId) {
-        try {
-            selfProvider.getObject().execute(runId);
-        } catch (TaskRejectedException e) {
-            log.warn("재시도 run 실행 제출이 거부돼 QUEUED로 남깁니다 — 스케줄러가 켜져 있으면 드레인 틱이 집어갑니다: id={} error={}",
-                    runId, e.getMessage());
         }
     }
 

@@ -205,10 +205,19 @@ P1(위 1~4절)은 사람이 매번 도구를 호출해 기록을 남기는 통�
 페이지로 넘어간다 — 한 틱 상한 `SCHEDULER_MAX_PICK_PAGES`(`scheduler.max-pick-pages`, 기본 5,
 0 이하는 5로 본다)(AGP-52). 동시성은 `SCHEDULER_MAX_GLOBAL`(기본 2, 전역 QUEUED+RUNNING)
 · `SCHEDULER_MAX_PER_PROJECT`(기본 1, 프로젝트별) — 픽업 단계에서만 본다(이미 QUEUED인 run을
-드레인하는 건 다시 게이트하지 않음). 재시도는 `SCHEDULER_RETRY_MAX_ATTEMPTS`(기본 3) — 실패
-시 attempt+1 continuation을 만들어 재시도하고, 한도를 넘기면 `BLOCKED`로 승격해 픽업 후보에서
-완전히 제외한다(`RunService.ACTIVE_STATUSES`에 BLOCKED 포함 — 없으면 같은 이슈를 attempt=1부터
-무한 재픽업하는 회귀가 난다, task-7 E2E 실측).
+드레인하는 건 다시 게이트하지 않음).
+
+**실패 정책(P3d, 2026-09-27 사용자 결정 AGP-55 — P2a "재시도 3회 → BLOCKED"를 대체)** — **사고형(인프라) 실패는
+재시도하지 않고 즉시 중단한다.** 프로세스 비정상 종료·시간 초과·워커 self-FAILED(`report_result(FAILED)`)·준비 단계 실패
+(리포 매핑 없음·claim 실패 등)·실행 인프라 예외·리뷰 무판정 종료·회의/매니저 무보고 종료는 전부 continuation 없이 곧바로
+`BLOCKED`("사고형 실패 — 즉시 중단: <원인 요지>") + 이슈 ⛔ 코멘트 + 메일 알림(§5.11) + 자동 에스컬레이션 훅(§5.9, 설정 시)이다
+(`RunService.blockIncident`). 같은 조건에서 다시 돌리면 대개 같은 이유로 또 죽으면서 예산만 태운다는 판단이다. 복구는 사람
+재개(§5.4)뿐이다. 리뷰 반려는 사고가 아니라 판정이라 별도 예산(§5.8 반려 예산)으로 센다. `attempt`는 이제 계보 순번일 뿐
+예산이 아니다. BLOCKED는 픽업 후보에서 완전히 제외된다(`RunService.ACTIVE_STATUSES`에 BLOCKED 포함 — 없으면 같은 이슈를
+attempt=1부터 무한 재픽업하는 회귀가 난다, task-7 E2E 실측).
+
+**폐기 설정**: `SCHEDULER_RETRY_MAX_ATTEMPTS`(`scheduler.retry-max-attempts`)는 기존 배포 env가 기동을 깨지 않게 바인딩만
+남아 있고 **코드는 읽지 않는다**(값이 무엇이든 무시). 반려 한도는 `REVIEW_REJECT_MAX`로 옮겨 갔다.
 
 **모델 정책(P2c)** — run의 `--model`은 다음 순서로 정해진다(`SchedulerProperties.modelFor`):
 USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.project-models.<KEY>`(대소문자
@@ -218,7 +227,7 @@ USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.proje
 무관이긴 하지만, 주입은 프로그램 인자(`--platform.agent.scheduler.project-models.AGP=...`)를
 권장한다. REVIEW run은 `REVIEW_MODEL`(`review.model`) > 프로젝트 맵 > 전역 기본 순이며 부모 TASK
 (USER가 지정한 모델 포함)의 모델을 이어받지 않는다. 반려-fix run은 원 TASK run의 모델을 그대로
-승계한다. 재시도·게이트 승인·재개 continuation도 직전 run의 모델을 승계한다.
+승계한다. 게이트 승인·재개 continuation도 직전 run의 모델을 승계한다.
 
 ### 5.2 예산·킬 스위치
 
@@ -227,13 +236,13 @@ USER run 요청의 `model` > 프로젝트별 맵 `platform.agent.scheduler.proje
 `GET /api/agent/budget`(인증된 누구나)로 현재 월 사용량·캡·킬스위치 상태 조회.
 `GET /api/agent/kill-switch`(누구나) / `POST /api/agent/kill-switch`(ADMIN, body
 `{"on": true|false}`)로 즉시 전체 차단·해제. **킬 스위치는 인메모리다 — 재기동하면 이 값과
-무관하게 항상 꺼진 상태(off)로 시작한다**, 알림 연동(경고 채널)은 P3.
+무관하게 항상 꺼진 상태(off)로 시작한다**. BLOCKED 알림(메일)은 §5.11 — 예산·킬 스위치 자체의 알림은 아직 없다.
 
 킬 스위치/예산 캡(`BudgetGuard.allow`)은 `RunService.execute` 진입점 자체에서 확인한다(최종
 리뷰 I3) — 새 이슈 픽업뿐 아니라 QUEUED continuation 드레인, 게이트 승인, BLOCKED/FAILED
 사람 재개까지 **전부** 이 지점을 거치므로 어느 경로로 실행이 트리거되든 예외 없이 차단된다.
 거부된 run은 실패 처리하지 않고 QUEUED로 그대로 둔다 — 스위치를 끄거나 캡이 회복되면 다음
-드레인 틱이 재시도 카운트 소모 없이 다시 집어간다. 단 **스케줄러 off 환경에서는 킬스위치/캡 해제 후
+드레인 틱이 실패로 치지 않고 다시 집어간다. 단 **스케줄러 off 환경에서는 킬스위치/캡 해제 후
 자동 재개가 없다**(드레인 부재) — 그 run을 cancel한 뒤 재요청하거나 스케줄러를 켠다.
 
 ### 5.3 게이트 승인 흐름
@@ -248,13 +257,17 @@ CANCELLED로 닫고 재개하지 않는다.
 
 ### 5.4 BLOCKED·FAILED 사람 재개
 
-재시도 한도를 소진해 `BLOCKED`가 된 run은 게이트와는 별개 경로로 사람이 재개한다:
+사고형 즉시 중단(§5.1)·반려 한도 소진(§5.8)·반려 계보 결함으로 `BLOCKED`가 된 run은 게이트와는 별개 경로로 사람이 재개한다
+(알림 메일 본문에도 이 경로가 적힌다, §5.11):
 `POST /api/agent/runs/{id}/resume`(ADMIN) — `Gate` 행 없이 continuation run(attempt+1)을 만들어
 재실행한다(§5.3 승인과 동일 패턴, 다만 사람이 먼저 승인을 요청받은 게 아니라 시스템이 스스로
 멈춘 것이므로 게이트 엔티티가 없다). `FAILED`도 재개 대상이다(최종 리뷰 I1) — 정상 경로에서는
-워커가 스스로 `report_result(FAILED)`로 종결해도 `RunService`가 곧바로 재시도/BLOCKED로
+워커가 스스로 `report_result(FAILED)`로 종결해도 `RunService`가 곧바로 BLOCKED로
 옮기므로 FAILED에 오래 머물지 않지만, 그 처리 자체가 예외로 실패하는 잔여 케이스에서는 FAILED에
-멈출 수 있다 — 그때도 이 경로로 재개한다. 대상 run이 BLOCKED·FAILED 둘 다 아니면 409.
+멈출 수 있다 — 그때도 이 경로로 재개한다. 대상 run이 BLOCKED·FAILED 둘 다 아니면 409. 재개 continuation은 모델·지시문·
+계보 워크스페이스와 함께 **반려 누적(`reject_count`)을 그대로 승계**한다 — 재개가 반려 예산을 초기화하지 않는다(반려 한도로
+멈춘 REVIEW를 재개하면 같은 워크스페이스에서 리뷰를 다시 돌리고, 또 반려되면 곧바로 다시 BLOCKED다). 사고형 실패로 멈춘
+run은 원인을 고친 뒤 재개한다 — 고치지 않고 재개하면 같은 이유로 다시 BLOCKED + 알림이 온다.
 
 `run.error`는 덮어쓰지 않고 누적된다(AGP-53) — 실패 원인 → BLOCKED 사유 → 재개/취소 노트가
 `--- [UTC 타임스탬프] ---` 구분선으로 원인이 앞, 최신이 뒤에 쌓인다. 빈 노트(`cancel()`)는 기존
@@ -283,7 +296,7 @@ run을 띄운다.
   현재 409(기존 `DownstreamErrors` 매핑 그대로 — 404로 세분화는 AGP-25).
 - 같은 이슈에 활성 run(QUEUED/RUNNING/WAITING_APPROVAL/BLOCKED)이 있으면 409.
 - `instruction`은 앞뒤 공백을 자른 뒤 저장되고, 워커 프롬프트에 `<사용자-지시>` 경계 섹션으로
-  실린다(§5.6). 재시도·게이트 승인·재개·반려-fix continuation과 REVIEW run까지 승계된다 — 리뷰어도
+  실린다(§5.6). 게이트 승인·재개·반려-fix continuation과 REVIEW run까지 승계된다 — 리뷰어도
   변경이 지시를 따르는지 확인한다(지시 위반은 반려 사유).
 - 실행 제출은 컨트롤러가 `RunService.execute`(`@Async`) 프록시로 한다. 워커 스레드풀이 포화돼
   제출이 거부돼도 run은 이미 QUEUED로 커밋됐으므로 201을 돌려준다 — 다음 드레인 틱이 집어간다
@@ -295,17 +308,17 @@ run을 띄운다.
 - 헤드리스 `claude -p`를 **비-bare로** 실행한다: `--permission-mode dontAsk
   --permission-prompts none --allowedTools <허용목록> --strict-mcp-config --mcp-config <파일>
   --output-format json --max-turns N [--model M]`.
-- 일반 TASK run(재시도 포함)은 run마다 새 워크스페이스(`AGENT_WORK_DIR/run-{id}`)를 만들어
+- 일반 TASK run(사람 재개 포함)은 run마다 새 워크스페이스(`AGENT_WORK_DIR/run-{id}`)를 만들어
   `git clone` 후, 하네스(`.claude/` 번들 + 루트 `CLAUDE.md`/`AGENTS.md`)를 그 워크스페이스에
   실체화한다(`HarnessMaterializer`) — 워커가 플랫폼 협업 규약을 그대로 보고 작업하게 하기 위함.
-- **예외 — 계보 run(P2c)**: REVIEW run, 반려-fix run, 그리고 이 둘의 재시도는 원 TASK run의
+- **예외 — 계보 run(P2c)**: REVIEW run, 반려-fix run, 그리고 이 둘의 재개는 원 TASK run의
   워크스페이스를 **승계**한다(`Run.isWorkspaceLineage()` — REVIEW 전부 + `parentRunId`가 있는
   TASK). 워커 커밋은 푸시되지 않고 그 워크스페이스에만 있으므로(`CommitLinkParser`가
   `origin/main..HEAD`를 본다) 새로 clone하면 검증·수정 대상이 사라진다. 그래서 clone·하네스
   실체화를 생략하고, 이를 위해 `run.workspace_path`에 실제 경로를 영속화한다(P2a까지는 "pending"
   고정이었다). 승계 워크스페이스가 비었거나("pending") 디렉터리가 사라졌으면 **clone으로 대신하지
   않고 실패**시킨다 — 새 clone 위에서는 diff가 비어 리뷰어가 빈 변경을 통과시킬 수 있기 때문이다
-  (재시도 → 한도 소진 시 BLOCKED로 사람에게 넘어간다).
+  (사고형 즉시 BLOCKED로 사람에게 넘어간다).
 - mcp-config는 **인라인 JSON 인자가 아니라 파일**(`.mcp-run.json`)로 넘긴다 — Windows
   `ProcessBuilder`가 인자를 재조립(re-quote)할 때 JSON 안 따옴표가 사라지고 `/`가 `\`로
   바뀌어 CLI가 손상된 문자열을 파일 경로로 오인해 즉시 죽는 버그를 피한다(F1, task-7 E2E
@@ -383,22 +396,42 @@ USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogres
      REVIEW의 DONE은 새 REVIEW를 낳지 않는다(무한루프 가드 — `onRunDone`은 TASK만 처리하고,
      `Run.queuedReview`도 DONE TASK만 부모로 받는다).
    - **반려**: 리뷰어가 `add_comment`(파일·위치·고칠 내용) → `report_result(FAILED)`. 이슈 상태는
-     건드리지 않는다. REVIEW의 FAILED는 인프라 실패가 아니라 판정이므로 재시도하지 않고
-     `onReviewRejected`로 넘긴다.
-   - **판정 없이 정상 종료**(`report_result` 없이 프로세스만 성공)는 통과가 아니라 **실패**로 본다 —
-     일반 재시도 경로를 타고, 재시도도 같은 워크스페이스를 승계한다. 시간 초과·비정상 종료 같은
-     REVIEW의 인프라 실패도 같은 재시도 경로다.
+     건드리지 않는다. REVIEW의 FAILED는 인프라 실패가 아니라 판정이므로 사고형 중단이 아니라
+     `onReviewRejected`(반려 예산 판단)로 넘긴다.
+   - **판정 없이 정상 종료**(`report_result` 없이 프로세스만 성공)는 통과가 아니라 **사고형 실패**로 본다 —
+     즉시 BLOCKED + 알림(§5.1). 시간 초과·비정상 종료 같은 REVIEW의 인프라 실패도 같다. 사람이 재개하면
+     continuation이 같은 워크스페이스·계보를 승계한다.
    - 리뷰어가 `report_result(BLOCKED)`를 부르면 REVIEW run은 BLOCKED로 사람 재개를 기다린다.
 4. **반려-fix**: 원 페르소나 명의 TASK run을 만든다(`Run.fixContinuation` — 워크스페이스·모델·
-   지시문 승계, `parentRunId`=반려한 REVIEW run). attempt는 **원 TASK의 카운터를 이어** +1이라
-   `SCHEDULER_RETRY_MAX_ATTEMPTS`가 반려 루프에도 그대로 걸린다. 리뷰 지적 코멘트는 기존 최근
-   코멘트(10건) 경로로 fix 프롬프트에 들어간다. fix run이 다시 DONE이 되면 그 DONE에 대해 새 REVIEW가
-   뜬다(fix도 TASK이므로).
-5. **한도 초과·이어갈 수 없음**: 다음 attempt가 한도를 넘거나, 원 TASK run을 찾을 수 없거나, 원
-   워크스페이스 경로가 없으면 반려한 REVIEW run을 **BLOCKED로 승격**하고 이슈에 사유 코멘트를
-   남긴다(이슈는 inprogress). 사람이 확인 후 `POST /api/agent/runs/{id}/resume`(§5.4)으로
-   재개한다 — 이때 만들어지는 continuation은 REVIEW의 연장이라 **fix가 아니라 같은 워크스페이스에서
-   리뷰를 다시 돌린다**(사람이 워크스페이스를 직접 손본 뒤 재검증하는 용도).
+   지시문 승계, `parentRunId`=반려한 REVIEW run). attempt는 원 TASK의 순번 +1(계보 순번일 뿐 예산 아님),
+   `reject_count`는 원 TASK +1(아래 반려 예산). 리뷰 지적 코멘트는 기존 최근 코멘트(10건) 경로로 fix
+   프롬프트에 들어간다. fix run이 다시 DONE이 되면 그 DONE에 대해 새 REVIEW가 뜬다(fix도 TASK이므로) — 그
+   REVIEW의 "원 TASK"는 직전 fix라 카운터가 계보를 따라 1→2→3…으로 쌓인다.
+5. **한도 초과·이어갈 수 없음**: 반려 누적이 한도를 넘거나("반려 한도 N회 소진 — 사람 확인 필요", 알림 종류
+   `REJECT_LIMIT`), 원 TASK run을 찾을 수 없거나, 원 워크스페이스 경로가 없으면(알림 종류 `LINEAGE_BROKEN`)
+   반려한 REVIEW run을 **BLOCKED로 승격**하고 이슈에 ⛔ 사유 코멘트 + 메일 알림(§5.11)을 남긴다(이슈는
+   inprogress). 자동 에스컬레이션 훅은 한도 소진 분기만 탄다. 사람이 확인 후 `POST /api/agent/runs/{id}/resume`
+   (§5.4)으로 재개한다 — 이때 만들어지는 continuation은 REVIEW의 연장이라 **fix가 아니라 같은 워크스페이스에서
+   리뷰를 다시 돌린다**(사람이 워크스페이스를 직접 손본 뒤 재검증하는 용도). 반려 누적은 승계되므로 재검증이 또
+   반려되면 곧바로 다시 BLOCKED다.
+
+**반려 예산(P3d, D-P3d-2 — 인프라 재시도와 분리)** — `run.reject_count`(V7, 기본 0)가 한 작업 계보의 반려 횟수를
+센다. 반려-fix는 원 TASK 값 +1을, 게이트 승인·재개 continuation과 REVIEW run은 직전 값을 그대로 싣는다(REVIEW 쪽 값은
+감독·알림 표시용이고 판정은 부모 TASK 값으로 한다). 반려 시 `newCount = 원 TASK.reject_count + 1`:
+
+| 조건 | 결과 |
+|---|---|
+| `newCount > REVIEW_REJECT_MAX` | fix 없이 REVIEW run BLOCKED("반려 한도 N회 소진 — 사람 확인 필요") + ⛔ 코멘트 + 메일(`REJECT_LIMIT`) + 자동 에스컬레이션 훅 |
+| `newCount ≥ 알림 임계` (한도 이내) | fix run 생성·제출 + "🔁 리뷰 반려 — 수정 run N 시작(반려 k/max) … ⚠️ 반려 알림 임계 도달" 코멘트 + 메일(`REJECT_THRESHOLD`) — 진행은 계속 |
+| 그 밖 | fix run 생성·제출 + "🔁 리뷰 반려 — 수정 run N 시작(반려 k/max)" 코멘트 |
+
+| 키 | env | 기본 | 의미 |
+|---|---|---|---|
+| `review.reject-max` | `REVIEW_REJECT_MAX` | `2` | 자동 수정(반려-fix) 수용 한도. `0`이면 첫 반려부터 사람 확인. 음수는 0으로 본다 |
+| `review.reject-alert-at` | `REVIEW_REJECT_ALERT_AT` | 빈 값(= `reject-max`) | 알림 임계. 1 미만도 `reject-max`로 본다. `reject-max`보다 크면 그 전에 BLOCKED로 끝나 임계 알림은 영영 안 온다 — 기동 시 warn 로그(한도 소진 알림만 동작) |
+
+기본값(2/2)이면: 1차 반려 → fix(1/2), 2차 반려 → fix(2/2) + 임계 알림, 3차 반려 → BLOCKED + 한도 소진 알림.
+P2c~P3c의 "attempt가 `SCHEDULER_RETRY_MAX_ATTEMPTS`를 넘으면 반려 BLOCKED" 결합은 제거됐다 — 반려 판단은 이 카운터만 본다.
 
 **fail-closed(리뷰를 띄울 수 없는 경우)** — 아래는 REVIEW run을 만들지 않고, TASK run은 DONE으로
 두되 이슈를 inprogress에 남긴 채 "⚠️ 검증 run을 만들 수 없음 — 사람이 확인하세요" 코멘트를 단다:
@@ -478,17 +511,17 @@ USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogres
 **`report_result`의 `pageId`(선택 인자, 하위 호환)** — 어떤 run이든 DONE/FAILED/BLOCKED와 함께 pageId를 주면
 `run.output_page_id`에 기록된다(양수만). **회의 run의 DONE은 pageId 필수** — 없으면 도구가 오류를 돌려주고 run은 RUNNING
 그대로다(워커가 pageId를 붙여 다시 부른다). 회의 run이 `report_result` 없이 프로세스만 성공하면 완료가 아니라 **실패**
-("회의록 보고(report_result) 없이 종료") → 일반 재시도 경로.
+("회의록 보고(report_result) 없이 종료") → 사고형 즉시 BLOCKED + 알림(§5.1). 회의 run은 자동 에스컬레이션 대상이 아니다.
 
-**PLAN 게이트 이어받기(`auto-issue=false`)** — 회의 continuation(재시도·게이트 승인·재개)은 직전 회의 run을
-`parentRunId`로 잇는다(TASK 재시도와 다름). `MeetingService.buildJob`이 조상 사슬(최대 20단계)에서 승인된 PLAN 게이트를 찾으면
+**PLAN 게이트 이어받기(`auto-issue=false`)** — 회의 continuation(게이트 승인·재개)은 직전 회의 run을
+`parentRunId`로 잇는다(TASK 재개와 다름). `MeetingService.buildJob`이 조상 사슬(최대 20단계)에서 승인된 PLAN 게이트를 찾으면
 그 요청문을 `<승인된-계획>`으로 싣고, 프롬프트는 "회의를 다시 열지 말고 제안 이슈를 만들어 기존 회의록을 갱신한 뒤
 `report_result(DONE, pageId=그 회의록)`"으로 바뀐다.
 
-**자동 에스컬레이션(`auto-escalation=true`)** — BLOCKED 승격 두 지점(`RunService.handleRetryOrBlock` 재시도 한도,
+**자동 에스컬레이션(`auto-escalation=true`)** — BLOCKED 승격 두 지점(`RunService.blockIncident` 사고형 즉시 중단,
 `ReviewService.onReviewRejected` 반려 한도)에서 `MeetingService.onBlocked`를 부른다(예외는 삼킨다 — BLOCKED는 이미 커밋).
 원 run의 프로젝트·이슈키·trigger를 승계한 ESCALATION run을 만들어 제출하고 이슈에 소집 코멘트를 남긴다. 지시문:
-`<이슈키> <재시도 한도>회 실패/반려 — 원인 분석과 사람에게 물을 질문 목록` + 원 run id·타입 + 차단 사유 + 실패 기록 끝 1000자.
+`<이슈키> 자동 진행 중단 — 원인 분석과 사람에게 물을 질문 목록` + 원 run id·타입 + 차단 사유 + 실패 기록 끝 1000자.
 가드: **원 run이 회의 3종이면 만들지 않는다**(재귀 방지), 같은 이슈에 활성 ESCALATION이 있으면 건너뛴다. 리뷰 반려의
 "원 run 없음·워크스페이스 없음" BLOCKED는 대상이 아니다(한도 분기만).
 
@@ -549,6 +582,43 @@ warn 로그. 소집 API에서 `personaSlugs`를 주면 MANAGER 롤 1명이어야
 - 금지 목록은 §5.8과 같이 **프롬프트 수준 규약**이다 — 매니저 run 토큰으로도 `claim_issue`·`update_issue_status` 도구
   호출 자체는 가능하다.
 - 매니저 보고는 회의 계열이라 게시판에 회의록과 같은 줄로 걸린다(프론트가 type=MANAGER로 라벨 구분 — P3c T2).
+
+### 5.11 운영 알림 (P3d, 2026-09-27, AGP-55)
+
+run이 사람 손을 기다리게 되면 이슈를 보지 않는 운영자에게도 닿도록 org 메일 허브로 메일을 보낸다(`AlertService`).
+
+**알림 지점(D-P3d-4)**
+
+| 종류(`AlertKind`) | 언제 | run 상태 | 메일 제목 |
+|---|---|---|---|
+| `INCIDENT` | 사고형 즉시 중단(§5.1) — 전 run 타입 | BLOCKED | `[AI팀] run {id} 중단 — {issueKey} (사고형 실패)` |
+| `REJECT_LIMIT` | 반려 한도 소진(§5.8) | REVIEW BLOCKED | `… (반려 한도 소진)` |
+| `LINEAGE_BROKEN` | 반려됐지만 원 작업 run·워크스페이스를 못 찾음(§5.8 5번) | REVIEW BLOCKED | `… (반려 후속 불가)` |
+| `REJECT_THRESHOLD` | 반려 누적이 알림 임계 도달(한도 이내) | fix 진행 중 | `[AI팀] run {id} 반려 k/max — {issueKey} (반려 알림 임계)` |
+
+게이트 장기 대기·워커가 스스로 `report_result(BLOCKED)`한 경우는 알림 대상이 아니다(게이트는 매니저 보고가 커버, 워커 BLOCKED는
+워커가 이슈에 사유를 남긴다). 본문(text)에는 run id·타입·시도 순번·반려 누적·이슈·프로젝트·페르소나·트리거·사유와 재개 방법
+(`POST /api/agent/runs/{id}/resume`, AI 사무실 run 상세 화면, 필요 없으면 cancel)이 담긴다.
+
+**채널 분담** — 이슈 코멘트(⛔·🔁)는 기존대로 `RunService`·`ReviewService`가 run 페르소나 명의로 남기고, `AlertService`는
+**메일만** 맡는다. 한 사건에 코멘트 1건 + 메일 1통이며 중복 발송은 없다. 안건 이슈 없는 회의·매니저 run(`PROJECT-<id>`)은
+코멘트 없이 메일만 간다.
+
+**계약** — `POST {org-base-url}/internal/org/mail`, 헤더 `X-Internal-Token`, body `{to[], subject, text, source:"agent-service"}`
+→ 202 `{accepted, disabled}`(wiki·alm `OrgMailClient`와 같은 계약). 202는 큐 적재일 뿐이며 실제 발송·실패는 org 관리 화면의
+발송 로그에서 본다.
+
+| 키 | env | 기본 | 의미 |
+|---|---|---|---|
+| `alerts.mail-to` | `AGENT_ALERT_MAIL_TO` | 빈 값 | 수신자 쉼표 목록(trim·중복 제거). 비면 메일 생략(info 로그만) |
+| `alerts.org-internal-token` | `ORG_INTERNAL_TOKEN` | 빈 값 | org `/internal/org/**` 공유 비밀 — **wiki·alm·auth와 같은 env·같은 값**. 비면 메일 생략(warn 로그) |
+
+org의 base URL은 기존 `ORG_BASE_URL`(`platform.agent.org-base-url`)을 그대로 쓴다. 컨테이너 배포에서는 agent-service에
+`ORG_INTERNAL_TOKEN`·`AGENT_ALERT_MAIL_TO` env 배선이 필요하다(infra compose — 이 리포 밖).
+
+**fail-soft** — 수신자·토큰 미설정, org 메일 꺼짐(`disabled=true`, 정상 — info 로그), 호출 실패(5xx·타임아웃·403)는 전부 로그로
+끝나고 던지지 않는다. 호출 시점에 BLOCKED는 이미 커밋됐고, 알림 실패가 자동 에스컬레이션·fix 제출을 끊으면 알림보다 큰 사고가
+되기 때문이다. 메일 요청은 워커 스레드에서 동기(연결 2초/읽기 10초 — `ClientsConfig`)로 나간다.
 
 ## 6. P3a: AI 사무실 감독 API (2026-09-26)
 

@@ -87,7 +87,7 @@ public class WorkerLauncher {
         Path inherited = run.isWorkspaceLineage() ? existingWorkspace(run) : null;
         if (run.isWorkspaceLineage() && inherited == null) {
             // 새로 clone하면 origin/main..HEAD가 비어 리뷰어가 빈 변경을 통과시킬 수 있다 — 검증 없는 확정이 되므로
-            // clone으로 대신하지 않고 실패시켜 재시도·BLOCKED 경로로 사람에게 넘긴다.
+            // clone으로 대신하지 않고 실패시켜 사고형 BLOCKED로 사람에게 넘긴다.
             return WorkerResult.failure(-1, false, "승계할 워크스페이스가 없습니다: " + run.getWorkspacePath(), null);
         }
         Path workspace;

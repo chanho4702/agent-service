@@ -1,5 +1,6 @@
 package com.platform.agentservice;
 
+import com.platform.agentservice.alert.AlertProperties;
 import com.platform.agentservice.budget.BudgetProperties;
 import com.platform.agentservice.run.MeetingProperties;
 import com.platform.agentservice.run.ReviewProperties;
@@ -11,7 +12,7 @@ import org.springframework.boot.context.properties.EnableConfigurationProperties
 
 @SpringBootApplication
 @EnableConfigurationProperties({WorkerProperties.class, SchedulerProperties.class, BudgetProperties.class,
-        ReviewProperties.class, MeetingProperties.class})
+        ReviewProperties.class, MeetingProperties.class, AlertProperties.class})
 public class AgentServiceApplication {
 
     public static void main(String[] args) {

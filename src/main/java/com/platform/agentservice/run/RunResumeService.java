@@ -26,8 +26,8 @@ import java.util.Set;
  * "활성 run 중복" 가드와 동시성 집계에 계속 걸리기 때문이다.
  *
  * <p><b>FAILED도 재개 대상인 이유(최종 리뷰 I1)</b>: 정상 경로에서는 워커가 스스로
- * {@code report_result(FAILED)}로 종결해도 {@code RunService.applyOutcome}이 곧바로 재시도
- * continuation이나 BLOCKED로 옮기므로 FAILED에 오래 머물지 않는다. 하지만 그 처리 자체가
+ * {@code report_result(FAILED)}로 종결해도 {@code RunService.applyOutcome}이 곧바로
+ * BLOCKED로 옮기므로(P3d — 사고형 즉시 중단) FAILED에 오래 머물지 않는다. 하지만 그 처리 자체가
  * 예외로 실패하는 잔여 케이스(예: DB 순간 장애)에서는 run이 FAILED에 멈출 수 있다 — 그때
  * 사람이 여전히 손 놓지 않도록 이 경로도 FAILED를 받아들인다.
  *

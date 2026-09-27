@@ -62,7 +62,7 @@ class RunResumeServiceTest {
         ReflectionTestUtils.setField(run, "id", id);
         run.start("/work", 1L);
         run.fail("boom");
-        run.block("3회 실패 — 사람 확인 필요");
+        run.block("사고형 실패 — 즉시 중단: boom");
         return run;
     }
 
@@ -105,7 +105,7 @@ class RunResumeServiceTest {
         assertThat(original.getError()).contains("사람 확인 후 재개").contains("11");
         // AGP-53: 재개 노트가 멈춘 원인(최초 실패 → BLOCKED 사유)을 지우지 않고 뒤에 붙는다.
         assertThat(original.getError()).startsWith("boom");
-        assertThat(original.getError().indexOf("3회 실패 — 사람 확인 필요"))
+        assertThat(original.getError().indexOf("사고형 실패 — 즉시 중단: boom"))
                 .isLessThan(original.getError().indexOf("사람 확인 후 재개"));
 
         ArgumentCaptor<Run> savedCaptor = ArgumentCaptor.forClass(Run.class);
@@ -139,7 +139,7 @@ class RunResumeServiceTest {
 
     /**
      * 최종 리뷰 I1: 워커가 스스로 report_result(FAILED)로 종결한 뒤 {@code
-     * RunService.handleRetryOrBlock}이 예외로 실패해 run이 FAILED에 멈춘 잔여 케이스를
+     * RunService.blockIncident}가 예외로 실패해 run이 FAILED에 멈춘 잔여 케이스를
      * 흉내낸다 — 이 경로도 게이트 없이 사람이 재개할 수 있어야 한다(BLOCKED와 동일 패턴).
      */
     @Test
@@ -168,6 +168,44 @@ class RunResumeServiceTest {
 
         verify(runService).execute(21L);
         verify(almClient).addComment(eq(1L), contains("사람 확인 후 재개"), eq(BEARER));
+    }
+
+    /**
+     * P3d(D-P3d-2): 반려 한도 소진으로 BLOCKED된 REVIEW를 사람이 재개하면 continuation이 반려 누적을 그대로 싣는다 — 재개가
+     * 예산을 초기화하면 한도를 넘긴 계보가 자동 수정 두 번을 다시 받는다.
+     */
+    @Test
+    void resume_of_a_reject_limit_blocked_review_keeps_the_reject_count() {
+        Run task = Run.queued(RunType.TASK, ISSUE_KEY, 1L, PERSONA_ID, RunTrigger.SCHEDULER, "harness://default", null);
+        ReflectionTestUtils.setField(task, "id", 29L);
+        ReflectionTestUtils.setField(task, "rejectCount", 2);
+        task.start("/work", 1L);
+        task.complete();
+        Run review = Run.queuedReview(task, PERSONA_ID, null);
+        ReflectionTestUtils.setField(review, "id", 30L);
+        review.start("pending", 1L);
+        review.fail("반려: 또 누락");
+        review.block("반려 한도 2회 소진 — 사람 확인 필요");
+        when(runRepository.findById(30L)).thenReturn(Optional.of(review));
+        when(runRepository.save(any(Run.class))).thenAnswer(inv -> {
+            Run r = inv.getArgument(0);
+            if (r.getId() == null) {
+                ReflectionTestUtils.setField(r, "id", 31L);
+            }
+            return r;
+        });
+        stubComment();
+
+        runResumeService.resume(30L);
+
+        ArgumentCaptor<Run> savedCaptor = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository).save(savedCaptor.capture());
+        Run continuationRun = savedCaptor.getValue();
+        assertThat(continuationRun.getType()).isEqualTo(RunType.REVIEW);
+        assertThat(continuationRun.getRejectCount()).isEqualTo(2);
+        assertThat(continuationRun.getParentRunId()).isEqualTo(29L);
+        assertThat(continuationRun.getWorkspacePath()).isEqualTo("/work");
+        verify(runService).execute(31L);
     }
 
     @Test

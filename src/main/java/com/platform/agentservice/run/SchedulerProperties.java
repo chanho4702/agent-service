@@ -8,8 +8,9 @@ import java.util.Map;
 /**
  * 디스패처 스케줄러 설정(P2a T4) — {@code platform.agent.scheduler.*}. {@link #enabled()}
  * 기본값은 반드시 false다(킬스위치) — 무인 루프가 실수로 켜진 채 배포되지 않게 한다.
- * {@link #retryMaxAttempts()}는 {@link Run#getAttempt()}와 비교하는 상한이다(재시도
- * 포함 최대 시도 횟수 — attempt=1이 최초 시도).
+ * <p><b>{@link #retryMaxAttempts()}는 폐기됐다(P3d, 2026-09-27 AGP-55)</b> — 사고형 실패는 재시도 없이 즉시 BLOCKED이고
+ * 리뷰 반려 예산은 {@link ReviewProperties#rejectMax()}가 따로 센다. 기존 배포의 {@code SCHEDULER_RETRY_MAX_ATTEMPTS}가
+ * 기동을 깨지 않도록 바인딩만 남겨 두며, 코드는 이 값을 읽지 않는다.
  *
  * <p>{@link #defaultModel()}·{@link #projectModels()}는 자동화 run의 모델 정책이다(P2c, D-P2c-5).
  * {@link #projectModels()}는 {@code WorkerProperties.repos()}와 같은 이유(env var 주입 시 Spring

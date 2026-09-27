@@ -1,5 +1,7 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.alert.AlertKind;
+import com.platform.agentservice.alert.AlertService;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.IssueResponse;
@@ -21,8 +23,11 @@ import java.util.Optional;
  * {@code report_result}로 스스로 종결한 경우와 프로세스 성공으로 종결한 경우가 합류하는 지점이다.
  * {@code report_result} 도구 쪽에서 부르지 않는 이유: 그 시점엔 워커 프로세스가 아직 살아 있어 같은
  * 워크스페이스를 두 프로세스가 동시에 쓰게 되고, 워크스페이스 실경로도 프로세스 종료 후에야 기록돼
- * ("pending") 리뷰가 항상 fail-closed로 떨어진다. 반려(FAILED)는 합류점이 이미 재시도 판단을 하므로
- * 도구 쪽에서 또 처리하면 반려-fix와 재시도 continuation이 이중으로 생긴다.
+ * ("pending") 리뷰가 항상 fail-closed로 떨어진다. 반려(FAILED)는 합류점이 이미 실패 판단을 하므로
+ * 도구 쪽에서 또 처리하면 반려-fix가 이중으로 생긴다.
+ *
+ * <p><b>반려 예산(P3d, D-P3d-2)</b>: 반려 횟수는 {@code run.reject_count}로 인프라 실패(attempt)와 따로 센다 — 반려는 리뷰어의
+ * 판정이라 "고치면 통과할" 여지가 있지만, 사고형 실패는 같은 조건에서 반복될 뿐이라 재시도 없이 중단한다(RunService).
  *
  * <p><b>순환 의존</b>: {@link RunService}가 이 서비스를 호출하고, 이 서비스는 새 run 실행을
  * {@link RunService#execute}(@Async)로 제출해야 한다. 생성자 주입끼리는 순환이라 스프링이 거부하고,
@@ -40,11 +45,13 @@ public class ReviewService {
     private final ReviewProperties reviewProperties;
     private final SchedulerProperties schedulerProperties;
     private final MeetingService meetingService;
+    private final AlertService alertService;
     private final ObjectProvider<RunService> runServiceProvider;
 
     public ReviewService(RunRepository runRepository, PersonaRepository personaRepository, TokenService tokenService,
                          AlmClient almClient, ReviewProperties reviewProperties, SchedulerProperties schedulerProperties,
-                         MeetingService meetingService, ObjectProvider<RunService> runServiceProvider) {
+                         MeetingService meetingService, AlertService alertService,
+                         ObjectProvider<RunService> runServiceProvider) {
         this.runRepository = runRepository;
         this.personaRepository = personaRepository;
         this.tokenService = tokenService;
@@ -52,7 +59,13 @@ public class ReviewService {
         this.reviewProperties = reviewProperties;
         this.schedulerProperties = schedulerProperties;
         this.meetingService = meetingService;
+        this.alertService = alertService;
         this.runServiceProvider = runServiceProvider;
+        if (reviewProperties.rejectAlertAt() != null && reviewProperties.rejectAlertAt() > reviewProperties.rejectMax()) {
+            // 임계가 한도보다 크면 그 전에 BLOCKED로 끝나 임계 알림은 영영 오지 않는다 — 한도 소진 알림만 남는다.
+            log.warn("platform.agent.review.reject-alert-at({})이 reject-max({})보다 큽니다 — 반려 임계 알림은 동작하지 않고 한도 소진 알림만 옵니다",
+                    reviewProperties.rejectAlertAt(), reviewProperties.rejectMax());
+        }
     }
 
     /**
@@ -93,8 +106,8 @@ public class ReviewService {
     /**
      * 리뷰어가 {@code report_result(FAILED)}로 반려한 REVIEW run의 후처리 — 원 TASK run을 이어 같은 워크스페이스에서
      * 원 페르소나가 지적을 고치는 fix run을 띄운다(D-P2c-2). 지적 코멘트는 fix run 프롬프트의 최근 코멘트로 유입된다.
-     * 이어갈 수 없으면(한도 소진·원 run 소실·워크스페이스 없음) 반려 run을 BLOCKED로 올려 사람에게 넘긴다 — 이슈는
-     * inprogress에 남는다.
+     * 이어갈 수 없으면(반려 한도 소진·원 run 소실·워크스페이스 없음) 반려 run을 BLOCKED로 올려 사람에게 넘긴다 — 이슈는
+     * inprogress에 남는다. 반려 누적이 알림 임계에 닿으면 fix는 그대로 띄우고 메일만 보낸다(D-P3d-4c).
      */
     public void onReviewRejected(Run reviewRun) {
         if (reviewRun.getType() != RunType.REVIEW) {
@@ -110,21 +123,26 @@ public class ReviewService {
             blockRejected(reviewRun, "반려됐지만 원 작업 워크스페이스가 없음 — 사람 확인 필요");
             return;
         }
-        int maxAttempts = schedulerProperties.retryMaxAttempts();
-        int nextAttempt = task.getAttempt() + 1;
-        if (nextAttempt > maxAttempts) {
-            String reason = "리뷰 반려 — 시도 한도 " + maxAttempts + "회 소진, 사람 확인 필요";
-            blockRejected(reviewRun, reason);
+        int rejectMax = reviewProperties.rejectMax();
+        int newCount = task.getRejectCount() + 1;
+        if (newCount > rejectMax) {
+            String reason = "반려 한도 " + rejectMax + "회 소진 — 사람 확인 필요";
+            blockRejected(reviewRun, reason, AlertKind.REJECT_LIMIT);
             safelyEscalate(reviewRun, reason);
             return;
         }
 
-        Run fix = runRepository.save(Run.fixContinuation(task, reviewRun.getId()));
-        log.info("검증 run={} 반려 → 수정 run={} 생성(원 run={}, attempt {}/{})",
-                reviewRun.getId(), fix.getId(), task.getId(), fix.getAttempt(), maxAttempts);
+        Run fix = runRepository.save(Run.fixContinuation(task, reviewRun.getId(), newCount));
+        log.info("검증 run={} 반려 → 수정 run={} 생성(원 run={}, 반려 {}/{})",
+                reviewRun.getId(), fix.getId(), task.getId(), newCount, rejectMax);
         submit(fix.getId());
+        boolean alert = newCount >= reviewProperties.effectiveRejectAlertAt();
         commentBestEffort(reviewRun.getPersonaId(), reviewRun.getIssueKey(), "🔁 리뷰 반려 — 수정 run " + fix.getId()
-                + " 시작(" + fix.getAttempt() + "/" + maxAttempts + "), 위 지적사항을 반영합니다.");
+                + " 시작(반려 " + newCount + "/" + rejectMax + "), 위 지적사항을 반영합니다."
+                + (alert ? " ⚠️ 반려 알림 임계 도달 — 운영자에게 알렸습니다." : ""));
+        if (alert) {
+            alertService.notifyRejectThreshold(reviewRun, newCount, rejectMax, fix.getId());
+        }
     }
 
     // ---- 내부 ----
@@ -162,12 +180,17 @@ public class ReviewService {
                 "⚠️ 검증 run을 만들 수 없음(" + reason + ") — 이슈는 미확정(inprogress)으로 남습니다. 사람이 확인하세요.");
     }
 
-    /** FAILED → BLOCKED는 합법 전이다. BLOCKED는 활성 상태라 같은 이슈가 사람 확인 전에 재픽업되지 않는다. */
     private void blockRejected(Run reviewRun, String reason) {
+        blockRejected(reviewRun, reason, AlertKind.LINEAGE_BROKEN);
+    }
+
+    /** FAILED → BLOCKED는 합법 전이다. BLOCKED는 활성 상태라 같은 이슈가 사람 확인 전에 재픽업되지 않는다. */
+    private void blockRejected(Run reviewRun, String reason, AlertKind kind) {
         log.warn("검증 run={} 반려 후속 불가: {}", reviewRun.getId(), reason);
         reviewRun.block(reason);
         runRepository.save(reviewRun);
         commentBestEffort(reviewRun.getPersonaId(), reviewRun.getIssueKey(), "⛔ " + reason);
+        alertService.notifyBlocked(reviewRun, reason, kind);
     }
 
     /** 반려 run의 BLOCKED는 이미 커밋됐다 — 자동 에스컬레이션(D-P3b-4③) 실패는 삼킨다. */

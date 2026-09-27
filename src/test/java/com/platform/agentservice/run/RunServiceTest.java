@@ -1,5 +1,7 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.alert.AlertKind;
+import com.platform.agentservice.alert.AlertService;
 import com.platform.agentservice.budget.BudgetProperties;
 import com.platform.agentservice.budget.LedgerScope;
 import com.platform.agentservice.budget.UsageLedger;
@@ -25,10 +27,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
-import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
-import org.springframework.core.task.TaskRejectedException;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.math.BigDecimal;
@@ -72,9 +72,7 @@ class RunServiceTest {
     @Mock BudgetGuard budgetGuard;
     @Mock ReviewService reviewService;
     @Mock MeetingService meetingService;
-    /** 자기 지연 조회가 돌려주는 {@code @Async} 프록시 대역 — 재시도 제출을 관찰만 하고 실행하지 않는다. */
-    @Mock ObjectProvider<RunService> selfProvider;
-    @Mock RunService selfProxy;
+    @Mock AlertService alertService;
 
     private RunService runService;
     private SchedulerProperties schedulerProperties;
@@ -89,7 +87,7 @@ class RunServiceTest {
         budgetProperties = new BudgetProperties(new BigDecimal("100"), new BigDecimal("5"));
         runService = new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, schedulerProperties, budgetProperties,
-                commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
+                commitLinkParser, budgetGuard, reviewService, meetingService, alertService);
 
         Persona persona = Persona.of(PERSONA_MEMBER_ID, "jiho", PersonaRole.BACKEND, "지호", "🔧", null);
         ReflectionTestUtils.setField(persona, "id", PERSONA_ID);
@@ -99,7 +97,6 @@ class RunServiceTest {
         org.mockito.Mockito.lenient().when(commitLinkParser.parse(any())).thenReturn(List.of());
         // 기본은 킬 스위치/예산 캡 통과 — I3 전용 테스트만 false로 재스텁한다.
         org.mockito.Mockito.lenient().when(budgetGuard.allow(anyLong())).thenReturn(true);
-        org.mockito.Mockito.lenient().when(selfProvider.getObject()).thenReturn(selfProxy);
     }
 
     private Run queuedRun(long id) {
@@ -113,12 +110,12 @@ class RunServiceTest {
                 1L, null, null, null, null, null, null, List.of(), List.of(), 0L, version, null, null, null);
     }
 
-    /** 새로 저장되는(id 없는) run에 부여하는 id — 재시도 제출 대상 식별용. */
+    /** 새로 저장되는(id 없는) run에 부여하는 id — continuation이 생기면 이 id로 드러난다. */
     private static final long NEW_RUN_ID = 900L;
 
     /**
      * save()를 호출자에게 넘겨받은 인자 그대로 반환하도록 스텁 — 상태 전이 후 값을 그대로 관찰할 수 있게 한다.
-     * 새 run(continuation 등)에는 실제 저장처럼 id를 부여한다 — 재시도 제출이 그 id로 이뤄지기 때문이다.
+     * 새 run(continuation 등)에는 실제 저장처럼 id를 부여한다 — "새 run이 저장되지 않았다"를 id로 단언할 수 있게.
      */
     private void stubSaveReturnsArgument() {
         when(runRepository.save(any(Run.class))).thenAnswer(inv -> {
@@ -161,7 +158,7 @@ class RunServiceTest {
                 "Read,Edit,Write", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of());
         return new RunService(runRepository, almClient, issueClaimSupport, tokenService, personaRepository,
                 workerLauncher, workerProperties, usageLedgerRepository, props, budgetProperties,
-                commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
+                commitLinkParser, budgetGuard, reviewService, meetingService, alertService);
     }
 
     @Test
@@ -579,12 +576,12 @@ class RunServiceTest {
     /**
      * 최종 리뷰 I1: 워커가 launch() 반환 전에 MCP report_result(status=FAILED)로 스스로
      * 종결했으면(자가-DONE과 같은 패턴, 여기선 자가-FAILED) 재조회 시 상태가 FAILED다.
-     * 예전에는 "RUNNING 아니면 물러난다" 가드에 걸려 여기서 그냥 반환해 재시도/BLOCKED
-     * 승격이 전혀 안 됐다 — 그 run은 FAILED에 영원히 멈췄다. 이제는 재시도 continuation이
-     * 생겨야 한다(attempt=1 < 한도 3).
+     * 예전에는 "RUNNING 아니면 물러난다" 가드에 걸려 여기서 그냥 반환해 BLOCKED 승격이 전혀 안 됐다 —
+     * 그 run은 FAILED에 영원히 멈췄다. P2a~P3c는 재시도 continuation(attempt 2/3)을 만들었고, P3d부터는
+     * 첫 실패에서 continuation 없이 BLOCKED다(사고형 즉시 중단).
      */
     @Test
-    void execute_self_reported_failed_status_is_no_longer_a_dead_end_and_creates_continuation() {
+    void execute_self_reported_failed_blocks_immediately_without_a_retry_continuation() {
         Run run = queuedRun(42L);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
         stubSaveReturnsArgument();
@@ -605,12 +602,28 @@ class RunServiceTest {
 
         runService.execute(42L);
 
-        ArgumentCaptor<Run> savedCaptor = ArgumentCaptor.forClass(Run.class);
-        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(savedCaptor.capture());
-        boolean continuationSaved = savedCaptor.getAllValues().stream()
-                .anyMatch(r -> r != run && r.getStatus() == RunStatus.QUEUED && r.getAttempt() == 2);
-        assertThat(continuationSaved).isTrue();
-        verify(almClient).addComment(eq(1L), eq("🔁 재시도 2/3"), eq(BEARER));
+        assertIncidentBlocked(run, "워커가 실패를 보고함(report_result FAILED)");
+        assertThat(run.getError()).startsWith("워커가 스스로 실패로 보고함"); // 원인이 앞, 차단 사유가 뒤(AGP-53)
+        verify(almClient).addComment(eq(1L),
+                eq("⛔ " + INCIDENT + "워커가 실패를 보고함(report_result FAILED) — 사람 확인 후 재개(/resume)가 필요합니다."), eq(BEARER));
+    }
+
+    private static final String INCIDENT = "사고형 실패 — 즉시 중단: ";
+
+    /**
+     * P3d(D-P3d-1) 사고형 즉시 중단의 공통 단언 — BLOCKED, continuation 없음(저장된 run이 전부 원 run), 알림 정확히 1회,
+     * 자동 에스컬레이션 훅 1회. P2a의 "재시도 N/M" continuation이 더는 생기지 않음을 반증 방향으로 고정한다.
+     */
+    private void assertIncidentBlocked(Run run, String cause) {
+        assertThat(run.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        assertThat(run.getError()).contains(INCIDENT + cause);
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        assertThat(saved.getAllValues()).allSatisfy(r -> assertThat(r.getId()).isEqualTo(run.getId()));
+        assertThat(saved.getAllValues()).noneMatch(r -> r.getStatus() == RunStatus.QUEUED);
+        verify(alertService, times(1)).notifyBlocked(eq(run), eq(INCIDENT + cause), eq(AlertKind.INCIDENT));
+        verify(meetingService, times(1)).onBlocked(run, INCIDENT + cause);
+        verify(almClient, never()).addComment(anyLong(), org.mockito.ArgumentMatchers.startsWith("🔁"), anyString());
     }
 
     // ---- execute: 최종 리뷰 I2 — applyOutcome 사전 단계 방어(원장 기록 실패가 run을 좌초시키면 안 됨) ----
@@ -650,7 +663,7 @@ class RunServiceTest {
 
         runService.execute(42L);
 
-        // QUEUED 그대로 — 킬 스위치/캡이 풀리면 다음 드레인 틱이 재시도한다(재시도 카운트 소모 없음).
+        // QUEUED 그대로 — 킬 스위치/캡이 풀리면 다음 드레인 틱이 다시 집어간다(실패로 치지 않는다).
         assertThat(run.getStatus()).isEqualTo(RunStatus.QUEUED);
         verify(workerLauncher, never()).launch(any(), any());
         verify(issueClaimSupport, never()).claim(anyString(), anyLong(), anyString(), anyString());
@@ -843,7 +856,7 @@ class RunServiceTest {
     // ---- execute: timeout ----
 
     @Test
-    void execute_timeout_fails_run_and_creates_continuation_with_retry_comment() {
+    void execute_timeout_blocks_run_immediately_without_retry_continuation() {
         Run run = queuedRun(42L);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
         stubSaveReturnsArgument();
@@ -860,26 +873,19 @@ class RunServiceTest {
 
         runService.execute(42L);
 
-        assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
-        assertThat(run.getError()).isEqualTo("시간 초과");
-
-        ArgumentCaptor<Run> savedCaptor = ArgumentCaptor.forClass(Run.class);
-        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(savedCaptor.capture());
-        boolean continuationSaved = savedCaptor.getAllValues().stream()
-                .anyMatch(r -> r != run && r.getStatus() == RunStatus.QUEUED && r.getAttempt() == 2);
-        assertThat(continuationSaved).isTrue();
-
-        verify(almClient).addComment(eq(1L), eq("🔁 재시도 2/3"), eq(BEARER));
+        assertIncidentBlocked(run, "시간 초과");
+        assertThat(run.getError()).startsWith("시간 초과");
     }
 
-    // ---- execute: attempt hits max -> BLOCKED ----
+    // ---- execute: attempt는 더는 예산이 아니다(P3d) — 첫 시도에서도 실패하면 곧바로 BLOCKED ----
 
     @Test
-    void execute_failure_at_max_attempts_blocks_run_with_escalation_comment() {
-        Run third = queuedRun(3L);
-        ReflectionTestUtils.setField(third, "attempt", 3); // retryMaxAttempts와 동일 — 더 이상 재시도하지 않는다
+    void execute_first_attempt_failure_blocks_without_consulting_the_deprecated_retry_cap() {
+        Run first = queuedRun(3L);
+        // SCHEDULER_RETRY_MAX_ATTEMPTS=3이 설정돼 있어도(schedulerProperties) attempt=1 < 3에서 재시도하지 않는다.
+        assertThat(first.getAttempt()).isEqualTo(1);
 
-        when(runRepository.findById(3L)).thenReturn(Optional.of(third));
+        when(runRepository.findById(3L)).thenReturn(Optional.of(first));
         stubSaveReturnsArgument();
 
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
@@ -894,9 +900,8 @@ class RunServiceTest {
 
         runService.execute(3L);
 
-        assertThat(third.getStatus()).isEqualTo(RunStatus.BLOCKED);
-        verify(almClient).addComment(eq(1L), eq("⛔ 3회 실패 — 사람 확인 필요"), eq(BEARER));
-        verify(selfProxy, never()).execute(anyLong());
+        assertIncidentBlocked(first, "boom");
+        verify(almClient).addComment(eq(1L), eq("⛔ " + INCIDENT + "boom — 사람 확인 후 재개(/resume)가 필요합니다."), eq(BEARER));
     }
 
     // ---- execute: missing repo mapping ----
@@ -916,8 +921,9 @@ class RunServiceTest {
 
         runService.execute(55L);
 
-        assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
-        assertThat(run.getError()).contains("리포 매핑 없음");
+        // 준비 단계 실패도 사고형이다 — 설정 결함은 재시도해도 같은 이유로 또 죽는다.
+        assertThat(run.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        assertThat(run.getError()).contains(INCIDENT + "리포 매핑 없음: NOPROJ");
         verify(issueClaimSupport, never()).claim(anyString(), anyLong(), anyString(), anyString());
         verify(workerLauncher, never()).launch(any(), any());
     }
@@ -937,7 +943,7 @@ class RunServiceTest {
         RunService serviceWithLowercasedRepos = new RunService(runRepository, almClient, issueClaimSupport,
                 tokenService, personaRepository, workerLauncher, lowercasedRepos, usageLedgerRepository,
                 schedulerProperties, new com.platform.agentservice.budget.BudgetProperties(
-                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser, budgetGuard, reviewService, meetingService, selfProvider);
+                        new BigDecimal("100"), new BigDecimal("5")), commitLinkParser, budgetGuard, reviewService, meetingService, alertService);
 
         Run run = queuedRun(42L);
         when(runRepository.findById(42L)).thenReturn(Optional.of(run));
@@ -980,8 +986,7 @@ class RunServiceTest {
 
         runService.execute(42L);
 
-        assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
-        assertThat(run.getError()).contains("실행 인프라 오류").contains("워크스페이스 생성 실패");
+        assertIncidentBlocked(run, "실행 인프라 오류: 워크스페이스 생성 실패");
     }
 
     // ---- execute: run not found / not QUEUED ----
@@ -1132,7 +1137,7 @@ class RunServiceTest {
     }
 
     @Test
-    void review_self_reported_failed_is_a_rejection_not_an_infra_retry() {
+    void review_self_reported_failed_is_a_rejection_not_an_incident() {
         Run review = queuedReviewRun(60L);
         stubExecuteCollaborators(60L, review, false);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenAnswer(inv -> {
@@ -1144,10 +1149,12 @@ class RunServiceTest {
 
         verify(reviewService).onReviewRejected(review);
         verify(reviewService, never()).onRunDone(any());
-        // 재시도 continuation이 같이 생기면 반려-fix와 이중 실행된다.
+        // 사고형 중단(BLOCKED)이나 continuation이 같이 생기면 반려-fix와 충돌한다.
         ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
         verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
         assertThat(saved.getAllValues()).allSatisfy(r -> assertThat(r.getId()).isEqualTo(60L));
+        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED); // 반려 후속(BLOCKED/fix)은 ReviewService 몫
+        verify(alertService, never()).notifyBlocked(any(), anyString(), any());
     }
 
     @Test
@@ -1166,22 +1173,23 @@ class RunServiceTest {
     }
 
     @Test
-    void review_exiting_without_a_verdict_is_not_a_pass_and_retries_on_the_same_workspace() {
+    void review_exiting_without_a_verdict_is_not_a_pass_and_blocks_as_an_incident() {
         Run review = queuedReviewRun(60L);
         stubExecuteCollaborators(60L, review, false);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class))).thenReturn(success(REVIEW_WORKSPACE));
 
         runService.execute(60L);
 
-        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
-        assertThat(review.getError()).contains("판정");
+        assertIncidentBlocked(review, "리뷰 판정(report_result) 없이 종료");
         verify(reviewService, never()).onRunDone(any());
         verify(reviewService, never()).onReviewRejected(any());
-        assertReviewRetryInheritsWorkspace();
+        // 사람 재개 시 워크스페이스·계보가 이어지도록 BLOCKED 행이 그대로 보존된다(재개 승계는 RunLineageTest).
+        assertThat(review.getWorkspacePath()).isEqualTo(REVIEW_WORKSPACE);
+        assertThat(review.getParentRunId()).isEqualTo(10L);
     }
 
     @Test
-    void review_infra_timeout_retry_inherits_workspace_and_parent() {
+    void review_infra_timeout_blocks_without_a_retry_continuation() {
         Run review = queuedReviewRun(60L);
         stubExecuteCollaborators(60L, review, false);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
@@ -1189,27 +1197,14 @@ class RunServiceTest {
 
         runService.execute(60L);
 
-        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
+        assertIncidentBlocked(review, "시간 초과");
         verify(reviewService, never()).onReviewRejected(any());
-        assertReviewRetryInheritsWorkspace();
     }
 
-    private void assertReviewRetryInheritsWorkspace() {
-        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
-        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
-        Run retry = saved.getAllValues().stream()
-                .filter(r -> r.getStatus() == RunStatus.QUEUED && r.getAttempt() == 2).findFirst().orElseThrow();
-        assertThat(retry.getType()).isEqualTo(RunType.REVIEW);
-        assertThat(retry.getAttempt()).isEqualTo(2);
-        assertThat(retry.getWorkspacePath()).isEqualTo(REVIEW_WORKSPACE);
-        assertThat(retry.getParentRunId()).isEqualTo(10L);
-        verify(selfProxy).execute(NEW_RUN_ID);
-    }
-
-    // ---- 최종 리뷰 I2: 재시도 continuation은 드레인 없이도(스케줄러 off) 곧바로 제출된다 ----
+    // ---- P3d: USER run도 예외 없이 사고형 즉시 중단 — 지시문은 BLOCKED 행에 남아 사람 재개 시 승계된다 ----
 
     @Test
-    void user_run_retry_is_submitted_directly_through_the_async_proxy_without_waiting_for_a_drain() {
+    void user_run_failure_blocks_without_submitting_a_retry_and_keeps_the_instruction_for_resume() {
         Run run = Run.queuedUser(ISSUE_KEY, PROJECT_ID, PERSONA_ID, "harness://default", null, "로그인 먼저");
         ReflectionTestUtils.setField(run, "id", 70L);
         stubExecuteCollaborators(70L, run, true);
@@ -1218,40 +1213,30 @@ class RunServiceTest {
 
         runService.execute(70L);
 
-        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
-        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
-        Run retry = saved.getAllValues().stream()
-                .filter(r -> r.getStatus() == RunStatus.QUEUED && r.getAttempt() == 2).findFirst().orElseThrow();
-        assertThat(retry.getId()).isEqualTo(NEW_RUN_ID);
-        assertThat(retry.getInstruction()).isEqualTo("로그인 먼저");
-        verify(selfProxy).execute(NEW_RUN_ID);
-        verify(selfProvider).getObject();
+        assertIncidentBlocked(run, "boom");
+        assertThat(run.getInstruction()).isEqualTo("로그인 먼저");
+        assertThat(Run.continuation(run).getInstruction()).isEqualTo("로그인 먼저");
     }
 
     /**
-     * 거부가 새면 applyOutcome 바깥 catch가 "결과 반영 오류" 폴백을 부른다 — 그 폴백은 run이 이미 FAILED라
-     * finishFailed 가드에서 조용히 돌아가므로 상태·error·continuation만 봐서는 catch 유무를 구분할 수 없다.
-     * 그래서 폴백 경로 진입 로그가 없고 거부 삼킴 로그가 있는지를 관찰점으로 삼는다.
+     * 차단 경로가 예외 없이 끝나는지의 관찰점 — 새면 applyOutcome 바깥 catch가 "결과 반영 오류" 폴백을 부르는데, 그 폴백은
+     * run이 이미 BLOCKED라 finishFailed 가드에서 조용히 돌아가 상태만 봐서는 구분이 안 된다. P2a의 "재시도 제출 거부 삼킴"
+     * 로그는 제출 자체가 사라져 더는 나오지 않는다.
      */
     @Test
     @ExtendWith(OutputCaptureExtension.class)
-    void rejected_retry_submission_is_swallowed_and_leaves_the_continuation_queued(CapturedOutput output) {
+    void incident_block_path_completes_without_the_fallback_and_never_submits_a_retry(CapturedOutput output) {
         Run run = queuedRun(71L);
         stubExecuteCollaborators(71L, run, true);
         when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
                 .thenReturn(WorkerResult.failure(1, false, "boom", null));
-        org.mockito.Mockito.doThrow(new TaskRejectedException("pool full")).when(selfProxy).execute(anyLong());
 
         runService.execute(71L);
 
         assertThat(output.getOut()).doesNotContain("결과 반영 중 예기치 못한 오류");
-        assertThat(output.getOut()).contains("재시도 run 실행 제출이 거부돼 QUEUED로 남깁니다");
-        assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
-        assertThat(run.getError()).isEqualTo("boom");
-        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
-        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
-        assertThat(saved.getAllValues()).anyMatch(r -> r != run && r.getStatus() == RunStatus.QUEUED && r.getAttempt() == 2);
-        verify(selfProxy).execute(NEW_RUN_ID);
+        assertThat(output.getOut()).doesNotContain("재시도 run 실행 제출");
+        assertThat(run.getError()).startsWith("boom");
+        assertIncidentBlocked(run, "boom");
     }
 
     @Test
@@ -1334,7 +1319,7 @@ class RunServiceTest {
     }
 
     @Test
-    void meeting_run_that_exits_without_report_result_fails_instead_of_completing() {
+    void meeting_run_that_exits_without_report_result_blocks_instead_of_completing_or_retrying() {
         Run run = queuedMeetingRun(81L, "AGP-9");
         when(runRepository.findById(81L)).thenReturn(Optional.of(run));
         stubSaveReturnsArgument();
@@ -1345,19 +1330,13 @@ class RunServiceTest {
 
         runService.execute(81L);
 
-        assertThat(run.getStatus()).isEqualTo(RunStatus.FAILED);
-        assertThat(run.getError()).contains("회의록 보고(report_result) 없이 종료");
+        assertIncidentBlocked(run, "회의록 보고(report_result) 없이 종료");
         verify(reviewService, never()).onRunDone(any());
-        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
-        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
-        assertThat(saved.getAllValues()).anyMatch(r -> r != run && r.getType() == RunType.MEETING
-                && r.getStatus() == RunStatus.QUEUED && r.getParentRunId() != null && r.getParentRunId() == 81L);
     }
 
     @Test
-    void blocking_at_retry_limit_hands_the_run_to_auto_escalation() {
+    void incident_block_hands_the_run_to_auto_escalation_on_the_first_failure() {
         Run third = queuedRun(3L);
-        ReflectionTestUtils.setField(third, "attempt", 3);
         when(runRepository.findById(3L)).thenReturn(Optional.of(third));
         stubSaveReturnsArgument();
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
@@ -1370,13 +1349,12 @@ class RunServiceTest {
         runService.execute(3L);
 
         assertThat(third.getStatus()).isEqualTo(RunStatus.BLOCKED);
-        verify(meetingService).onBlocked(third, "3회 실패 — 사람 확인 필요");
+        verify(meetingService).onBlocked(third, INCIDENT + "boom");
     }
 
     @Test
     void auto_escalation_failure_is_swallowed_and_run_stays_blocked() {
         Run third = queuedRun(3L);
-        ReflectionTestUtils.setField(third, "attempt", 3);
         when(runRepository.findById(3L)).thenReturn(Optional.of(third));
         stubSaveReturnsArgument();
         IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
@@ -1391,5 +1369,6 @@ class RunServiceTest {
 
         assertThat(third.getStatus()).isEqualTo(RunStatus.BLOCKED);
         assertThat(third.getError()).doesNotContain("결과 반영 오류");
+        verify(alertService, times(1)).notifyBlocked(eq(third), eq(INCIDENT + "boom"), eq(AlertKind.INCIDENT));
     }
 }

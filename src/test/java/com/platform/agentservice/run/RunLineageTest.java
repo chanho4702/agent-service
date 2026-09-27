@@ -104,7 +104,7 @@ class RunLineageTest {
     }
 
     @Test
-    void review_retry_continuation_keeps_the_instruction() {
+    void review_resume_continuation_keeps_the_instruction() {
         Run review = Run.queuedReview(doneTask(RunTrigger.USER, "지시", 1), 77L, null);
         ReflectionTestUtils.setField(review, "id", 11L);
         review.start("pending", 9L);
@@ -137,7 +137,7 @@ class RunLineageTest {
     void fixContinuation_keeps_persona_instruction_and_workspace_bumps_attempt_and_links_review() {
         Run task = doneTask(RunTrigger.USER, "로그인 버그부터 고쳐", 2);
 
-        Run fix = Run.fixContinuation(task, 11L);
+        Run fix = Run.fixContinuation(task, 11L, 1);
 
         assertThat(fix.getType()).isEqualTo(RunType.TASK);
         assertThat(fix.getIssueKey()).isEqualTo("AGP-4");
@@ -150,6 +150,7 @@ class RunLineageTest {
         assertThat(fix.getWorkspacePath()).isEqualTo(WORKSPACE);
         assertThat(fix.getParentRunId()).isEqualTo(11L);
         assertThat(fix.getAttempt()).isEqualTo(3);
+        assertThat(fix.getRejectCount()).isEqualTo(1); // 반려 예산은 호출자가 계산해 넘긴 값(D-P3d-2)
         assertThat(fix.getStatus()).isEqualTo(RunStatus.QUEUED);
     }
 
@@ -159,15 +160,15 @@ class RunLineageTest {
         Run review = Run.queuedReview(task, 77L, null);
         review.start("pending", 9L);
         review.complete();
-        assertThatThrownBy(() -> Run.fixContinuation(review, 11L)).isInstanceOf(ConflictException.class);
+        assertThatThrownBy(() -> Run.fixContinuation(review, 11L, 1)).isInstanceOf(ConflictException.class);
 
         Run running = Run.queued(RunType.TASK, "AGP-4", 1L, 2L, RunTrigger.SCHEDULER, "harness://default", null);
         running.start("pending", 9L);
-        assertThatThrownBy(() -> Run.fixContinuation(running, 11L)).isInstanceOf(ConflictException.class);
+        assertThatThrownBy(() -> Run.fixContinuation(running, 11L, 1)).isInstanceOf(ConflictException.class);
     }
 
     @Test
-    void retry_continuation_still_starts_from_a_fresh_workspace() {
+    void resume_continuation_of_a_plain_task_still_starts_from_a_fresh_workspace() {
         Run failed = Run.queued(RunType.TASK, "AGP-4", 1L, 2L, RunTrigger.SCHEDULER, "harness://default", null);
         failed.start("pending", 9L);
         failed.recordWorkspace(WORKSPACE);
@@ -179,11 +180,13 @@ class RunLineageTest {
         assertThat(retry.getParentRunId()).isNull();
     }
 
-    // ---- continuation: 계보 run의 재시도는 워크스페이스를 승계한다(P2c T3) ----
+    // ---- continuation: 계보 run의 사람 재개는 워크스페이스·반려 누적을 승계한다(P2c T3, P3d) ----
 
     @Test
-    void review_retry_continuation_inherits_workspace_and_parent_task() {
-        Run review = Run.queuedReview(doneTask(RunTrigger.SCHEDULER, null, 1), 77L, "claude-fable-5-1");
+    void review_resume_continuation_inherits_workspace_parent_task_and_reject_count() {
+        Run parent = doneTask(RunTrigger.SCHEDULER, null, 1);
+        ReflectionTestUtils.setField(parent, "rejectCount", 2);
+        Run review = Run.queuedReview(parent, 77L, "claude-fable-5-1");
         ReflectionTestUtils.setField(review, "id", 11L);
         review.start("pending", 9L);
         review.fail("시간 초과");
@@ -194,14 +197,16 @@ class RunLineageTest {
         assertThat(retry.getPersonaId()).isEqualTo(77L);
         assertThat(retry.getModel()).isEqualTo("claude-fable-5-1");
         assertThat(retry.getWorkspacePath()).isEqualTo(WORKSPACE);
-        // 재시도 후 반려돼도 원 TASK를 찾을 수 있어야 반려-fix가 이어진다.
+        // 재개 후 반려돼도 원 TASK를 찾을 수 있어야 반려-fix가 이어진다.
         assertThat(retry.getParentRunId()).isEqualTo(10L);
         assertThat(retry.getAttempt()).isEqualTo(2);
+        assertThat(review.getRejectCount()).isEqualTo(2);
+        assertThat(retry.getRejectCount()).isEqualTo(2);
     }
 
     @Test
-    void fix_run_retry_continuation_keeps_building_on_the_same_workspace() {
-        Run fix = Run.fixContinuation(doneTask(RunTrigger.SCHEDULER, null, 1), 11L);
+    void fix_run_resume_continuation_keeps_building_on_the_same_workspace_and_keeps_the_reject_count() {
+        Run fix = Run.fixContinuation(doneTask(RunTrigger.SCHEDULER, null, 1), 11L, 1);
         ReflectionTestUtils.setField(fix, "id", 12L);
         fix.start("pending", 9L);
         fix.fail("boom");
@@ -212,6 +217,8 @@ class RunLineageTest {
         assertThat(retry.getWorkspacePath()).isEqualTo(WORKSPACE);
         assertThat(retry.getParentRunId()).isEqualTo(11L);
         assertThat(retry.getAttempt()).isEqualTo(3);
+        // 사람 재개가 반려 예산을 초기화하면 BLOCKED가 "한 번 더"가 아니라 "처음부터 다시"가 된다.
+        assertThat(retry.getRejectCount()).isEqualTo(1);
     }
 
     @Test
@@ -221,17 +228,17 @@ class RunLineageTest {
 
         assertThat(plain.isWorkspaceLineage()).isFalse();
         assertThat(Run.queuedReview(task, 77L, null).isWorkspaceLineage()).isTrue();
-        assertThat(Run.fixContinuation(task, 11L).isWorkspaceLineage()).isTrue();
+        assertThat(Run.fixContinuation(task, 11L, 1).isWorkspaceLineage()).isTrue();
     }
 
     // ---- 계보 체인 전체(최종 리뷰 I3 — 격리 프로브로 검증한 체인 영구화) ----
 
     /**
-     * TASK → REVIEW 반려 → fix(att2) → REVIEW 게이트 승인 continuation → 반려 → fix2(att3) → 인프라 실패 BLOCKED
-     * → 사람 재개(att4) → REVIEW. 각 고리가 워크스페이스·계보(parentRunId)·attempt 카운터·USER 지시를 끊김 없이 잇는지 본다.
+     * TASK → REVIEW 반려 → fix(att2) → REVIEW 게이트 승인 continuation → 반려 → fix2(att3) → 사고형 즉시 BLOCKED
+     * → 사람 재개(att4) → REVIEW. 각 고리가 워크스페이스·계보(parentRunId)·attempt 순번·반려 누적·USER 지시를 끊김 없이 잇는지 본다.
      */
     @Test
-    void full_lineage_chain_keeps_workspace_parent_attempt_and_instruction_across_every_link() {
+    void full_lineage_chain_keeps_workspace_parent_attempt_reject_count_and_instruction_across_every_link() {
         long[] seq = {100};
         java.util.function.UnaryOperator<Run> persist = r -> {
             ReflectionTestUtils.setField(r, "id", seq[0]++);
@@ -252,9 +259,10 @@ class RunLineageTest {
         assertThat(review1.getWorkspacePath()).isEqualTo(WORKSPACE);
         review1.fail("반려");
 
-        // 반려-fix 1 — 원 TASK 카운터를 이어 att2
-        Run fix1 = persist.apply(Run.fixContinuation(task, review1.getId()));
+        // 반려-fix 1 — 원 TASK 순번을 이어 att2, 반려 누적 0 → 1
+        Run fix1 = persist.apply(Run.fixContinuation(task, review1.getId(), task.getRejectCount() + 1));
         assertThat(fix1.getAttempt()).isEqualTo(2);
+        assertThat(fix1.getRejectCount()).isEqualTo(1);
         assertThat(fix1.getParentRunId()).isEqualTo(review1.getId());
         assertThat(fix1.getInstruction()).isEqualTo(instruction);
         fix1.start("pending", 9L);
@@ -274,16 +282,19 @@ class RunLineageTest {
         assertThat(review2b.getParentRunId()).isEqualTo(fix1.getId());
         assertThat(review2b.getWorkspacePath()).isEqualTo(WORKSPACE);
         assertThat(review2b.getInstruction()).isEqualTo(instruction);
+        assertThat(review2.getRejectCount()).isEqualTo(1);
+        assertThat(review2b.getRejectCount()).isEqualTo(1);
         review2b.start("pending", 9L);
         review2b.fail("반려");
 
         // 반려-fix 2 — 게이트 continuation(review2b)의 parentRunId로 찾은 fix1에서 이어 att3
-        Run fix2 = persist.apply(Run.fixContinuation(fix1, review2b.getId()));
+        Run fix2 = persist.apply(Run.fixContinuation(fix1, review2b.getId(), fix1.getRejectCount() + 1));
         assertThat(fix2.getAttempt()).isEqualTo(3);
+        assertThat(fix2.getRejectCount()).isEqualTo(2);
         assertThat(fix2.getInstruction()).isEqualTo(instruction);
         fix2.start("pending", 9L);
         fix2.fail("인프라 실패");
-        fix2.block("3회 실패 — 사람 확인 필요");
+        fix2.block("사고형 실패 — 즉시 중단: 인프라 실패");
 
         // 사람 재개 — BLOCKED fix의 continuation도 같은 워크스페이스에서 이어 att4
         Run fix2b = persist.apply(Run.continuation(fix2));
@@ -292,6 +303,7 @@ class RunLineageTest {
         assertThat(fix2b.getWorkspacePath()).isEqualTo(WORKSPACE);
         assertThat(fix2b.getParentRunId()).isEqualTo(review2b.getId());
         assertThat(fix2b.getAttempt()).isEqualTo(4);
+        assertThat(fix2b.getRejectCount()).isEqualTo(2);
         assertThat(fix2b.getInstruction()).isEqualTo(instruction);
         fix2b.start("pending", 9L);
         fix2b.complete();
@@ -303,6 +315,7 @@ class RunLineageTest {
         assertThat(review3.getWorkspacePath()).isEqualTo(WORKSPACE);
         assertThat(review3.getInstruction()).isEqualTo(instruction);
         assertThat(review3.getAttempt()).isEqualTo(1);
+        assertThat(review3.getRejectCount()).isEqualTo(2);
     }
 
     // ---- start / recordWorkspace ----

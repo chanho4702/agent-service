@@ -192,8 +192,8 @@ public class MeetingService {
             log.warn("run={} 자동 에스컬레이션 건너뜀 — 참석할 활성 페르소나가 없습니다", blockedRun.getId());
             return;
         }
-        String instruction = issueKey + " " + schedulerProperties.retryMaxAttempts()
-                + "회 실패/반려 — 원인 분석과 사람에게 물을 질문 목록\n"
+        // 차단 원인(사고형 실패·반려 한도)은 reason이 말한다 — 재시도 횟수는 P3d부터 없는 개념이다.
+        String instruction = issueKey + " 자동 진행 중단 — 원인 분석과 사람에게 물을 질문 목록\n"
                 + "원 run: " + blockedRun.getId() + "(" + blockedRun.getType() + ")\n"
                 + "차단 사유: " + reason + "\n"
                 + "실패 기록(끝부분):\n" + tail(blockedRun.getError());
@@ -420,7 +420,7 @@ public class MeetingService {
 
     /**
      * PLAN 게이트 승인 뒤 이어받은 run이면 승인된 요청문. 회의 continuation은 직전 run을 부모로 잇는다({@link Run#continuation}) —
-     * 승인 run의 재시도도 계획을 잃지 않게 조상 사슬을 거슬러 찾는다.
+     * 승인 run이 중단된 뒤 사람이 재개해도 계획을 잃지 않게 조상 사슬을 거슬러 찾는다.
      */
     private String approvedPlan(Run run) {
         Long parentId = run.getParentRunId();

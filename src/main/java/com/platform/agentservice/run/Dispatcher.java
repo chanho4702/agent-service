@@ -21,7 +21,7 @@ import java.util.Set;
  * 그와 별개로 {@link #tick} 안에서도 {@code enabled} 킬스위치를 한 번 더 본다 — 런타임에
  * 끄고 켤 수 있는 값이 아니라(재기동 필요) 방어적 이중 확인일 뿐이다.
  *
- * <p>매 틱마다 두 가지를 한다: (1) 이미 QUEUED인 run(재시도로 만들어진 continuation
+ * <p>매 틱마다 두 가지를 한다: (1) 이미 QUEUED인 run(게이트 승인·재개·반려-fix continuation
  * 포함)을 드레인해서 실행시키고, (2) 전역 동시성 한도에 여유가 있으면 라벨 {@code auto}·
  * 상태 {@code todo}인 ALM 이슈 중 활성 run이 없는 것 하나를 새로 픽업한다(한 틱에 하나만
  * — 단순화, 브리핑 지시). 프로젝트별 동시성 한도·{@link BudgetGuard}는 픽업 단계에서만
@@ -66,7 +66,7 @@ public class Dispatcher {
     }
 
     /**
-     * 이미 QUEUED인 run(최초 대기분 + 재시도 continuation)을 전부 실행시킨다. run 단위로
+     * 이미 QUEUED인 run(최초 대기분 + continuation)을 전부 실행시킨다. run 단위로
      * try/catch한다(fix round 1, I2) — {@code execute()}가 {@code @Async} 스레드풀 포화로
      * {@link org.springframework.core.task.TaskRejectedException}을 던지면(풀+큐가 가득 참)
      * 그 한 run만 이번 틱에서 건너뛰고, 나머지 드레인과 뒤이은 {@link #pickNewIssue}는 계속

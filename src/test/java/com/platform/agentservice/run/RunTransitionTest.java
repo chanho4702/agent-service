@@ -65,7 +65,7 @@ class RunTransitionTest {
         Run r = queued();
         r.start("/work/AGP-4", 9L);
         r.fail("boom");
-        r.block("재시도 한계 초과");
+        r.block("사고형 실패 — 즉시 중단: boom");
         assertThat(r.getStatus()).isEqualTo(RunStatus.BLOCKED);
     }
 
@@ -101,7 +101,7 @@ class RunTransitionTest {
         Run r = queued();
         r.start("/work/AGP-4", 9L);
         r.fail("boom");
-        r.block("3회 실패 — 사람 확인 필요");
+        r.block("사고형 실패 — 즉시 중단: boom");
         r.cancel();
         assertThat(r.getStatus()).isEqualTo(RunStatus.CANCELLED);
     }

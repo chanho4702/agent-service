@@ -67,6 +67,31 @@ public class OrgClient {
         }
     }
 
+    private record InternalMailRequest(List<String> to, String subject, String text, String html, String source) {}
+
+    /** org 허브의 202 응답 — {@code disabled}는 관리 화면에서 메일을 꺼 둔 상태(정상)라 실패와 구분한다. */
+    public record InternalMailResponse(boolean accepted, boolean disabled) {}
+
+    /**
+     * {@code POST /internal/org/mail}(P3d) — 사용자 JWT가 아니라 공유 비밀 {@code X-Internal-Token}으로 부르는 서비스 간
+     * 경로다(wiki·alm {@code OrgMailClient}와 같은 계약). 202는 큐 적재일 뿐 배달 보장이 아니다.
+     */
+    public InternalMailResponse enqueueInternalMail(List<String> to, String subject, String text, String source,
+                                                    String internalToken) {
+        try {
+            InternalMailResponse response = orgRestClient.post()
+                    .uri("/internal/org/mail")
+                    .header("X-Internal-Token", internalToken)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(new InternalMailRequest(to, subject, text, null, source))
+                    .retrieve()
+                    .body(InternalMailResponse.class);
+            return response != null ? response : new InternalMailResponse(true, false);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "알림 메일 발송 요청");
+        }
+    }
+
     private record GrantRequest(String subjectType, long subjectId, String resourceType, String resourceId, String role) {}
 
     /** {@code POST /api/org/grants} — subjectType은 항상 "USER"(에이전트 페르소나도 org 멤버라 USER). */

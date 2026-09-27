@@ -95,6 +95,8 @@ platform:
       max-concurrent-global: ${SCHEDULER_MAX_GLOBAL:2}
       max-concurrent-per-project: ${SCHEDULER_MAX_PER_PROJECT:1}
       default-persona-slug: ${SCHEDULER_PERSONA:jiho}
+      # 폐기(P3d, 2026-09-27 AGP-55) — 사고형 실패는 재시도 없이 즉시 BLOCKED + 알림. 값이 남아 있어도 무시된다
+      # (기존 배포 env가 기동을 깨지 않게 바인딩만 유지). 리뷰 반려 한도는 review.reject-max로 옮겨 갔다.
       retry-max-attempts: ${SCHEDULER_RETRY_MAX_ATTEMPTS:3}
       # 새 이슈 픽업이 한 틱에 넘겨 보는 검색 페이지 상한(AGP-52) — 앞 페이지가 전부 걸러져도 뒤 후보가 굶지 않게.
       max-pick-pages: ${SCHEDULER_MAX_PICK_PAGES:5}
@@ -110,6 +112,18 @@ platform:
       persona-slug: ${REVIEW_PERSONA:}
       # REVIEW run 모델. 비우면 scheduler의 project-models > default-model > 워커 기본 순을 따른다.
       model: ${REVIEW_MODEL:}
+      # 반려 예산(P3d, AGP-55) — 인프라 재시도와 분리된 리뷰 반려 카운터(run.reject_count, 작업 계보로 승계).
+      # 한 작업 계보가 받는 자동 수정(반려-fix) 최대 횟수. 넘는 반려는 fix 대신 REVIEW run BLOCKED + 알림. 0이면 첫 반려부터 사람 확인.
+      reject-max: ${REVIEW_REJECT_MAX:2}
+      # 반려 알림 임계 — 누적 반려가 이 값에 닿으면 알림만 보내고 한도 안이면 fix는 계속된다. 비우면 reject-max와 같다.
+      # reject-max보다 크게 두면 그 전에 BLOCKED로 끝나 임계 알림은 오지 않는다(기동 시 경고 로그).
+      reject-alert-at: ${REVIEW_REJECT_ALERT_AT:}
+    alerts:
+      # 운영 알림(P3d) — 사고형 즉시 중단·반려 한도 소진·반려 임계 도달 시 org 메일 허브(/internal/org/mail)로 메일.
+      # 이슈 코멘트(⛔·🔁)는 이 설정과 무관하게 항상 남는다. 쉼표 목록, 비면 메일 생략(로그만).
+      mail-to: ${AGENT_ALERT_MAIL_TO:}
+      # org 내부 API 공유 비밀 — wiki·alm·auth와 같은 ORG_INTERNAL_TOKEN. 비면 메일 생략(org가 어차피 403).
+      org-internal-token: ${ORG_INTERNAL_TOKEN:}
     meetings:
       # 회의 run(P3b, 스펙 §6) — MEETING(착수/계획)·RETRO(회고)·ESCALATION. 워커가 참석 페르소나를 롤플레이해 회의록을 위키에 쓴다.
       # 회의록을 쓰는 위키 스페이스 id. 비면 회의 소집 API는 400, 회고 cron·자동 에스컬레이션은 건너뛴다.
@@ -120,7 +134,7 @@ platform:
       retro-cron: ${MEETING_RETRO_CRON:}
       # 매니저 순찰 주기(P3c) — 형식·조건은 retro-cron과 같다. repos 매핑의 프로젝트마다 MANAGER run 하나(MANAGER 롤 페르소나 단독).
       manager-cron: ${MEETING_MANAGER_CRON:}
-      # BLOCKED 승격(재시도 한도·리뷰 반려 한도) 시 ESCALATION 회의 run 자동 생성. 기본 off — BLOCKED마다 회의 비용이 붙는다.
+      # BLOCKED 승격(사고형 즉시 중단·리뷰 반려 한도) 시 ESCALATION 회의 run 자동 생성. 기본 off — BLOCKED마다 회의 비용이 붙는다.
       auto-escalation: ${MEETING_AUTO_ESCALATION:false}
       # 회의 결정→이슈를 워커가 create_issue로 직접 만든다. false면 PLAN 게이트로 사람 승인 후 이어받은 run이 만든다.
       auto-issue: ${MEETING_AUTO_ISSUE:true}

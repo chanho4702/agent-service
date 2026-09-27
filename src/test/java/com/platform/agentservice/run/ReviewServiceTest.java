@@ -1,5 +1,7 @@
 package com.platform.agentservice.run;
 
+import com.platform.agentservice.alert.AlertKind;
+import com.platform.agentservice.alert.AlertService;
 import com.platform.agentservice.client.AlmClient;
 import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.CommentResponse;
@@ -13,6 +15,8 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.boot.test.system.CapturedOutput;
+import org.springframework.boot.test.system.OutputCaptureExtension;
 import org.springframework.beans.factory.ObjectProvider;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -30,6 +34,7 @@ import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,6 +60,7 @@ class ReviewServiceTest {
     @Mock TokenService tokenService;
     @Mock AlmClient almClient;
     @Mock MeetingService meetingService;
+    @Mock AlertService alertService;
     @Mock ObjectProvider<RunService> runServiceProvider;
     @Mock RunService runService;
 
@@ -88,7 +94,7 @@ class ReviewServiceTest {
 
     private ReviewService service(ReviewProperties reviewProperties, SchedulerProperties schedulerProperties) {
         return new ReviewService(runRepository, personaRepository, tokenService, almClient, reviewProperties,
-                schedulerProperties, meetingService, runServiceProvider);
+                schedulerProperties, meetingService, alertService, runServiceProvider);
     }
 
     private static ReviewProperties enabledWith(String slug) {
@@ -117,6 +123,12 @@ class ReviewServiceTest {
             ReflectionTestUtils.setField(r, "workspacePath", null);
         }
         r.complete();
+        return r;
+    }
+
+    private static Run doneTask(String workspace, int attempt, int rejectCount) {
+        Run r = doneTask(workspace, attempt);
+        ReflectionTestUtils.setField(r, "rejectCount", rejectCount);
         return r;
     }
 
@@ -305,25 +317,165 @@ class ReviewServiceTest {
         assertThat(fix.getInstruction()).isEqualTo("지시문");
         assertThat(fix.getParentRunId()).isEqualTo(11L);
         assertThat(fix.getAttempt()).isEqualTo(2);
+        assertThat(fix.getRejectCount()).isEqualTo(1);
         verify(runService).execute(99L);
-        verify(almClient).addComment(eq(1L), contains("리뷰 반려 — 수정 run 99"), eq(REVIEWER_BEARER));
+        verify(almClient).addComment(eq(1L), eq("🔁 리뷰 반려 — 수정 run 99 시작(반려 1/2), 위 지적사항을 반영합니다."),
+                eq(REVIEWER_BEARER));
         assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
+        // 기본 임계 = 한도(2) — 첫 반려는 알림 대상이 아니다.
+        verify(alertService, never()).notifyRejectThreshold(any(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any());
+        verify(alertService, never()).notifyBlocked(any(), anyString(), any());
+    }
+
+    /**
+     * P2c~P3c는 반려-fix의 attempt가 {@code SCHEDULER_RETRY_MAX_ATTEMPTS}(3)를 넘으면 BLOCKED였다. P3d부터 attempt는 계보 순번일
+     * 뿐이라 attempt=3인 원 TASK도 반려 예산(reject_count 0 → 1)이 남아 있으면 fix가 뜬다.
+     */
+    @Test
+    void rejection_is_no_longer_limited_by_the_attempt_counter_only_by_the_reject_budget() {
+        Run task = doneTask(WORKSPACE, 3, 0);
+        Run review = failedReview(task);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+
+        service(enabledWith("sora")).onReviewRejected(review);
+
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository).save(saved.capture());
+        assertThat(saved.getValue().getAttempt()).isEqualTo(4);
+        assertThat(saved.getValue().getRejectCount()).isEqualTo(1);
+        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
+        verify(runService).execute(99L);
     }
 
     @Test
-    void rejection_past_attempt_limit_blocks_review_run_and_creates_no_fix() {
-        Run task = doneTask(WORKSPACE, 3);
+    void rejection_past_the_reject_max_blocks_review_run_alerts_once_and_creates_no_fix() {
+        Run task = doneTask(WORKSPACE, 3, 2);
         Run review = failedReview(task);
         when(runRepository.findById(10L)).thenReturn(Optional.of(task));
 
         service(enabledWith("sora")).onReviewRejected(review);
 
         assertThat(review.getStatus()).isEqualTo(RunStatus.BLOCKED);
-        assertThat(review.getError()).contains("3회 소진");
+        assertThat(review.getError()).contains("반려 한도 2회 소진 — 사람 확인 필요");
         verify(runRepository).save(review);
         verify(runService, never()).execute(anyLong());
-        verify(almClient).addComment(eq(1L), contains("⛔ 리뷰 반려"), eq(REVIEWER_BEARER));
+        verify(almClient).addComment(eq(1L), eq("⛔ 반려 한도 2회 소진 — 사람 확인 필요"), eq(REVIEWER_BEARER));
+        verify(alertService, times(1)).notifyBlocked(review, "반려 한도 2회 소진 — 사람 확인 필요", AlertKind.REJECT_LIMIT);
+        // 한도 소진은 BLOCKED 알림 한 통으로 끝난다 — 임계 알림이 겹쳐 나가지 않는다.
+        verify(alertService, never()).notifyRejectThreshold(any(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any());
         assertThat(task.getStatus()).isEqualTo(RunStatus.DONE);
+    }
+
+    @Test
+    void reject_max_zero_sends_the_very_first_rejection_to_a_human() {
+        Run task = doneTask(WORKSPACE, 1, 0);
+        Run review = failedReview(task);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+
+        service(new ReviewProperties(true, "sora", null, 0, null)).onReviewRejected(review);
+
+        assertThat(review.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        assertThat(review.getError()).contains("반려 한도 0회 소진");
+        verify(runService, never()).execute(anyLong());
+    }
+
+    /**
+     * 계보 전체: TASK(반려 0) → 반려 → fix1(1) → 반려 → fix2(2, 기본 임계=한도 2 도달 알림, 진행 계속) → 반려 → 한도 초과 BLOCKED.
+     * 카운터는 "원 TASK" 즉 직전 fix의 값에서 +1되므로, 각 단계 REVIEW의 부모가 직전 fix run이어야 이어진다.
+     */
+    @Test
+    void reject_counter_lineage_counts_up_across_fix_runs_then_blocks_past_the_max() {
+        ReviewService service = service(enabledWith("sora"));
+        Run task = doneTask(WORKSPACE, 1, 0);
+
+        // 1차 반려 → fix1(reject 1)
+        Run review1 = failedReview(task);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+        service.onReviewRejected(review1);
+        Run fix1 = lastSaved();
+        assertThat(fix1.getRejectCount()).isEqualTo(1);
+        verify(alertService, never()).notifyRejectThreshold(any(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any());
+
+        // fix1 완료 → 2차 리뷰 반려 → fix2(reject 2, 임계 도달 — 알림은 보내고 fix는 뜬다)
+        Run fix1Done = complete(fix1, 12L);
+        Run review2 = failedReviewOf(fix1Done, 13L);
+        assertThat(review2.getRejectCount()).isEqualTo(1); // REVIEW도 직전 값을 싣는다(감독·알림 표시용)
+        when(runRepository.findById(12L)).thenReturn(Optional.of(fix1Done));
+        service.onReviewRejected(review2);
+        Run fix2 = lastSaved();
+        assertThat(fix2.getRejectCount()).isEqualTo(2);
+        assertThat(fix2.getStatus()).isEqualTo(RunStatus.QUEUED);
+        verify(alertService, times(1)).notifyRejectThreshold(review2, 2, 2, fix2.getId());
+        verify(almClient).addComment(eq(1L), contains("⚠️ 반려 알림 임계 도달"), eq(REVIEWER_BEARER));
+
+        // fix2 완료 → 3차 리뷰 반려 → 3 > 2 → BLOCKED
+        Run fix2Done = complete(fix2, 14L);
+        Run review3 = failedReviewOf(fix2Done, 15L);
+        when(runRepository.findById(14L)).thenReturn(Optional.of(fix2Done));
+        service.onReviewRejected(review3);
+        assertThat(review3.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        verify(alertService, times(1)).notifyBlocked(review3, "반려 한도 2회 소진 — 사람 확인 필요", AlertKind.REJECT_LIMIT);
+        verify(alertService, times(1)).notifyRejectThreshold(any(), org.mockito.ArgumentMatchers.anyInt(),
+                org.mockito.ArgumentMatchers.anyInt(), any());
+    }
+
+    @Test
+    void alert_threshold_below_the_max_only_alerts_and_the_fix_still_runs() {
+        Run task = doneTask(WORKSPACE, 1, 0);
+        Run review = failedReview(task);
+        when(runRepository.findById(10L)).thenReturn(Optional.of(task));
+
+        service(new ReviewProperties(true, "sora", null, 3, 1)).onReviewRejected(review);
+
+        Run fix = lastSaved();
+        assertThat(fix.getRejectCount()).isEqualTo(1);
+        verify(runService).execute(99L);
+        verify(alertService, times(1)).notifyRejectThreshold(review, 1, 3, 99L);
+        verify(alertService, never()).notifyBlocked(any(), anyString(), any());
+        assertThat(review.getStatus()).isEqualTo(RunStatus.FAILED);
+    }
+
+    @Test
+    void alert_threshold_defaults_to_the_max() {
+        assertThat(new ReviewProperties(true, "sora", null, 4, null).effectiveRejectAlertAt()).isEqualTo(4);
+        assertThat(new ReviewProperties(true, "sora", null).effectiveRejectAlertAt())
+                .isEqualTo(ReviewProperties.DEFAULT_REJECT_MAX);
+        assertThat(new ReviewProperties(true, "sora", null, 3, 0).effectiveRejectAlertAt()).isEqualTo(3);
+        assertThat(new ReviewProperties(true, "sora", null, -1, null).rejectMax()).isZero();
+    }
+
+    @Test
+    @ExtendWith(OutputCaptureExtension.class)
+    void alert_threshold_above_the_max_is_warned_at_startup(CapturedOutput output) {
+        service(new ReviewProperties(true, "sora", null, 2, 5));
+
+        assertThat(output.getOut()).contains("reject-alert-at(5)이 reject-max(2)보다 큽니다");
+    }
+
+    private Run lastSaved() {
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        List<Run> all = saved.getAllValues();
+        return all.get(all.size() - 1);
+    }
+
+    /** 저장소가 새 run에 99를 매기므로 계보 단계마다 고유 id로 바꿔 둔 뒤 DONE까지 돌린다. */
+    private static Run complete(Run queued, long id) {
+        ReflectionTestUtils.setField(queued, "id", id);
+        queued.start("pending", null);
+        queued.complete();
+        return queued;
+    }
+
+    private static Run failedReviewOf(Run task, long id) {
+        Run review = Run.queuedReview(task, REVIEWER_PERSONA_ID, null);
+        ReflectionTestUtils.setField(review, "id", id);
+        review.start("pending", null);
+        review.fail("반려: 또 누락");
+        return review;
     }
 
     @Test
@@ -335,6 +487,8 @@ class ReviewServiceTest {
 
         assertThat(review.getStatus()).isEqualTo(RunStatus.BLOCKED);
         verify(runService, never()).execute(anyLong());
+        verify(alertService, times(1)).notifyBlocked(eq(review), contains("이어갈 원 작업 run을 찾을 수 없음"),
+                eq(AlertKind.LINEAGE_BROKEN));
     }
 
     @Test
@@ -382,14 +536,14 @@ class ReviewServiceTest {
     }
 
     @Test
-    void rejection_past_attempt_limit_hands_the_blocked_review_to_auto_escalation() {
-        Run task = doneTask(WORKSPACE, 3);
+    void rejection_past_reject_max_hands_the_blocked_review_to_auto_escalation() {
+        Run task = doneTask(WORKSPACE, 1, 2);
         Run review = failedReview(task);
         when(runRepository.findById(10L)).thenReturn(Optional.of(task));
 
         service(enabledWith("sora")).onReviewRejected(review);
 
-        verify(meetingService).onBlocked(review, "리뷰 반려 — 시도 한도 3회 소진, 사람 확인 필요");
+        verify(meetingService).onBlocked(review, "반려 한도 2회 소진 — 사람 확인 필요");
     }
 
     @Test
@@ -407,7 +561,7 @@ class ReviewServiceTest {
 
     @Test
     void auto_escalation_failure_after_rejection_is_swallowed() {
-        Run task = doneTask(WORKSPACE, 3);
+        Run task = doneTask(WORKSPACE, 1, 2);
         Run review = failedReview(task);
         when(runRepository.findById(10L)).thenReturn(Optional.of(task));
         org.mockito.Mockito.doThrow(new RuntimeException("boom")).when(meetingService).onBlocked(any(), anyString());
