@@ -1,11 +1,15 @@
 package com.platform.agentservice.office;
 
 import com.platform.agentservice.audit.AuditOrigin;
+import com.platform.agentservice.audit.AuditService;
 import com.platform.agentservice.audit.AuditStatus;
 import com.platform.agentservice.audit.ToolCallAudit;
 import com.platform.agentservice.audit.ToolCallAuditRepository;
 import com.platform.agentservice.budget.BudgetService;
 import com.platform.agentservice.chat.ChatAvailability;
+import com.platform.agentservice.directive.RunDirective;
+import com.platform.agentservice.directive.RunDirectiveRepository;
+import com.platform.agentservice.directive.RunDirectiveService;
 import com.platform.agentservice.budget.LedgerScope;
 import com.platform.agentservice.budget.UsageLedger;
 import com.platform.agentservice.budget.UsageLedgerRepository;
@@ -58,6 +62,7 @@ class OfficeServiceTest {
     @Autowired ToolCallAuditRepository audits;
     @Autowired UsageLedgerRepository ledger;
     @Autowired EntityManager em;
+    @Autowired RunDirectiveRepository directives;
 
     BudgetService budgetService = mock(BudgetService.class);
     ChatAvailability chatAvailability = mock(ChatAvailability.class);
@@ -207,6 +212,28 @@ class OfficeServiceTest {
         assertThat(j.currentRun().model()).isEqualTo("claude-sonnet-5");
         assertThat(j.currentRun().startedAt()).isNotNull();
         assertThat(res.personas().get(1).currentRun()).isNull();
+    }
+
+    /** AGP-67 — 현재 run의 미전달 실행 중 지시 개수. 전달된 지시·다른 run의 지시는 세지 않는다. 없으면 0. */
+    @Test
+    void 현재_run에_미전달_지시_개수가_붙는다() {
+        Persona jiho = persona(1L, "jiho", PersonaRole.BACKEND);
+        Persona mina = persona(2L, "mina", PersonaRole.FRONTEND);
+        Run running = run(jiho, 1L, "AGP-1", RunStatus.RUNNING);
+        run(mina, 1L, "AGP-2", RunStatus.RUNNING);
+        directives.saveAndFlush(RunDirective.of(running.getId(), "하나", 9L));
+        directives.saveAndFlush(RunDirective.of(running.getId(), "둘", 9L));
+        RunDirective delivered = directives.saveAndFlush(RunDirective.of(running.getId(), "전달됨", 9L));
+        em.createNativeQuery("update run_directive set delivered_at = ?1 where id = ?2")
+                .setParameter(1, now).setParameter(2, delivered.getId()).executeUpdate();
+        OfficeService withDirectives = new OfficeService(personas, runs, gates, audits, ledger, budgetService,
+                new MeetingProperties(7L, null, false, true), chatAvailability, null,
+                new RunDirectiveService(directives, runs, mock(AuditService.class)), Clock.fixed(now, ZoneOffset.UTC));
+
+        OfficeResponse res = withDirectives.office(null);
+
+        assertThat(res.personas().get(0).currentRun().pendingDirectiveCount()).isEqualTo(2);
+        assertThat(res.personas().get(1).currentRun().pendingDirectiveCount()).isZero();
     }
 
     @Test

@@ -1,5 +1,7 @@
 package com.platform.agentservice.schema;
 
+import com.platform.agentservice.directive.RunDirective;
+import com.platform.agentservice.directive.dto.RunDirectiveCreateRequest;
 import com.platform.agentservice.pat.PatToken;
 import com.platform.agentservice.pat.dto.PatCreateRequest;
 import com.platform.agentservice.persona.Persona;
@@ -44,7 +46,8 @@ class RequestDtoColumnWidthTest {
                 Arguments.of(PatCreateRequest.class, "label", PatToken.class, "label", 120),
                 Arguments.of(UserRunCreateRequest.class, "issueKey", Run.class, "issueKey", 40),
                 Arguments.of(UserRunCreateRequest.class, "model", Run.class, "model", 60),
-                Arguments.of(MeetingCreateRequest.class, "agendaIssueKey", Run.class, "issueKey", 40));
+                Arguments.of(MeetingCreateRequest.class, "agendaIssueKey", Run.class, "issueKey", 40),
+                Arguments.of(RunDirectiveCreateRequest.class, "text", RunDirective.class, "text", 2000));
     }
 
     @ParameterizedTest(name = "{0}.{1} @Size(max) == {2}.{3} @Column(length) == {4}")

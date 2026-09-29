@@ -129,6 +129,10 @@ platform:
       # 반려 알림 임계 — 누적 반려가 이 값에 닿으면 알림만 보내고 한도 안이면 fix는 계속된다. 비우면 reject-max와 같다.
       # reject-max보다 크게 두면 그 전에 BLOCKED로 끝나 임계 알림은 오지 않는다(기동 시 경고 로그).
       reject-alert-at: ${REVIEW_REJECT_ALERT_AT:}
+    worklog:
+      # run 종결 워크로그(P4b AGP-60) — TASK·REVIEW(+안건 이슈 있는 회의) run이 DONE/FAILED/BLOCKED로 끝나면 run 페르소나 명의로
+      # 이슈에 실행 시간(분 올림, 최소 1분)을 기록한다. 워커가 그 run에서 log_work를 이미 불렀으면 건너뛴다.
+      auto: ${AGENT_AUTO_WORKLOG:true}
     alerts:
       # 운영 알림(P3d) — 사고형 즉시 중단·반려 한도 소진·반려 임계 도달 시 org 메일 허브(/internal/org/mail)로 메일.
       # 이슈 코멘트(⛔·🔁)는 이 설정과 무관하게 항상 남는다. 쉼표 목록, 비면 메일 생략(로그만).

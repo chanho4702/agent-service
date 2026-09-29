@@ -8,6 +8,7 @@ import com.platform.agentservice.budget.PersonaCost;
 import com.platform.agentservice.budget.UsageLedgerRepository;
 import com.platform.agentservice.budget.dto.BudgetStatusResponse;
 import com.platform.agentservice.chat.ChatAvailability;
+import com.platform.agentservice.directive.RunDirectiveService;
 import com.platform.agentservice.office.dto.AuditEntry;
 import com.platform.agentservice.office.dto.OfficeResponse;
 import com.platform.agentservice.office.dto.PersonaActivityResponse;
@@ -80,6 +81,8 @@ public class OfficeService {
     private final RunnerAvailability runnerAvailability;
     /** 리뷰어 준비 판정(P4b) — 테스트 생성자에서는 null(준비된 것으로 본다). */
     private final ReviewerResolver reviewerResolver;
+    /** 미전달 지시 개수(AGP-67) — 테스트 생성자에서는 null(항상 0). */
+    private final RunDirectiveService directiveService;
     private final Clock clock;
 
     @Autowired
@@ -87,9 +90,10 @@ public class OfficeService {
                          GateRepository gateRepository, ToolCallAuditRepository auditRepository,
                          UsageLedgerRepository ledgerRepository, BudgetService budgetService,
                          MeetingProperties meetingProperties, ChatAvailability chatAvailability,
-                         RunnerAvailability runnerAvailability, ReviewerResolver reviewerResolver) {
+                         RunnerAvailability runnerAvailability, ReviewerResolver reviewerResolver,
+                         RunDirectiveService directiveService) {
         this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
-                meetingProperties, chatAvailability, runnerAvailability, reviewerResolver, Clock.systemUTC());
+                meetingProperties, chatAvailability, runnerAvailability, reviewerResolver, directiveService, Clock.systemUTC());
     }
 
     /** 테스트 전용 — 5분 창·오늘 경계를 고정 시각으로 검증한다(러너 판정 없음). */
@@ -98,7 +102,16 @@ public class OfficeService {
                   UsageLedgerRepository ledgerRepository, BudgetService budgetService,
                   MeetingProperties meetingProperties, ChatAvailability chatAvailability, Clock clock) {
         this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
-                meetingProperties, chatAvailability, null, null, clock);
+                meetingProperties, chatAvailability, (RunnerAvailability) null, clock);
+    }
+
+    OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
+                  GateRepository gateRepository, ToolCallAuditRepository auditRepository,
+                  UsageLedgerRepository ledgerRepository, BudgetService budgetService,
+                  MeetingProperties meetingProperties, ChatAvailability chatAvailability,
+                  RunnerAvailability runnerAvailability, Clock clock) {
+        this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
+                meetingProperties, chatAvailability, runnerAvailability, (ReviewerResolver) null, (RunDirectiveService) null, clock);
     }
 
     OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
@@ -106,8 +119,28 @@ public class OfficeService {
                   UsageLedgerRepository ledgerRepository, BudgetService budgetService,
                   MeetingProperties meetingProperties, ChatAvailability chatAvailability,
                   RunnerAvailability runnerAvailability, ReviewerResolver reviewerResolver, Clock clock) {
+        this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
+                meetingProperties, chatAvailability, runnerAvailability, reviewerResolver, (RunDirectiveService) null, clock);
+    }
+
+    OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
+                  GateRepository gateRepository, ToolCallAuditRepository auditRepository,
+                  UsageLedgerRepository ledgerRepository, BudgetService budgetService,
+                  MeetingProperties meetingProperties, ChatAvailability chatAvailability,
+                  RunnerAvailability runnerAvailability, RunDirectiveService directiveService, Clock clock) {
+        this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
+                meetingProperties, chatAvailability, runnerAvailability, (ReviewerResolver) null, directiveService, clock);
+    }
+
+    OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
+                  GateRepository gateRepository, ToolCallAuditRepository auditRepository,
+                  UsageLedgerRepository ledgerRepository, BudgetService budgetService,
+                  MeetingProperties meetingProperties, ChatAvailability chatAvailability,
+                  RunnerAvailability runnerAvailability, ReviewerResolver reviewerResolver,
+                  RunDirectiveService directiveService, Clock clock) {
         this.runnerAvailability = runnerAvailability;
         this.reviewerResolver = reviewerResolver;
+        this.directiveService = directiveService;
         this.personaRepository = personaRepository;
         this.runRepository = runRepository;
         this.gateRepository = gateRepository;
@@ -130,6 +163,8 @@ public class OfficeService {
         activeRuns.forEach(r -> currentRuns.putIfAbsent(r.getPersonaId(), r));
         RunnerAvailability.Snapshot runners = runnerAvailability == null
                 ? RunnerAvailability.Snapshot.empty(true) : runnerAvailability.snapshot();
+        Map<Long, Integer> pendingDirectives = directiveService == null
+                ? Map.of() : directiveService.pendingCounts(currentRuns.values().stream().map(Run::getId).toList());
 
         Map<Long, AuditEntry> bubbles = auditRepository.findLatestPerPersonaSince(now.minus(BUBBLE_WINDOW)).stream()
                 .collect(Collectors.toMap(ToolCallAudit::getPersonaId, OfficeService::toEntry, (a, b) -> a));
@@ -148,7 +183,7 @@ public class OfficeService {
                 .filter(p -> projectId == null || p.getProjectId() == null || projectId.equals(p.getProjectId())
                         || currentRuns.containsKey(p.getId()))
                 .map(p -> new OfficeResponse.OfficePersona(p.getId(), p.getSlug(), p.getName(), p.getEmoji(),
-                        p.getRole(), p.isActive(), toCurrent(currentRuns.get(p.getId()), runners), bubbles.get(p.getId()),
+                        p.getRole(), p.isActive(), toCurrent(currentRuns.get(p.getId()), runners, pendingDirectives), bubbles.get(p.getId()),
                         costs.getOrDefault(p.getId(), BigDecimal.ZERO), p.getAvatarConfig(),
                         presence(currentRuns.containsKey(p.getId()), externalRecent.contains(p.getId()))))
                 .toList();
@@ -244,13 +279,14 @@ public class OfficeService {
         return !hasActiveRun && externalRecent ? PersonaPresence.EXTERNAL : null;
     }
 
-    private static OfficeResponse.CurrentRun toCurrent(Run run, RunnerAvailability.Snapshot runners) {
+    private static OfficeResponse.CurrentRun toCurrent(Run run, RunnerAvailability.Snapshot runners,
+                                                       Map<Long, Integer> pendingDirectives) {
         if (run == null) {
             return null;
         }
         return new OfficeResponse.CurrentRun(run.getId(), run.getStatus(), run.getIssueKey(), run.getType(),
                 run.getTrigger(), run.getAttempt(), run.getModel(), run.getStartedAt(), run.getExecutionSite(),
-                runners.awaitingRunner(run));
+                runners.awaitingRunner(run), pendingDirectives.getOrDefault(run.getId(), 0));
     }
 
     private static AuditEntry toEntry(ToolCallAudit a) {

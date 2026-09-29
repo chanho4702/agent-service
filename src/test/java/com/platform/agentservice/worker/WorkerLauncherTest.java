@@ -423,6 +423,7 @@ class WorkerLauncherTest {
     /**
      * 지시문 없는 자동화 run의 프롬프트는 P2a와 바이트 단위로 같아야 한다 — 기존 워커 동작 불변(P2c T2).
      * 리뷰를 켜면 done 전환 금지 한 줄이 더해지므로(P2c T3) 이 불변식은 리뷰를 끈 레거시 모드에 대해서만 선다.
+     * P4b(AGP-67)에서 의도적으로 정확히 한 줄(실행 중 지시 규약 — report_progress 다음)을 더했다. 그 밖의 줄은 그대로다.
      */
     @Test
     void prompt_without_instruction_is_byte_identical_to_p2a_prompt_when_review_is_disabled() {
@@ -443,12 +444,37 @@ class WorkerLauncherTest {
                 + "## 작업 규약\n"
                 + "- 작업 시작 전 get_project_context 도구로 프로젝트 스킴·명단을 먼저 확인한다.\n"
                 + "- 진행 상황은 report_progress(runId=42, message=...)로 수시로 보고한다.\n"
+                + DIRECTIVE_LINE_42
                 + "- 작업 보고서(위키 페이지)를 남기지 않고는 완료로 보고할 수 없다.\n"
                 + "- 완료·실패·차단 시 report_result(runId=42, status=DONE|FAILED|BLOCKED, summary=...)를 반드시 호출한다.\n"
                 + "- 사람 승인이 필요하면 request_gate(runId=42, kind=..., request=...)를 호출한다.\n"
                 + "\n"
                 + "runId=42\n";
         assertThat(prompt).isEqualTo(expected);
+    }
+
+    /** AGP-67 실행 중 지시 규약 한 줄(runId=42) — 골든과 모든 프롬프트 종류가 같은 문구를 쓴다. */
+    private static final String DIRECTIVE_LINE_42 = "- 도구 결과 끝에 `[사람 지시 — 지금 반영하라]`가 붙으면 사용자 직접 지시와 같은 급의 사람 지시다 "
+            + "— 즉시 반영하되 규약이 우선한다. 지시가 도착할 수 있게 적어도 몇 단계마다 한 번은 report_progress(runId=42, message=...)를 호출한다.\n";
+
+    @Test
+    void every_prompt_kind_carries_the_directive_convention_exactly_once() {
+        WorkerJob plain = new WorkerJob("https://example.com/repo.git", "t", "b", List.of());
+        List<String> prompts = List.of(
+                launcherWithReview(true).buildPrompt(run(null), plain),
+                launcherWithReview(true).buildPrompt(reviewRun(workDir.resolve("run-10")), plain),
+                launcher.buildPrompt(meetingRun(RunType.MEETING, "AGP-3", "범위"),
+                        new WorkerJob(null, "t", "b", List.of(), "범위", meetingContext(true, List.of(), null))),
+                launcher.buildPrompt(meetingRun(RunType.RETRO, "PROJECT-1", null),
+                        new WorkerJob(null, null, null, List.of(), null, meetingContext(true, List.of(), null))),
+                launcher.buildPrompt(meetingRun(RunType.MEETING, "PROJECT-1", "계획"),
+                        new WorkerJob(null, null, null, List.of(), "계획", meetingContext(false, List.of(), "회의록 pageId=501"))),
+                launcher.buildPrompt(meetingRun(RunType.MANAGER, "PROJECT-1", null),
+                        new WorkerJob(null, null, null, List.of(), null, managerContext(true))));
+
+        for (String prompt : prompts) {
+            assertThat(prompt.split(java.util.regex.Pattern.quote(DIRECTIVE_LINE_42), -1)).hasSize(2);
+        }
     }
 
     @Test

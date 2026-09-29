@@ -4,6 +4,7 @@ import com.platform.common.error.ForbiddenException;
 import io.modelcontextprotocol.server.McpServerFeatures;
 import io.modelcontextprotocol.spec.McpSchema;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.stereotype.Component;
 
@@ -24,14 +25,27 @@ import java.util.Map;
  *
  * <p>거부도 감사 행(ERROR)을 남긴다({@link Audited#run}) — summary에는 파라미터 이름만 싣고 값은 싣지 않는다.
  * {@link Audited}는 JPA 리포지토리를 끌고 오므로 BeanPostProcessor 초기화 시점에 당기지 않게 지연 조회한다.
+ *
+ * <p><b>실행 중 지시 전달(AGP-67)</b>도 이 단일 지점에서 한다 — 도구 결과(정상·오류·입력 거부 모두)를 {@link DirectiveDelivery}에
+ * 넘겨 run 토큰 호출이면 그 run의 미전달 지시를 결과 끝에 붙인다. 별도 BeanPostProcessor로 두지 않은 이유: BPP 간 감싸는 순서가
+ * 등록 순서에 기대게 되고, 입력 거부 결과에도 지시가 실려야 하므로 가장 바깥이 확실해야 한다.
  */
 @Component
 public class ToolInputGuard implements BeanPostProcessor {
 
     private final ObjectProvider<Audited> audited;
+    /** 지시 전달(AGP-67) — JPA를 끌고 오므로 {@link #audited}처럼 지연 조회한다. null이면 전달 없음(단위 테스트). */
+    private final ObjectProvider<DirectiveDelivery> directives;
 
+    /** 지시 전달 없는 가드(기존 단위 테스트). */
     public ToolInputGuard(ObjectProvider<Audited> audited) {
+        this(audited, null);
+    }
+
+    @Autowired
+    public ToolInputGuard(ObjectProvider<Audited> audited, ObjectProvider<DirectiveDelivery> directives) {
         this.audited = audited;
+        this.directives = directives;
     }
 
     @Override
@@ -50,11 +64,16 @@ public class ToolInputGuard implements BeanPostProcessor {
         String toolName = spec.tool().name();
         return new McpServerFeatures.SyncToolSpecification(spec.tool(), (exchange, request) -> {
             Violation violation = findViolation(request.arguments());
-            if (violation == null) {
-                return spec.callHandler().apply(exchange, request);
-            }
-            return McpSchema.CallToolResult.builder().addTextContent(reject(toolName, violation)).build();
+            McpSchema.CallToolResult result = violation == null
+                    ? spec.callHandler().apply(exchange, request)
+                    : McpSchema.CallToolResult.builder().addTextContent(reject(toolName, violation)).build();
+            return deliverDirectives(result);
         });
+    }
+
+    private McpSchema.CallToolResult deliverDirectives(McpSchema.CallToolResult result) {
+        DirectiveDelivery delivery = directives == null ? null : directives.getIfAvailable();
+        return delivery == null ? result : delivery.deliver(result);
     }
 
     private String reject(String toolName, Violation violation) {

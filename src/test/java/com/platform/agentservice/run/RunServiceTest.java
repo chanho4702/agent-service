@@ -496,6 +496,54 @@ class RunServiceTest {
         verify(almClient).addComment(eq(1L), org.mockito.ArgumentMatchers.contains("작업 완료했습니다"), eq(BEARER));
     }
 
+    // ---- P4b (AGP-60): 종결 워크로그는 결과 반영 합류점(applyOutcome) 끝에서 한 번 ----
+
+    @Test
+    void execute_done_hands_the_terminal_run_to_worklog_once() {
+        RunWorklogService worklog = org.mockito.Mockito.mock(RunWorklogService.class);
+        ReflectionTestUtils.setField(runService, "runWorklogService", worklog);
+        Run run = queuedRun(45L);
+        when(runRepository.findById(45L)).thenReturn(Optional.of(run));
+        stubSaveReturnsArgument();
+        IssueResponse claimed = issue(1L, ISSUE_KEY, "inprogress", 2);
+        when(issueClaimSupport.claim(ISSUE_KEY, PERSONA_MEMBER_ID, null, BEARER)).thenReturn(claimed);
+        when(almClient.comments(1L, BEARER)).thenReturn(List.of());
+        when(almClient.getByKey(ISSUE_KEY, BEARER)).thenReturn(claimed);
+        when(workerLauncher.launch(any(Run.class), any(WorkerJob.class)))
+                .thenReturn(new WorkerResult(0, false, "완료", null, null, 0L, 0L, null, "raw", null));
+
+        runService.execute(45L);
+
+        ArgumentCaptor<Run> ended = ArgumentCaptor.forClass(Run.class);
+        verify(worklog, times(1)).onRunEnded(ended.capture());
+        assertThat(ended.getValue().getStatus()).isEqualTo(RunStatus.DONE);
+    }
+
+    @Test
+    void runner_result_path_also_reaches_worklog_and_prep_failure_does_not() {
+        RunWorklogService worklog = org.mockito.Mockito.mock(RunWorklogService.class);
+        ReflectionTestUtils.setField(runService, "runWorklogService", worklog);
+        Run running = queuedRun(46L);
+        running.start("pending", null);
+        when(runRepository.findById(46L)).thenReturn(Optional.of(running));
+        stubSaveReturnsArgument();
+
+        runService.applyExternalOutcome(46L, new WorkerResult(1, false, null, null, null, 0L, 0L, null, "boom", null), List.of());
+
+        assertThat(running.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        verify(worklog).onRunEnded(running);
+
+        // 준비 단계 실패(리포 매핑 없음)는 워커가 돌지 않았다 — 기록하지 않는다.
+        Run noRepo = Run.queued(RunType.TASK, "ZZZ-1", PROJECT_ID, PERSONA_ID, RunTrigger.SCHEDULER, "harness://default", null);
+        ReflectionTestUtils.setField(noRepo, "id", 47L);
+        when(runRepository.findById(47L)).thenReturn(Optional.of(noRepo));
+
+        runService.execute(47L);
+
+        assertThat(noRepo.getStatus()).isEqualTo(RunStatus.BLOCKED);
+        verify(worklog, never()).onRunEnded(noRepo);
+    }
+
     // ---- P2c (D-P2c-1): the real workspace path replaces the "pending" placeholder ----
 
     @Test

@@ -29,4 +29,7 @@ public interface ToolCallAuditRepository extends JpaRepository<ToolCallAudit, Lo
              where a.personaId is not null and a.origin = :origin and a.createdAt >= :since
             """)
     List<Long> findPersonaIdsWithOriginSince(@Param("origin") AuditOrigin origin, @Param("since") Instant since);
+
+    /** 워커가 그 run에서 이 도구를 성공적으로 불렀나(run 종결 자동 워크로그 건너뜀 판정 — AGP-60). V14 {@code idx_audit_run}. */
+    boolean existsByToolAndRunIdAndStatus(String tool, Long runId, AuditStatus status);
 }

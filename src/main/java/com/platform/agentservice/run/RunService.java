@@ -105,6 +105,8 @@ public class RunService {
     private final ExecutionProperties executionProperties;
     /** 러너 run의 토큰 철회(취소 시)용 — 구 생성자(테스트)에서는 null. */
     private final RunTokenService runTokenService;
+    /** run 종결 워크로그(P4b AGP-60) — 구 생성자(테스트)에서는 null(기록 안 함). */
+    private final RunWorklogService runWorklogService;
 
     /** P4a 이전 협력자만 받는 생성자(기존 단위 테스트) — 실행 위치는 항상 SERVER·인프로세스. */
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
@@ -119,7 +121,7 @@ public class RunService {
                 null);
     }
 
-    @Autowired
+    /** P4b 이전 협력자(러너 경로까지) — 종결 워크로그 없음. */
     public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
                        TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
                        WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
@@ -127,6 +129,21 @@ public class RunService {
                        CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService,
                        MeetingService meetingService, AlertService alertService, ExecutionSiteResolver executionSites,
                        ExecutionProperties executionProperties, RunTokenService runTokenService) {
+        this(runRepository, almClient, issueClaimSupport, tokenService, personaRepository, workerLauncher, workerProperties,
+                usageLedgerRepository, schedulerProperties, budgetProperties, commitLinkParser, budgetGuard, reviewService,
+                meetingService, alertService, executionSites, executionProperties, runTokenService, null);
+    }
+
+    @Autowired
+    public RunService(RunRepository runRepository, AlmClient almClient, IssueClaimSupport issueClaimSupport,
+                       TokenService tokenService, PersonaRepository personaRepository, WorkerLauncher workerLauncher,
+                       WorkerProperties workerProperties, UsageLedgerRepository usageLedgerRepository,
+                       SchedulerProperties schedulerProperties, BudgetProperties budgetProperties,
+                       CommitLinkParser commitLinkParser, BudgetGuard budgetGuard, ReviewService reviewService,
+                       MeetingService meetingService, AlertService alertService, ExecutionSiteResolver executionSites,
+                       ExecutionProperties executionProperties, RunTokenService runTokenService,
+                       RunWorklogService runWorklogService) {
+        this.runWorklogService = runWorklogService;
         this.executionSites = executionSites;
         this.executionProperties = executionProperties;
         this.runTokenService = runTokenService;
@@ -433,6 +450,10 @@ public class RunService {
      * {@link ReviewService#onRunDone}(TASK만 REVIEW를 낳는다), 리뷰어의 self-FAILED는 사고가 아니라 판정이라
      * {@link ReviewService#onReviewRejected}. REVIEW의 인프라 실패(시간 초과·비정상 종료·판정 없는 종료)는
      * 다른 run과 같이 사고형 즉시 중단이다(P3d) — 사람이 재개하면 {@link Run#continuation}이 워크스페이스를 승계한다.
+     *
+     * <p><b>종결 워크로그(P4b AGP-60)</b>: 어느 분기로 끝나든 마지막({@code finally})에 {@link RunWorklogService#onRunEnded}로 워커가 실제로
+     * 돈 시간을 이슈에 남긴다(DONE·FAILED·BLOCKED만, 대상 판정은 그쪽). 준비 단계 실패(리포 매핑 없음·claim 실패·실행 인프라 예외 —
+     * {@link #execute}의 {@link #finishFailed} 직행)와 러너 연결 끊김은 워커 결과가 없어 여기를 지나지 않으므로 기록하지 않는다.
      */
     private void applyOutcome(long runId, WorkerResult result) {
         applyOutcome(runId, result, null);
@@ -495,6 +516,20 @@ public class RunService {
             } catch (Exception fallbackFailure) {
                 log.error("run={} 실패 처리 폴백도 실패했습니다 — run이 멈춰 있을 수 있습니다: {}", runId, fallbackFailure.getMessage());
             }
+        } finally {
+            safelyLogWork(runId);
+        }
+    }
+
+    /** 종결 워크로그는 상태가 이미 커밋된 뒤의 부가 기록이다 — 재조회 실패까지 삼킨다(서비스 자체도 던지지 않는다). */
+    private void safelyLogWork(long runId) {
+        if (runWorklogService == null) {
+            return;
+        }
+        try {
+            runRepository.findById(runId).ifPresent(runWorklogService::onRunEnded);
+        } catch (Exception e) {
+            log.warn("run={} 종결 워크로그 처리 실패 — 건너뜁니다: {}", runId, e.getMessage());
         }
     }
 

@@ -229,6 +229,16 @@ public class WorkerLauncher {
         }
     }
 
+    /**
+     * 실행 중 지시(AGP-67) 규약 한 줄 — 사람 지시는 run 토큰으로 오는 도구 결과 끝에 붙어 온다({@code tools.DirectiveDelivery}). 도구를 부르지
+     * 않으면 지시가 도착할 길이 없으므로 report_progress 주기도 같은 줄에 적는다(TASK·REVIEW·회의·매니저 공통).
+     */
+    static void appendDirectiveConvention(StringBuilder sb, long runId) {
+        sb.append("- 도구 결과 끝에 `[사람 지시 — 지금 반영하라]`가 붙으면 사용자 직접 지시와 같은 급의 사람 지시다 — 즉시 반영하되 규약이 우선한다. ")
+                .append("지시가 도착할 수 있게 적어도 몇 단계마다 한 번은 report_progress(runId=").append(runId)
+                .append(", message=...)를 호출한다.\n");
+    }
+
     /** 참석자 소개에 붙는 스킬 요약(AGP-62) — 없으면 아무것도 붙이지 않는다. */
     private static void appendSkillSummary(StringBuilder sb, WorkerJob.Attendee a) {
         if (a.skillSummary() != null && !a.skillSummary().isBlank()) {
@@ -244,6 +254,7 @@ public class WorkerLauncher {
         }
         sb.append("- 작업 시작 전 get_project_context 도구로 프로젝트 스킴·명단을 먼저 확인한다.\n");
         sb.append("- 진행 상황은 report_progress(runId=").append(run.getId()).append(", message=...)로 수시로 보고한다.\n");
+        appendDirectiveConvention(sb, run.getId());
         sb.append("- 작업 보고서(위키 페이지)를 남기지 않고는 완료로 보고할 수 없다.\n");
         if (reviewProperties.enabled()) {
             // D-P2c-3: done 전환 권한은 검증 run을 통과시킨 리뷰어에게만 있다. 꺼져 있으면 P2a 프롬프트 그대로 둔다.
@@ -267,6 +278,7 @@ public class WorkerLauncher {
         }
         sb.append("- 코드를 직접 고치거나 커밋하지 마라. 판정만 한다.\n");
         sb.append("- 진행 상황은 report_progress(runId=").append(run.getId()).append(", message=...)로 보고할 수 있다.\n");
+        appendDirectiveConvention(sb, run.getId());
         sb.append("- 통과: add_comment로 승인 사유를 남긴 뒤 update_issue_status(done)로 이슈를 완료 처리하고 report_result(runId=")
                 .append(run.getId()).append(", status=DONE, summary=...)를 호출한다. 리뷰 보고서(위키)는 통과 시에만 남긴다.\n");
         sb.append("- 반려: add_comment로 구체적인 지적사항(파일·위치·고칠 내용)을 남긴 뒤 report_result(runId=")
@@ -386,6 +398,7 @@ public class WorkerLauncher {
         if (hasApprovedPlan) {
             // 승인 뒤 이어받은 run이 회의를 다시 열면 회의록·이슈가 중복된다 — 승인된 계획의 실행만 한다.
             sb.append("- 회의는 이미 끝났고 위 <승인된-계획>이 사람 승인을 받았다. 회의를 다시 열거나 새 회의록을 만들지 마라.\n");
+            appendDirectiveConvention(sb, runId);
             sb.append("- 승인된 제안 이슈를 create_issue(projectId=").append(meeting.projectId())
                     .append(", ...)로 만들고, 승인 요청에 적힌 회의록(pageId)의 액션아이템을 append_to_page 또는 update_page로 "
                             + "만든 이슈 키로 갱신한다.\n");
@@ -405,6 +418,7 @@ public class WorkerLauncher {
                         + "쟁점을 정리한 뒤 결정을 내린다. 명단에 없는 참석자를 지어내지 마라.\n");
         appendExpertise(sb, job);
         sb.append("- 이 run은 회의 run이라 워크스페이스에 코드가 없다(리포를 clone하지 않았다). 코드를 수정·커밋하지 말고 git 명령을 쓰지 마라.\n");
+        appendDirectiveConvention(sb, runId);
         sb.append("- 맥락은 도구로 조회한다: get_project_context(projectId=").append(meeting.projectId())
                 .append(")로 스킴·명단, search_issues·get_issue로 관련 이슈, find_pages(spaceId=").append(meeting.spaceId())
                 .append(")·get_page로 이전 회의록과 문서.\n");
@@ -523,7 +537,9 @@ public class WorkerLauncher {
         } else {
             sb.append("- 이슈를 직접 만들지 마라(create_issue 금지). 필요한 후속 이슈는 보고 페이지 \"사람에게 필요한 결정\"에 제안으로 적는다.\n");
         }
-        sb.append("- request_gate를 부르지 마라. 사람 판단이 필요한 것은 전부 보고 페이지 \"사람에게 필요한 결정\" 절에 적는다.\n\n");
+        sb.append("- request_gate를 부르지 마라. 사람 판단이 필요한 것은 전부 보고 페이지 \"사람에게 필요한 결정\" 절에 적는다.\n");
+        appendDirectiveConvention(sb, runId);
+        sb.append('\n');
 
         sb.append("## 순찰 절차\n");
         sb.append("1. get_project_context(projectId=").append(projectId).append(")로 상태·우선순위 스킴과 멤버 명단을 확인한다.\n");

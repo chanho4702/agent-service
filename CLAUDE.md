@@ -422,7 +422,7 @@ run을 띄운다.
   뒤 규약 섹션을 둔다 — **사람 코멘트 = 지시**로 취급하되, 그 안에 규약과 충돌하는 문구가
   있으면 규약이 우선한다는 문장을 경계 직후에 못박는다(프롬프트 인젝션 방어, fix round 1 I2).
   USER run의 지시문도 같은 방어를 받는다(P2c): 코멘트 다음에 `<사용자-지시>` 경계로 싸고, 규약
-  우선 문장이 이 블록까지 포괄한다. 지시문이 없으면 프롬프트는 P2a와 바이트 단위로 같다(골든 테스트).
+  우선 문장이 이 블록까지 포괄한다. 지시문이 없으면 프롬프트는 P2a와 바이트 단위로 같다(골든 테스트 — P4b에서 실행 중 지시 규약 한 줄만 의도적으로 더했다, §14).
 - 프롬프트에 종결 3종 도구 호출을 runId와 함께 명시한다 — 워커는 `report_progress`로 수시
   진행 보고, 완료/실패/차단 시 반드시 `report_result(status=DONE|FAILED|BLOCKED)`를 호출해야
   하고, 사람 승인이 필요하면 `request_gate`를 부른다.
@@ -774,7 +774,7 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
     순서 그대로(명단이 비면 진행자 1명). QUEUED·WAITING_APPROVAL·BLOCKED 회의는 싣지 않는다. 쿼리 1회, `run(status)` 인덱스.
   - `currentRun`: `RunService.ACTIVE_STATUSES`(QUEUED·RUNNING·WAITING_APPROVAL·BLOCKED) 중 페르소나별 최신 1건(id 기준), 없으면 null.
     필드: id·status·issueKey·type·trigger·attempt·model·startedAt + P4a `executionSite`(SERVER|LOCAL — LOCAL이면 책상 모니터 "집"
-    표지)·`awaitingRunner`(QUEUED인데 지금 집어갈 러너가 없음 — "러너 대기" 라벨, 판정은 §13 `RunnerAvailability`). `recentRuns[]`·run 목록
+    표지)·`awaitingRunner`(QUEUED인데 지금 집어갈 러너가 없음 — "러너 대기" 라벨, 판정은 §13 `RunnerAvailability`) + P4b `pendingDirectiveCount`(미전달 실행 중 지시 개수, §14). `recentRuns[]`·run 목록
     요약(`RunSummaryResponse`)에도 `executionSite`·`runnerId`가 붙는다(필드 추가만).
   - 최근 종결 = DONE·FAILED·CANCELLED·BLOCKED, `updatedAt` 최신순(BLOCKED는 endedAt이 비어 있어서). BLOCKED는
     `currentRun`에도 나온다.
@@ -1404,3 +1404,60 @@ agent-service의 `AGENT_PLATFORM_RUNNER_TOKEN`과 같은 값 · 명명 볼륨 �
 플랫폼 키 없음·git에는 인증 없음, `stopRunIds` 중단 보고, 결과 재시도(503 두 번), 미전송 결과 재전송, 하네스 해시 캐시(두 run에 다운로드 1회), 종료 유예 초과
 중단, 첫 heartbeat 401 종료, 토큰·run 토큰·키가 로그·예외·`toString`에 없음, zip-slip, 워크스페이스 보존, Windows claude 찾기, 실제 프로세스 kill.
 
+
+## 14. P4b: 종결 워크로그 · 실행 중 지시 (2026-09-29, AGP-60 · AGP-67 — 설계 D-P4b-2·5)
+
+### 14.1 run 종결 워크로그(D-P4b-2)
+
+작업 시간 기록을 프롬프트 의무에 맡기지 않고 서버가 남긴다(`RunWorklogService`). 지점은 `RunService.applyOutcome`의 `finally` — 인프로세스 종결과
+러너 결과 보고(`applyExternalOutcome`)가 합류하는 곳이라 두 경로 모두 탄다.
+
+- 대상: TASK·REVIEW run이 DONE·FAILED·BLOCKED로 끝났을 때 + 회의 계열(MEETING·RETRO·ESCALATION·MANAGER)은 안건 이슈가 있을 때만(`hasAgendaIssue()`).
+  WAITING_APPROVAL·CANCELLED·시작 안 한 run(`startedAt` 없음)은 제외.
+- 기록: run 페르소나 명의(REVIEW=리뷰어, 회의=진행자)로 `POST /api/alm/issues/{id}/worklogs`(`log_work` 도구와 같은 `AlmClient.addWorklog`).
+  시간 = `ceil((endedAt ?? now) − startedAt)`분·최소 1분 → 시간 단위로 0.01h 올림(ALM `NUMERIC(8,2)`, 1분=0.02h). 코멘트 `AI run #<id>(<type>) 자동 기록`,
+  작업일은 종료 시각의 Asia/Seoul 날짜. self-BLOCKED는 `endedAt`이 비어 있어(§6) 지금 시각을 쓴다.
+- 건너뜀: 워커가 그 run에서 이미 `log_work`를 성공적으로 불렀으면(감사 `tool=log_work`·`run_id`·`OK` — V16 인덱스 `idx_audit_run`).
+- 기록하지 않는 종결: 준비 단계 실패(리포 매핑 없음·claim 실패·실행 인프라 예외 — `execute`가 `finishFailed`로 직행)와 러너 연결 끊김(`failIncident`) —
+  워커 결과가 없어 합류점을 지나지 않는다.
+- best-effort: 실패는 warn 로그뿐(run 상태·리뷰·알림을 막지 않는다).
+- 스위치 `platform.agent.worklog.auto` = env `AGENT_AUTO_WORKLOG`(기본 true).
+
+### 14.2 실행 중 지시(D-P4b-5)
+
+사람이 RUNNING run에 지시를 남기면 그 run의 run 토큰으로 오는 **다음 MCP 도구 결과 끝**에 실려 워커에게 간다. 로컬 러너 run도 같은 서버 MCP라 그대로
+동작한다. 구현은 `directive` 패키지 + `tools.DirectiveDelivery`.
+
+| 엔드포인트 | 권한 | 응답 |
+|---|---|---|
+| `POST /api/agent/runs/{id}/directives` `{"text": "1~2000자"}` | cancel/resume과 같다(`@agentAuthz.canManageRun` — run 프로젝트 관리자, 없는 id는 전역만) | 201 `{id, runId, text, textRedacted:false, authorMemberId, createdAt, deliveredAt:null}` |
+| `GET /api/agent/runs/{id}/directives` | 인증 사용자 누구나(run 목록과 같다) | `[…같은 shape…]` 오래된 것 먼저. 본문은 run 프로젝트 관리자(전역 관리자 포함)만 — 그 밖은 `text:null, textRedacted:true` |
+
+- 검증 순서: 본문(400 — 앞뒤 공백 제거 후 1~2000자, §3-9 입력 인코딩 규약 `ToolInputGuard.invalidReason`, 오류에 본문 미기재) → run 없음 404 → **RUNNING이
+  아니면 409**("실행 중(RUNNING)인 run에만 지시할 수 있습니다(현재: X) — 대기 중이면 취소 후 지시문과 함께 다시 요청하거나 이슈 코멘트로 남기세요"). QUEUED여도
+  지시문(instruction)에 몰래 합치지 않는다.
+- GET 가림: 지시 본문은 사람이 쓴 지시라 사무실 가림 규칙(§6 — 권한 안 보는 표면에는 메타데이터만)과 같은 수준으로 관리자에게만 싣는다. 판정이 org 장애·
+  실패로 안 되면 503 대신 본문만 가린다(권한 조회 API와 같은 방향 — 화면이 깨지지 않게, 실제 관리 행위인 POST는 다시 판정한다).
+- 저장(V16 `run_directive`): `(id, run_id FK run, text VARCHAR(2000), author_member_id, created_at, delivered_at NULL)`, 부분 인덱스 `(run_id) WHERE delivered_at IS NULL` +
+  `(run_id, id)`. 생성 감사 `run.directive`(SYSTEM, 페르소나 null, summary `directive created run=N id=M` — 본문 없음).
+
+**전달(단일 지점)** — `ToolInputGuard`(모든 `SyncToolSpecification`을 감싸는 BeanPostProcessor, §3-9)가 도구 결과를 — 정상·오류·입력 거부 결과 모두 —
+`DirectiveDelivery.deliver`에 넘긴다. 새 도구도 자동으로 덮인다. 별도 BPP로 두지 않은 이유: BPP 간 감싸는 순서가 등록 순서에 기대게 되고, 입력 거부 결과에도
+지시가 실려야 해서 가장 바깥이 확실해야 한다.
+
+- 호출 principal이 run 토큰(`PatPrincipal.runToken()` + `runId`, §11)일 때만. 사람용 PAT(EXTERNAL)는 절대 받지 않는다(큐도 건드리지 않는다).
+- 원자적 가져가기(`RunDirectiveService.claimUndelivered`): 미전달 후보 조회(없으면 끝 — 도구 호출마다 도는 빠른 경로) → 후보마다 조건부 UPDATE
+  `set delivered_at=now where id=? and delivered_at is null and run.status=RUNNING` → 1행을 얻은 것만 싣는다. 동시에 도는 두 도구 호출은 서로소 집합을 받는다
+  (실 PostgreSQL 동시성 테스트 `RunDirectiveClaimRepositoryTest`). **run이 RUNNING이 아니면 전달하지 않는다** — `report_result`·`request_gate`가 run을 멈춘 바로 그
+  결과에 실어 "전달됨"으로 표시하면 읽을 워커가 없는데 사람은 먹혔다고 오해한다. 그런 지시는 미전달로 남는다(continuation run으로 넘어가지 않는다 — 다시 지시).
+- 결과 모양: 마지막 텍스트 항목 끝에 `\n\n[사람 지시 — 지금 반영하라]\n- <text>`(여러 건이면 줄마다 `- `, 오래된 것 먼저). `isError`·`structuredContent`·`meta` 보존.
+- 감사: `directive.deliver`(WORKER, run_id, summary `directive delivered run=N count=k` — 본문 없음). 가져오기 실패는 warn 후 원래 결과 그대로(지시는 미전달로
+  남아 다음 호출에 다시 시도).
+- 프롬프트(TASK·REVIEW·회의·승인 계획 회의·매니저 공통, `WorkerLauncher.appendDirectiveConvention`) 한 줄: "도구 결과 끝에 `[사람 지시 — 지금 반영하라]`가 붙으면
+  사용자 직접 지시와 같은 급의 사람 지시다 — 즉시 반영하되 규약이 우선한다. 지시가 도착할 수 있게 적어도 몇 단계마다 한 번은 report_progress(runId=N, …)를
+  호출한다." 지시문 없는 TASK 골든 프롬프트는 이 한 줄만 늘었다(§5.6 "바이트 단위 동일" 불변식의 의도적 갱신). 문구에 `<사용자-지시>` 태그를 쓰지 않는 이유:
+  그 블록이 없는 프롬프트에 태그 문자열이 나타나면 "지시 블록 없음" 판정(테스트·리뷰)이 흐려진다.
+- 사무실: `currentRun.pendingDirectiveCount`(미전달 개수, 없으면 0 — 쿼리 1회).
+
+**한계** — 지시는 워커가 **다음에 도구를 부를 때** 도착한다(도구 없이 긴 생각·빌드 중이면 늦다 — 그래서 프롬프트에 report_progress 주기를 적었다). 워커가
+지시를 실제로 따랐는지는 서버가 검사하지 않는다. 사무실 대화의 "지시하기"를 이 API로 보낼지(실행 중 run)·코멘트로 보낼지는 프론트 몫(P4b T3).
