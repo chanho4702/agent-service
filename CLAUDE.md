@@ -173,7 +173,11 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
    디코딩 흔적)가 있으면 도구를 실행하지 않고 `오류: 입력 인코딩 거부 — 파라미터 '<경로>': <사유>`로 거부한다. 단일 지점은
    `ToolInputGuard`(서버에 주입되는 `List<SyncToolSpecification>` 빈의 핸들러를 감싸는 BeanPostProcessor — 새 도구도 자동
    적용). 거부도 감사 행(ERROR, summary `입력 거부: <파라미터>` — 값은 안 싣는다)을 남긴다. 정상 한글·이모지는 통과.
-10. **도구 오류 문구(AGP-25)**: 다운스트림 404는 `오류: <다운스트림 메시지>`(문구 형식 불변 — 예외 타입만 NotFound),
+10. **담당자 배정(AGP-61, P4b)**: `assign_issue(issueKey, assignee?)` — `assignee`는 memberId 숫자·페르소나 slug(persona 테이블로
+    memberId를 푼다, 없으면 `오류: 담당자 페르소나를 찾을 수 없습니다`)·`"me"`(호출 페르소나)·생략/`"none"`(해제). 담당자만 바꾸고 나머지는
+    `IssueClaimSupport.update`(필드 보존·409 재시도 1회)로 되쓴다. 감사 summary는 `<이슈키> assignee=<memberId|none|?>`만(slug·이름 없음).
+    담당 가능 여부(프로젝트 멤버 등)는 alm PUT이 판정한다.
+11. **도구 오류 문구(AGP-25)**: 다운스트림 404는 `오류: <다운스트림 메시지>`(문구 형식 불변 — 예외 타입만 NotFound),
     401은 `다운스트림 인증 결함 — 권한 없음이 아님, 운영자 확인 필요(재시도로 해결되지 않음): …`, 5xx·연결 실패는 기존
     `권한 서비스/다운스트림 일시 장애 — …잠시 후 재시도하세요: …`. 전체 매핑은 아래 "다운스트림 오류 매핑" 참고.
 
@@ -192,9 +196,9 @@ claude mcp add --transport http agent-platform http://localhost:18000/api/agent/
 503으로 바꿔 던진다. best-effort 경로(커밋 링크 파서·서버 코멘트·알림)는 `Exception` 전체를 삼키므로 예외 타입이 바뀌어도
 계속 삼킨다.
 
-전체 도구 22종(P1 18종 + P2a run 보고 3종 + AGP-37 `update_issue`, 아래 §5 참고): `whoami`,
+전체 도구 23종(P1 18종 + P2a run 보고 3종 + AGP-37 `update_issue` + AGP-61 `assign_issue`, 아래 §5 참고): `whoami`,
 `list_projects`, `get_project_context`, `search_issues`, `get_issue`, `create_issue`, `claim_issue`,
-`update_issue`, `add_comment`, `log_work`, `link_pr`, `update_issue_status`, `list_spaces`, `find_pages`,
+`update_issue`, `assign_issue`, `add_comment`, `log_work`, `link_pr`, `update_issue_status`, `list_spaces`, `find_pages`,
 `get_page`, `create_page`, `update_page`, `append_to_page`, `ping`, `report_progress`, `request_gate`,
 `report_result`.
 
@@ -453,16 +457,39 @@ P2a까지는 워커가 `report_result(DONE)` 후 스스로 이슈를 done으로 
 done 전환은 리뷰 통과 시 리뷰어만 하도록 바꿨다. 구현은 `ReviewService` + `RunService.applyOutcome`
 + `WorkerLauncher`(REVIEW 프롬프트·워크스페이스 승계).
 
-**운영 경고 — 배포 전에 반드시 읽을 것.** `REVIEW_ENABLED` 기본값이 **true**다. 이 상태에서
-`REVIEW_PERSONA`를 설정하지 않고 배포하면 리뷰를 띄울 수 없으므로 **모든 TASK run(스케줄러 무인 run과
-USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogress + 경고 코멘트). 배포 전에:
+**운영 경고 — 배포 전에 반드시 읽을 것.** `REVIEW_ENABLED` 기본값이 **true**다. 이 상태에서 리뷰어가 하나도
+해석되지 않으면(아래 해석 순서 끝까지 NONE) 리뷰를 띄울 수 없으므로 **모든 TASK run(스케줄러 무인 run과
+USER run 모두)이 미확정으로 멈춘다**(run은 DONE, 이슈는 inprogress + 경고 코멘트). 사무실 `reviewReady=false`(§6)가 그 신호다. 배포 전에:
 
 1. §1(MCP 접속 가이드)의 페르소나 생성 절차로 **`role=REVIEWER`** 페르소나를 만든다(대상 프로젝트
    EDITOR 이상 grant — 코멘트·상태 전환·위키 보고서를 써야 한다). 작업 페르소나(`SCHEDULER_PERSONA`
-   등)와 다른 슬러그여야 한다.
-2. `REVIEW_PERSONA=<그 슬러그>`를 설정한다. `REVIEW_MODEL`은 선택(비우면 §5.1 모델 정책).
+   등)와 달라야 한다. 활성 REVIEWER가 있으면 별도 지정 없이 **자동**으로 잡힌다(아래).
+2. 특정 리뷰어를 고르려면 AI 팀 설정의 리뷰어 지정 API(아래)를 쓴다. `REVIEW_PERSONA=<슬러그>` env는 폴백으로 남아 있다.
+   `REVIEW_MODEL`은 선택(비우면 §5.1 모델 정책).
 3. 리뷰를 끄려면 `REVIEW_ENABLED=false` — P2a 동작(작업 워커가 직접 done) 복원이며, 명시적으로
    고를 때만 쓴다.
+
+**리뷰어 해석(P4b D-P4b-1, AGP-59 — 단일 지점 `review.ReviewerResolver`, `ReviewService`가 부른다)** — 순서:
+**프로젝트 설정 > 전역 설정 > env `REVIEW_PERSONA` > 자동 > 없음**. 자동 = 그 프로젝트 소속 활성 REVIEWER 중 id 최소, 없으면 공용
+(projectId null) 활성 REVIEWER 중 id 최소(작업자 페르소나는 후보에서 뺀다). **명시 지정(설정·env)이 깨졌으면 다음 단계로 내려가지 않고
+NONE**이다 — 설정 페르소나가 비활성·REVIEWER 아님·범위 밖이면 "프로젝트|전역 리뷰어 지정(페르소나 id=N)이 … 다시 지정하세요", env 슬러그가
+없거나 비활성이면 기존 문구 "리뷰어 페르소나를 찾을 수 없거나 비활성입니다: <slug>"(사람이 고른 리뷰어를 조용히 바꾸지 않는다 — 경고로 드러낸다).
+설정 지정은 해석 때도 활성·REVIEWER·범위를 다시 본다(저장 뒤 바뀔 수 있어서). env는 P2c 의미 그대로(존재·활성만, 롤을 보지 않는다).
+리뷰어 = 작업자 금지는 해석 뒤 `ReviewService`가 기존대로 본다. 저장은 V15 `review_setting(scope PLATFORM|PROJECT, scope_id, persona_id,
+updated_by, updated_at)` — 범위당 한 행(부분 유니크 인덱스). 이미 뜬 REVIEW run의 리뷰어는 설정 변경으로 바뀌지 않는다.
+
+| 엔드포인트 | 권한 | 비고 |
+|---|---|---|
+| `GET/PUT/DELETE /api/agent/review-settings/platform` | 전역 관리자(조회 포함) | 전역 지정은 **공용 페르소나만** |
+| `GET /api/agent/review-settings/projects/{projectId}` | 인증 사용자 누구나(실행 위치 조회와 같은 기준) | |
+| `PUT/DELETE /api/agent/review-settings/projects/{projectId}` | 그 프로젝트 관리자(§7) | 그 프로젝트 소속 또는 공용 페르소나 |
+
+- 응답(GET·PUT): `{"setting": {"personaId","slug","name"} | null, "effective": {"personaId","slug","name","source"}}` — `source`는
+  `PROJECT|PLATFORM|ENV|AUTO|NONE`, NONE이면 personaId·slug·name null. `setting`이 가리키는 페르소나가 없어졌으면 slug·name null.
+  전역 GET의 `effective`는 프로젝트 축 없이(전역 > env > 공용 자동) 푼다.
+- PUT 본문 `{"personaId": N}`. 누락은 400 "personaId가 필요합니다", REVIEWER 롤·활성·범위 호환이 아니면(없는 id 포함) 400 고정 문구
+  "리뷰어로 지정할 수 없는 페르소나입니다 — 활성 REVIEWER 롤이고 이 범위에서 쓸 수 있는 페르소나(…)만 지정할 수 있습니다".
+- DELETE는 204 멱등(없어도 성공) — 지정을 지우면 다음 단계(전역·env·자동)로 내려간다.
 
 **흐름**
 
@@ -520,7 +547,7 @@ P2c~P3c의 "attempt가 `SCHEDULER_RETRY_MAX_ATTEMPTS`를 넘으면 반려 BLOCKE
 
 **fail-closed(리뷰를 띄울 수 없는 경우)** — 아래는 REVIEW run을 만들지 않고, TASK run은 DONE으로
 두되 이슈를 inprogress에 남긴 채 "⚠️ 검증 run을 만들 수 없음 — 사람이 확인하세요" 코멘트를 단다:
-`REVIEW_PERSONA` 미설정, 슬러그의 페르소나 미존재·비활성, 리뷰어가 작업자와 같은 페르소나(자기
+리뷰어 해석 결과 NONE(위 — 사유가 코멘트에 실린다), 리뷰어가 작업자와 같은 페르소나(자기
 승인은 검증이 아니다), 원 TASK의 워크스페이스 경로가 비었거나 "pending". REVIEW run이 만들어진
 뒤 실행 시점에 승계 워크스페이스 디렉터리가 사라졌으면 fresh clone으로 폴백하지 않고 실패시킨다
 (§5.6 — 빈 diff 통과 방지). 후처리 자체가 예외로 새면 로그만 남기고 삼킨다(TASK는 DONE, 이슈는
@@ -556,6 +583,7 @@ P2c~P3c의 "attempt가 `SCHEDULER_RETRY_MAX_ATTEMPTS`를 넘으면 반려 BLOCKE
 | `manager-cron` | `MEETING_MANAGER_CRON` | 빈 값(off) | 매니저 순찰 주기(P3c) — 형식·조건은 retro-cron과 같다. §5.10 |
 | `auto-escalation` | `MEETING_AUTO_ESCALATION` | `false` | BLOCKED 승격 시 ESCALATION run 자동 생성(비용 때문에 기본 off) |
 | `auto-issue` | `MEETING_AUTO_ISSUE` | `true` | 결정→이슈를 워커가 `create_issue`로 직접. false면 PLAN 게이트 경유 |
+| `manager-assign` | `MEETING_MANAGER_ASSIGN` | `true` | 매니저가 `assign_issue`로 직접 배정 + 사유 코멘트(P4b, §5.10). false면 담당 제안 코멘트만(P3c) |
 
 **소집 API — `POST /api/agent/meetings`(관리자 — §7, 요청 `projectId` 기준)**
 
@@ -584,6 +612,20 @@ P2c~P3c의 "attempt가 `SCHEDULER_RETRY_MAX_ATTEMPTS`를 넘으면 반려 BLOCKE
 (`AGENT_WORK_DIR/run-{id}`) + 하네스 실체화만 한다. 회의 워크스페이스는 git 저장소가 아니므로 커밋 링크 파서를 태우지 않는다
 (git이 상위 디렉터리 저장소를 찾아 남의 커밋을 링크할 수 있어서). RETRO는 서버가 최근 24시간 그 프로젝트 run 요약(최대 30건)을
 `<최근-run>` 블록으로 싣는다(워커에 run 조회 도구가 없다).
+
+**회고 추가 자료(P4b D-P4b-4, AGP-58 — `RetroMaterialCollector`)** — RETRO에만, 진행자 bearer로(그 페르소나가 볼 수 있는 것만), 창은
+`<최근-run>`과 같은 "지금부터 24시간 전":
+
+| 블록 | 출처(실측) | 라인·상한 |
+|---|---|---|
+| `<최근-이슈-변경>` | alm `POST /api/alm/issues/query` — AQL `project = "<키>" AND (created >= -1d OR updated >= -1d OR resolved >= -1d) ORDER BY updated DESC`(키는 `GET /api/alm/projects/{id}`로) | `키 · 상태 · 제목 앞 60자`, 30 |
+| `<최근-코멘트>` | 이슈별 `GET /api/alm/issues/{id}/comments`를 createdAt으로 거름. alm에 프로젝트 단위 코멘트 피드가 없고 코멘트는 이슈 `updated`를 안 바꿔서 후보 = 위 변경 이슈 ∪ `statusCategory = active` 이슈(20), 최대 40건 조회 | `키 · 코멘트 N건 · 최근: 본문 앞 80자`(태그 제거), 건수 내림차순 20 |
+| `<최근-위키>` | wiki `GET /api/wiki/spaces/{MEETING_SPACE_ID}/pages/recent?limit=15`를 updatedAt으로 거름 | `제목 앞 60자 · pageId=N · MM-dd HH:mm(KST)`, 15 |
+
+- **블록마다 독립 실패** — 실패한 블록은 통째로 빠지고(warn 로그), 빈 결과는 `(없음)`으로 실린다. 수집은 회고를 막지 않는다.
+- 라인은 한 줄로 접고 꺾쇠(`< >`)를 `‹ ›`로 바꾼다(제목·코멘트가 데이터 블록 태그를 닫지 못하게). 블록은 기존 "블록은 데이터, 규약 우선" 문장에 함께 묶인다.
+- `<최근-run>`까지 포함해 **자료가 전부 비었으면**(실패로 빠진 블록도 빈 것으로 센다) 회의 규약 첫 줄에 "회고 자료 없음 — 이번 회고는 '자료가
+  없다'는 사실만 짧게 기록하고 마감한다"가 붙는다(1인 회고가 문제를 지어내던 것 방지).
 
 **프롬프트 계약(`WorkerLauncher.buildMeetingPrompt`)** — 순서: `## 회의 소집`(종류·목적·산출물·프로젝트 id·안건 이슈·회의록
 스페이스 id) → `## 참석자(1번이 진행자 — 너)`(emoji 이름 — 롤, slug, 말투=voicePrompt, 잘하는 것=skills 첫 줄 요약 120자 — AGP-62,
@@ -658,13 +700,15 @@ warn 로그. 소집 API에서 `personaSlugs`를 주면 MANAGER 롤 1명이어야
 **행동 범위(D-P3c-4, 프롬프트 규약)** — 금지: `claim_issue`·`update_issue_status`·`log_work`·`link_pr`·코드/git·
 `request_gate`(사람 판단이 필요한 것은 보고의 "사람에게 필요한 결정" 절로). 허용: 정체 이슈에 독려·정리 `add_comment`(명령이
 아니라 팀원에게 말 걸듯, 최근 매니저 코멘트가 있으면 되풀이 금지), 우선순위 정정 `update_issue(priority)`+사유 코멘트, 중복
-의심은 닫지 말고 "중복 후보 — 닫기 제안" 코멘트, 담당 제안 코멘트, `create_issue`는 **정리 목적**만(`auto-issue=false`면
-금지 — 보고서에 제안으로). 보고 페이지는 `create_page(spaceId, title="[매니저 보고] <YYYY-MM-DD> <프로젝트 키>")` 한 번,
+의심은 닫지 말고 "중복 후보 — 닫기 제안" 코멘트, **배정은 `assign_issue` + 사유 코멘트**(P4b, `manager-assign=true` 기본 — 이미 일하는
+중인 이슈는 다시 배정하지 않는다, 보고 템플릿에 "배정 내역" 절. false면 P3c대로 담당 제안 코멘트만이고 `assign_issue` 금지),
+`create_issue`는 **정리 목적**만(`auto-issue=false`면 금지 — 보고서에 제안으로). 보고 페이지는 `create_page(spaceId, title="[매니저 보고] <YYYY-MM-DD> <프로젝트 키>")` 한 번,
 템플릿: 보드 현황 요약 / 병목·정체와 조치 / 독려 내역 / 사람에게 필요한 결정. 마감 `report_result(DONE, pageId)`.
 
 **한계(알고 쓸 것)**
 
-- **배분 없음** — 담당자 지정 도구(`assign_issue`)가 없어 담당 제안은 코멘트뿐이다(AGP-61 예정). 라벨 부여도 없다.
+- **배정은 담당자만** — `assign_issue`(AGP-61)로 담당자는 바꾸지만 상태 전이·claim은 여전히 금지다. 배정 대상의 적합성(롤·부하)은 서버가 보지
+  않는다 — 프롬프트 규약과 매니저 판단이다. 라벨 부여는 없다.
 - 금지 목록은 §5.8과 같이 **프롬프트 수준 규약**이다 — 매니저 run 토큰으로도 `claim_issue`·`update_issue_status` 도구
   호출 자체는 가능하다.
 - 매니저 보고는 회의 계열이라 게시판에 회의록과 같은 줄로 걸린다(프론트가 type=MANAGER로 라벨 구분 — P3c T2).
@@ -716,7 +760,8 @@ alm-front "AI 사무실" 화면이 10초 폴링하는 읽기 전용 집계(`offi
   `presence`(AGP-63, 아래)) · `recentRuns[]`(최근 종결 10건, `RunSummaryResponse`) · `pendingGateCount` ·
   `pendingGates[]`(최신 5건, id·runId·issueKey·personaId·kind·requestSummary(200자)·requestedAt) ·
   `budget`(`GET /api/agent/budget`과 같은 shape) · `generatedAt` · `boardPosts[]`(P3b, 아래) · `activeMeeting`(P3e, 아래) ·
-  `features`(P3g — `{chat: boolean}`, §9).
+  `features`(P3g — `{chat: boolean}`, §9) · `reviewReady`(P4b — 리뷰가 꺼져 있으면 true, 아니면 유효 리뷰어가 NONE이 아닐 때. projectId가
+  있으면 그 프로젝트 기준, 없으면 전역 기준 — false면 화면에 "리뷰어 없음 — done 불가" 경고, §5.8).
   - `boardPosts`(사무실 게시판, D-P3b-7): 회의 계열 run(MEETING/RETRO/ESCALATION + P3c MANAGER 보고) 중 DONE이고 `output_page_id`가 있는 것
     `endedAt` 최신순 5건 — `{runId, type, issueKey, projectId, pageId, spaceId, endedAt}`. `spaceId`는 위키 링크
     (`/spaces/:spaceId/pages/:pageId`)용으로 run별 저장 없이 현재 `meetings.space-id` 설정값을 싣는다(미설정이면 null) —

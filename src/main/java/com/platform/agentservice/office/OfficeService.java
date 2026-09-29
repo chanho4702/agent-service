@@ -14,6 +14,7 @@ import com.platform.agentservice.office.dto.PersonaActivityResponse;
 import com.platform.agentservice.office.dto.PersonaPresence;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
+import com.platform.agentservice.review.ReviewerResolver;
 import com.platform.agentservice.run.Gate;
 import com.platform.agentservice.run.GateRepository;
 import com.platform.agentservice.run.MeetingProperties;
@@ -77,6 +78,8 @@ public class OfficeService {
     private final ChatAvailability chatAvailability;
     /** "러너 대기" 판정(P4a) — 테스트 생성자에서는 null(러너 없음·인프로세스 켜짐으로 본다). */
     private final RunnerAvailability runnerAvailability;
+    /** 리뷰어 준비 판정(P4b) — 테스트 생성자에서는 null(준비된 것으로 본다). */
+    private final ReviewerResolver reviewerResolver;
     private final Clock clock;
 
     @Autowired
@@ -84,9 +87,9 @@ public class OfficeService {
                          GateRepository gateRepository, ToolCallAuditRepository auditRepository,
                          UsageLedgerRepository ledgerRepository, BudgetService budgetService,
                          MeetingProperties meetingProperties, ChatAvailability chatAvailability,
-                         RunnerAvailability runnerAvailability) {
+                         RunnerAvailability runnerAvailability, ReviewerResolver reviewerResolver) {
         this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
-                meetingProperties, chatAvailability, runnerAvailability, Clock.systemUTC());
+                meetingProperties, chatAvailability, runnerAvailability, reviewerResolver, Clock.systemUTC());
     }
 
     /** 테스트 전용 — 5분 창·오늘 경계를 고정 시각으로 검증한다(러너 판정 없음). */
@@ -95,15 +98,16 @@ public class OfficeService {
                   UsageLedgerRepository ledgerRepository, BudgetService budgetService,
                   MeetingProperties meetingProperties, ChatAvailability chatAvailability, Clock clock) {
         this(personaRepository, runRepository, gateRepository, auditRepository, ledgerRepository, budgetService,
-                meetingProperties, chatAvailability, null, clock);
+                meetingProperties, chatAvailability, null, null, clock);
     }
 
     OfficeService(PersonaRepository personaRepository, RunRepository runRepository,
                   GateRepository gateRepository, ToolCallAuditRepository auditRepository,
                   UsageLedgerRepository ledgerRepository, BudgetService budgetService,
                   MeetingProperties meetingProperties, ChatAvailability chatAvailability,
-                  RunnerAvailability runnerAvailability, Clock clock) {
+                  RunnerAvailability runnerAvailability, ReviewerResolver reviewerResolver, Clock clock) {
         this.runnerAvailability = runnerAvailability;
+        this.reviewerResolver = reviewerResolver;
         this.personaRepository = personaRepository;
         this.runRepository = runRepository;
         this.gateRepository = gateRepository;
@@ -175,7 +179,8 @@ public class OfficeService {
                 gates.size(), gates.stream().limit(PENDING_GATE_LIMIT).toList(), budget, now,
                 posts.stream().map(r -> toBoardPost(r, spaceId)).toList(),
                 meeting.map(OfficeService::toActiveMeeting).orElse(null),
-                new OfficeResponse.Features(chatAvailability.available(projectId)));
+                new OfficeResponse.Features(chatAvailability.available(projectId)),
+                reviewerResolver == null || reviewerResolver.reviewReady(projectId));
     }
 
     /** 참석자 컬럼이 비면(회의 계열인데 명단 없이 만들어진 행) 진행자 1인 회의로 본다 — 회의실이 빈 방이 되면 안 된다. */

@@ -30,7 +30,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * ALM 이슈 도구 9종(S10, AGP-37 update_issue 추가). 전부 페르소나 서비스 토큰({@link TokenService#bearerFor})으로
+ * ALM 이슈 도구 10종(S10, AGP-37 update_issue·AGP-61 assign_issue 추가). 전부 페르소나 서비스 토큰({@link TokenService#bearerFor})으로
  * alm-backend를 호출하고, {@link Audited}로 감사 로그를 남긴다. 각 메서드는 가장 먼저
  * {@link ToolActor#current()}로 호출자를 확인한다 — bearer 토큰을 만들려면 어차피
  * {@code actor.personaMemberId()}가 필요하고, {@link Audited#run}도 내부적으로 다시
@@ -197,6 +197,39 @@ public class IssueTools {
         });
     }
 
+    /**
+     * AGP-61(D-P4b-3): 담당자만 바꾼다 — 상태·다른 필드는 {@link IssueClaimSupport#update}가 현재 값으로 되쓴다(409 재시도 포함).
+     * 감사 summary에는 이슈 키와 해석된 memberId만 싣는다(슬러그·이름 없음). 담당 가능 여부(프로젝트 멤버 등) 판정은 alm PUT이 한다.
+     */
+    @McpTool(name = "assign_issue", description = "이슈 담당자를 지정하거나 해제한다(상태·다른 필드는 그대로). "
+            + "assignee: memberId 숫자, 페르소나 slug, \"me\"(나), 생략·\"none\"(해제).")
+    public String assignIssue(
+            @McpToolParam(description = "이슈 키", required = true) String issueKey,
+            @McpToolParam(description = "담당자 — memberId 숫자, 페르소나 slug, \"me\"(현재 페르소나), 생략 또는 \"none\"이면 해제",
+                    required = false) String assignee) {
+        PatPrincipal actor = ToolActor.current();
+        Long assigneeId = null;
+        RuntimeException invalid = null;
+        try {
+            assigneeId = resolveAssignee(assignee, actor);
+        } catch (RuntimeException e) {
+            invalid = e;
+        }
+        final Long target = assigneeId;
+        final RuntimeException resolveError = invalid;
+        String summary = issueKey + " assignee=" + (resolveError != null ? "?" : target == null ? "none" : target);
+        return audited.run("assign_issue", summary, () -> {
+            if (resolveError != null) {
+                throw resolveError;
+            }
+            String bearer = tokenService.bearerFor(actor.personaMemberId());
+            IssueResponse updated = issueClaimSupport.update(issueKey, req -> req.withAssigneeId(target), bearer);
+            return updated.assigneeId() == null
+                    ? "이슈 " + updated.key() + " 담당자 해제 완료"
+                    : "이슈 " + updated.key() + " 담당자 지정 완료 (memberId=" + updated.assigneeId() + ")";
+        });
+    }
+
     @McpTool(name = "add_comment", description = "이슈에 코멘트를 남긴다(조회 권한만 있어도 가능).")
     public String addComment(
             @McpToolParam(description = "이슈 키", required = true) String issueKey,
@@ -255,6 +288,25 @@ public class IssueTools {
         return personaRepository.findBySlug(assigneeSlug)
                 .map(Persona::getMemberId)
                 .orElseThrow(() -> new NotFoundException("담당자 페르소나를 찾을 수 없습니다: " + assigneeSlug));
+    }
+
+    /** null·공백·"none" = 해제, "me" = 호출 페르소나, 숫자 = memberId, 그 밖 = 페르소나 slug(없으면 404 문구). */
+    private Long resolveAssignee(String assignee, PatPrincipal actor) {
+        if (assignee == null || assignee.isBlank() || "none".equalsIgnoreCase(assignee.trim())) {
+            return null;
+        }
+        String value = assignee.trim();
+        if ("me".equalsIgnoreCase(value)) {
+            return actor.personaMemberId();
+        }
+        if (value.chars().allMatch(Character::isDigit)) {
+            try {
+                return Long.parseLong(value);
+            } catch (NumberFormatException e) {
+                throw new IllegalArgumentException("담당자 memberId가 너무 큽니다: " + value);
+            }
+        }
+        return resolveAssigneeId(value);
     }
 
     private Long resolveParentId(String parentKey, String bearer) {

@@ -40,16 +40,32 @@ public record WorkerJob(String repoUrl, String issueTitle, String issueBody, Lis
      * {@code approvedPlan}은 PLAN 게이트 승인 뒤 이어받은 run에서만 채워진다(승인된 요청문 — 있으면 회의를 다시 열지 않는다).
      * {@code pendingGates}·{@code blockedRuns}는 매니저 순찰 자료(P3c, D-P3c-3 — MANAGER만) — 워커에는 게이트·run을
      * 조회하는 도구가 없어서 서버가 요약 라인을 실어 준다.
+     * {@code managerAssign}(P4b, AGP-61)은 매니저가 {@code assign_issue}로 직접 배정해도 되는지(false면 담당 제안 코멘트만),
+     * {@code retro}(P4b, AGP-58)는 RETRO 회고 자료 — 그 밖 run이면 null.
      */
     public record MeetingContext(long projectId, long spaceId, boolean autoIssue, List<Attendee> attendees,
                                  List<String> recentRuns, String approvedPlan, List<String> pendingGates,
-                                 List<String> blockedRuns) {
+                                 List<String> blockedRuns, boolean managerAssign, RetroData retro) {
 
         /** 매니저 순찰 자료가 없는 회의 3종용. */
         public MeetingContext(long projectId, long spaceId, boolean autoIssue, List<Attendee> attendees,
                               List<String> recentRuns, String approvedPlan) {
             this(projectId, spaceId, autoIssue, attendees, recentRuns, approvedPlan, List.of(), List.of());
         }
+
+        /** P3c 시그니처 — 매니저 배정 없음(담당 제안 코멘트만), 회고 추가 자료 없음. */
+        public MeetingContext(long projectId, long spaceId, boolean autoIssue, List<Attendee> attendees,
+                              List<String> recentRuns, String approvedPlan, List<String> pendingGates,
+                              List<String> blockedRuns) {
+            this(projectId, spaceId, autoIssue, attendees, recentRuns, approvedPlan, pendingGates, blockedRuns, false, null);
+        }
+    }
+
+    /**
+     * 회고 자료(P4b D-P4b-4) — 서버가 최근 24시간 ALM·위키에서 모은 요약 라인. 각 목록이 <b>null이면 수집 실패</b>(프롬프트에서 블록
+     * 자체를 뺀다), 빈 목록이면 "해당 없음"이다.
+     */
+    public record RetroData(List<String> issueChanges, List<String> commentCounts, List<String> recentPages) {
     }
 
     public WorkerJob withExpertise(Expertise expertise) {

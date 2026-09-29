@@ -14,6 +14,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * {@link #autoEscalation()} 기본 false는 비용 때문이다 — BLOCKED마다 회의 run이 하나씩 붙는다.
  * {@link #autoIssue()} 기본 true는 스펙 §6 "결정→이슈 생성은 프로젝트 설정으로 자동 허용 가능"의 기본값이다 —
  * false면 워커는 이슈를 직접 만들지 않고 PLAN 게이트로 사람 승인을 받는다.
+ * {@link #managerAssign()}(P4b, AGP-61) 기본 true — 매니저가 {@code assign_issue}로 직접 배정하고 사유 코멘트를 남긴다. false면
+ * P3c 규칙(담당 제안은 코멘트뿐)으로 돌아간다.
  */
 @ConfigurationProperties(prefix = "platform.agent.meetings")
 public record MeetingProperties(
@@ -21,7 +23,8 @@ public record MeetingProperties(
         String retroCron,
         @DefaultValue("false") boolean autoEscalation,
         @DefaultValue("true") boolean autoIssue,
-        String managerCron
+        String managerCron,
+        @DefaultValue("true") boolean managerAssign
 ) {
 
     /** 생성자가 여럿이라 바인딩 대상을 명시해야 한다 — 없으면 Spring Boot가 어느 쪽으로 바인딩할지 정하지 못한다. */
@@ -32,6 +35,11 @@ public record MeetingProperties(
     /** 매니저 cron 없이 쓰는 기존 호출부용(P3b 시그니처). */
     public MeetingProperties(Long spaceId, String retroCron, boolean autoEscalation, boolean autoIssue) {
         this(spaceId, retroCron, autoEscalation, autoIssue, null);
+    }
+
+    /** 매니저 배정 스위치 없이 쓰는 기존 호출부용(P3c 시그니처) — 기본값(true)과 같다. */
+    public MeetingProperties(Long spaceId, String retroCron, boolean autoEscalation, boolean autoIssue, String managerCron) {
+        this(spaceId, retroCron, autoEscalation, autoIssue, managerCron, true);
     }
 
     public boolean hasSpace() {

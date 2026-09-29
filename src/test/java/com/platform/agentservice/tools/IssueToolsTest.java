@@ -516,6 +516,76 @@ class IssueToolsTest {
                 List.of(statuses), List.of(), List.of(), List.of(), "medium", List.of(), java.util.Map.of()));
     }
 
+    // ---- assign_issue(AGP-61): 담당자만 바뀌고 나머지는 보존, 감사 summary는 키 + memberId만 ----
+
+    private IssueUpdateRequest assignExpectation(IssueResponse fetched, Long assigneeId) {
+        return new IssueUpdateRequest(fetched.title(), fetched.description(), fetched.type(), fetched.status(),
+                fetched.priority(), assigneeId, null, fetched.version(), null);
+    }
+
+    @Test
+    void assign_issue_by_slug_resolves_member_id_and_preserves_status() {
+        IssueResponse fetched = issue(1L, "PROJ-1", "inprogress", 7L, 2);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(fetched);
+        Persona target = Persona.of(77L, "bot-a", PersonaRole.BACKEND, "봇A", null, null);
+        when(personaRepository.findBySlug("bot-a")).thenReturn(Optional.of(target));
+        when(almClient.update(1L, assignExpectation(fetched, 77L), BEARER)).thenReturn(issue(1L, "PROJ-1", "inprogress", 77L, 3));
+
+        String result = issueTools.assignIssue("PROJ-1", "bot-a");
+
+        assertThat(result).isEqualTo("이슈 PROJ-1 담당자 지정 완료 (memberId=77)");
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("assign_issue"), eq("PROJ-1 assignee=77"),
+                eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
+    }
+
+    @Test
+    void assign_issue_accepts_me_member_id_numbers_and_none_to_unassign() {
+        IssueResponse fetched = issue(1L, "PROJ-1", "todo", 7L, 2);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(fetched);
+        when(almClient.update(eq(1L), org.mockito.ArgumentMatchers.any(IssueUpdateRequest.class), eq(BEARER)))
+                .thenAnswer(inv -> {
+                    IssueUpdateRequest req = inv.getArgument(1);
+                    return issue(1L, "PROJ-1", "todo", req.assigneeId(), 3);
+                });
+
+        assertThat(issueTools.assignIssue("PROJ-1", "me")).contains("memberId=" + PERSONA_MEMBER_ID);
+        assertThat(issueTools.assignIssue("PROJ-1", " 55 ")).contains("memberId=55");
+        assertThat(issueTools.assignIssue("PROJ-1", "none")).isEqualTo("이슈 PROJ-1 담당자 해제 완료");
+        assertThat(issueTools.assignIssue("PROJ-1", null)).isEqualTo("이슈 PROJ-1 담당자 해제 완료");
+
+        verify(almClient).update(1L, assignExpectation(fetched, PERSONA_MEMBER_ID), BEARER);
+        verify(almClient).update(1L, assignExpectation(fetched, 55L), BEARER);
+        verify(almClient, times(2)).update(1L, assignExpectation(fetched, null), BEARER);
+        verify(personaRepository, never()).findBySlug(org.mockito.ArgumentMatchers.any());
+        verify(auditService, times(2)).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("assign_issue"), eq("PROJ-1 assignee=none"),
+                eq(AuditStatus.OK), eq(AuditOrigin.EXTERNAL), isNull());
+    }
+
+    @Test
+    void assign_issue_with_unknown_slug_is_an_audited_error_without_calling_alm() {
+        when(personaRepository.findBySlug("ghost")).thenReturn(Optional.empty());
+
+        String result = issueTools.assignIssue("PROJ-1", "ghost");
+
+        assertThat(result).contains("담당자 페르소나를 찾을 수 없습니다: ghost");
+        verify(almClient, never()).update(org.mockito.ArgumentMatchers.anyLong(), org.mockito.ArgumentMatchers.any(),
+                org.mockito.ArgumentMatchers.anyString());
+        verify(auditService).record(eq(PERSONA_ID), eq(OWNER_MEMBER_ID), eq("assign_issue"), eq("PROJ-1 assignee=?"),
+                eq(AuditStatus.ERROR), eq(AuditOrigin.EXTERNAL), isNull());
+    }
+
+    @Test
+    void assign_issue_retries_once_on_409_and_keeps_the_fresh_status() {
+        IssueResponse v2 = issue(1L, "PROJ-1", "todo", null, 2);
+        IssueResponse v3 = issue(1L, "PROJ-1", "inprogress", null, 3);
+        when(almClient.getByKey("PROJ-1", BEARER)).thenReturn(v2, v3);
+        when(almClient.update(1L, assignExpectation(v2, 55L), BEARER))
+                .thenThrow(new AlmClient.VersionConflictException("conflict"));
+        when(almClient.update(1L, assignExpectation(v3, 55L), BEARER)).thenReturn(issue(1L, "PROJ-1", "inprogress", 55L, 4));
+
+        assertThat(issueTools.assignIssue("PROJ-1", "55")).contains("memberId=55");
+    }
+
     private static IssueResponse issue(long id, String key, String status, Long assigneeId, int version) {
         return new IssueResponse(id, key, 9L, "제목", "설명", "task", status, "high", assigneeId, 1L,
                 null, null, null, null, null, null, List.of(), List.of(), 0L, version, null, null, null);

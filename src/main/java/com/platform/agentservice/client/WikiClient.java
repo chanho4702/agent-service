@@ -14,6 +14,7 @@ import org.springframework.web.client.HttpStatusCodeException;
 import org.springframework.web.client.RestClient;
 import org.springframework.web.client.RestClientException;
 
+import java.time.Instant;
 import java.util.List;
 
 /**
@@ -30,6 +31,8 @@ public class WikiClient {
     private static final ParameterizedTypeReference<List<SpaceResponse>> SPACE_LIST =
             new ParameterizedTypeReference<>() {};
     private static final ParameterizedTypeReference<List<PageNode>> PAGE_NODE_LIST =
+            new ParameterizedTypeReference<>() {};
+    private static final ParameterizedTypeReference<List<RecentPage>> RECENT_PAGE_LIST =
             new ParameterizedTypeReference<>() {};
 
     private final RestClient wikiRestClient;
@@ -85,6 +88,29 @@ public class WikiClient {
         } catch (RestClientException e) {
             throw DownstreamErrors.map(e, "문서 제목 검색");
         }
+    }
+
+    /**
+     * {@code GET /api/wiki/spaces/{spaceId}/pages/recent?limit=} — 최근 수정순(P4b 회고 자료). 볼 수 없는 페이지는 위키가 거른다.
+     * {@link PageNode}와 달리 수정 시각이 필요해 {@link RecentPage}로 읽는다.
+     */
+    public List<RecentPage> recentPages(long spaceId, int limit, String bearer) {
+        try {
+            return wikiRestClient.get()
+                    .uri(uriBuilder -> uriBuilder
+                            .path("/api/wiki/spaces/{spaceId}/pages/recent")
+                            .queryParam("limit", limit)
+                            .build(spaceId))
+                    .header(HttpHeaders.AUTHORIZATION, bearer)
+                    .retrieve()
+                    .body(RECENT_PAGE_LIST);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "최근 문서 조회");
+        }
+    }
+
+    /** wiki {@code PageNode} 중 회고 자료에 쓰는 필드만. */
+    public record RecentPage(Long id, String title, Instant updatedAt) {
     }
 
     /** {@code GET /api/wiki/spaces/{spaceId}/pages/children} — parentId 생략 = 루트 목록. */

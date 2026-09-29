@@ -78,6 +78,8 @@ public class MeetingService {
     private final WorkerProperties workerProperties;
     private final ObjectProvider<RunService> runServiceProvider;
     private final ExecutionSiteResolver executionSites;
+    /** 회고 추가 자료(P4b) — 기존 단위 테스트 생성자에서는 null(run 요약만). */
+    private final RetroMaterialCollector retroMaterials;
 
     /** P4a 이전 협력자만 받는 생성자(기존 단위 테스트) — 회의 run 실행 위치는 SERVER. */
     public MeetingService(RunRepository runRepository, PersonaRepository personaRepository, GateRepository gateRepository,
@@ -88,12 +90,22 @@ public class MeetingService {
                 schedulerProperties, workerProperties, runServiceProvider, ExecutionSiteResolver.serverOnly());
     }
 
-    @Autowired
     public MeetingService(RunRepository runRepository, PersonaRepository personaRepository, GateRepository gateRepository,
                           AlmClient almClient, TokenService tokenService, MeetingProperties meetingProperties,
                           SchedulerProperties schedulerProperties, WorkerProperties workerProperties,
                           ObjectProvider<RunService> runServiceProvider, ExecutionSiteResolver executionSites) {
+        this(runRepository, personaRepository, gateRepository, almClient, tokenService, meetingProperties,
+                schedulerProperties, workerProperties, runServiceProvider, executionSites, null);
+    }
+
+    @Autowired
+    public MeetingService(RunRepository runRepository, PersonaRepository personaRepository, GateRepository gateRepository,
+                          AlmClient almClient, TokenService tokenService, MeetingProperties meetingProperties,
+                          SchedulerProperties schedulerProperties, WorkerProperties workerProperties,
+                          ObjectProvider<RunService> runServiceProvider, ExecutionSiteResolver executionSites,
+                          RetroMaterialCollector retroMaterials) {
         this.executionSites = executionSites;
+        this.retroMaterials = retroMaterials;
         this.runRepository = runRepository;
         this.personaRepository = personaRepository;
         this.gateRepository = gateRepository;
@@ -187,11 +199,15 @@ public class MeetingService {
                     .toList();
         }
         boolean manager = run.getType() == RunType.MANAGER;
-        List<String> recentRuns = run.getType() == RunType.RETRO || manager ? recentRunLines(run) : List.of();
+        boolean retro = run.getType() == RunType.RETRO;
+        List<String> recentRuns = retro || manager ? recentRunLines(run) : List.of();
+        // 회고 추가 자료(D-P4b-4)는 블록마다 독립 실패 — 수집기는 던지지 않고 실패 블록을 null로 돌려준다.
+        WorkerJob.RetroData retroData = retro && retroMaterials != null
+                ? retroMaterials.collect(run.getProjectId(), meetingProperties.spaceId(), bearer) : null;
         WorkerJob.MeetingContext meeting = new WorkerJob.MeetingContext(run.getProjectId(), meetingProperties.spaceId(),
                 meetingProperties.autoIssue(), attendeesOf(run), recentRuns, approvedPlan(run),
                 manager ? pendingGateLines(run.getProjectId()) : List.of(),
-                manager ? blockedRunLines(run) : List.of());
+                manager ? blockedRunLines(run) : List.of(), meetingProperties.managerAssign(), retroData);
         WorkerJob.Expertise expertise = personaRepository.findById(run.getPersonaId())
                 .map(RunService::expertiseOf).orElse(null);
         return new WorkerJob(null, title, body, recentComments, run.getInstruction(), meeting, expertise);

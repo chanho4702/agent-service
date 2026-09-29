@@ -25,7 +25,8 @@ spring:
           (3) 결정·설계·작업 내용은 위키에 create_page/append_to_page로 페르소나 명의의 작업
           보고서를 남기고 add_comment로 이슈에 링크한다 — 보고서 없는 완료는 금지,
           (4) PR은 link_pr로 연결, (5) 완료 시 작업 보고서 링크 코멘트 → update_issue_status(done 계열) 순서,
-          (6) 이슈 제목·설명·우선순위 수정은 update_issue(넘긴 필드만 바뀐다).
+          (6) 이슈 제목·설명·우선순위 수정은 update_issue(넘긴 필드만 바뀐다),
+          (7) 담당자 지정·해제는 assign_issue(memberId·페르소나 slug·me, 해제는 none — 다른 필드는 그대로).
           모든 기록은 현재 페르소나 명의로 남는다.
   # 모든 자격증명/URL은 env로 오버라이드 가능. 기본값은 로컬 dev 전용 — 운영에서는 반드시 주입.
   datasource:
@@ -117,7 +118,8 @@ platform:
       # 같은 워크스페이스의 로컬 커밋을 검증하는 REVIEW run이 뒤따른다. 이슈 done 전환은 리뷰 통과 시 리뷰어만 한다.
       # false는 레거시 복원(TASK 워커가 직접 done 전환) — 명시적으로 끌 때만.
       enabled: ${REVIEW_ENABLED:true}
-      # 리뷰어 페르소나 슬러그. 비었거나 없는 페르소나면 리뷰를 못 띄우므로 이슈를 inprogress로 남기고 경고 코멘트(fail-closed).
+      # 리뷰어 페르소나 슬러그 — 폴백(P4b). 해석: AI 팀 설정(프로젝트 > 전역, /api/agent/review-settings) > 이 값 > 자동(활성 REVIEWER).
+      # 가리키는 페르소나가 없거나 비활성이면 리뷰를 못 띄우므로 이슈를 inprogress로 남기고 경고 코멘트(fail-closed).
       persona-slug: ${REVIEW_PERSONA:}
       # REVIEW run 모델. 비우면 scheduler의 project-models > default-model > 워커 기본 순을 따른다.
       model: ${REVIEW_MODEL:}
@@ -147,6 +149,9 @@ platform:
       auto-escalation: ${MEETING_AUTO_ESCALATION:false}
       # 회의 결정→이슈를 워커가 create_issue로 직접 만든다. false면 PLAN 게이트로 사람 승인 후 이어받은 run이 만든다.
       auto-issue: ${MEETING_AUTO_ISSUE:true}
+      # 매니저 순찰의 담당 배정(P4b, AGP-61) — true면 매니저가 assign_issue로 직접 배정하고 사유 코멘트를 남긴다.
+      # false면 P3c 동작(담당 제안 코멘트만).
+      manager-assign: ${MEETING_MANAGER_ASSIGN:true}
     credentials:
       # LLM 키 2층(P3h, AGP-66) — 전역·프로젝트 키를 AES-256-GCM으로 agentdb에 저장한다. 마스터 키는 base64 32바이트
       # (예: `openssl rand -base64 32`). 비었거나 형식이 틀리면 저장 API만 503이고 워커는 기존 env 인증 경로로 돈다.

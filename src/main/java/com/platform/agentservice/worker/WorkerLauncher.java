@@ -361,6 +361,7 @@ public class WorkerLauncher {
             }
             sb.append("</최근-run>\n\n");
             blocks.add("<최근-run>");
+            appendRetroData(sb, blocks, meeting.retro());
         }
         if (hasInstruction) {
             sb.append("## 안건(사용자 지시)\n");
@@ -394,6 +395,10 @@ public class WorkerLauncher {
             sb.append('\n');
             sb.append("runId=").append(runId).append('\n');
             return sb.toString();
+        }
+        if (hasRecentRuns && retroMaterialEmpty(meeting)) {
+            // 1인 회고가 빈 자료로 문제를 지어내던 것 방지(AGP-58) — 자료가 없다는 사실만 남기게 한다.
+            sb.append("- 회고 자료 없음 — 이번 회고는 '자료가 없다'는 사실만 짧게 기록하고 마감한다.\n");
         }
         sb.append("- 너는 진행자 ").append(facilitator.name()).append("(slug=").append(facilitator.slug())
                 .append(")다. 참석자를 위 순서대로 한 명씩 롤플레이해 각자의 롤 책임과 말투로 발언하게 하고, "
@@ -453,7 +458,8 @@ public class WorkerLauncher {
     /**
      * 매니저 순찰 프롬프트(P3c, D-P3c-3·4). 회의 프롬프트와 같은 경계 방어(데이터 블록 → "규약 우선" → 규약) 순서를 지키되,
      * 롤플레이 대신 순찰 절차와 행동 범위를 준다. 매니저는 실무자가 아니다 — claim·상태 전이·코드가 금지이고, 보드에 대한
-     * 손은 코멘트·우선순위 정정·(정리 목적의) 이슈 생성까지다. 배분 도구는 아직 없다(AGP-61).
+     * 손은 코멘트·우선순위 정정·(정리 목적의) 이슈 생성, 그리고 {@code manager-assign}이 켜져 있으면 배정(assign_issue +
+     * 사유 코멘트, AGP-61)까지다.
      */
     String buildManagerPrompt(Run run, WorkerJob job, WorkerJob.MeetingContext meeting) {
         long runId = run.getId();
@@ -504,7 +510,12 @@ public class WorkerLauncher {
         appendExpertise(sb, job);
         sb.append("- 금지: 이슈 claim(claim_issue), 이슈 상태 전이(update_issue_status), 작업 기록(log_work·link_pr), "
                 + "코드 수정·커밋·git 명령. 이 run은 워크스페이스에 코드가 없다(리포를 clone하지 않았다).\n");
-        sb.append("- 배분은 못 한다 — 담당자를 바꾸는 도구가 없다. 담당 제안은 add_comment로 남긴다.\n");
+        if (meeting.managerAssign()) {
+            sb.append("- 배정은 assign_issue(issueKey=..., assignee=<페르소나 slug 또는 memberId>)로 하고, 같은 이슈에 add_comment로 "
+                    + "배정 사유를 남긴다. 담당자가 이미 일하는 중인 이슈(최근 코멘트·진척이 있는 이슈)는 다시 배정하지 마라.\n");
+        } else {
+            sb.append("- 배분은 못 한다 — 담당자를 바꾸지 마라(assign_issue 금지). 담당 제안은 add_comment로 남긴다.\n");
+        }
         if (meeting.autoIssue()) {
             sb.append("- create_issue(projectId=").append(projectId)
                     .append(", ...)는 정리 목적일 때만 쓴다 — 여러 이슈에 흩어진 후속 작업을 하나로 모으거나 정체를 풀 후속 이슈가 "
@@ -533,7 +544,12 @@ public class WorkerLauncher {
         sb.append("- 우선순위가 어긋난 이슈는 update_issue(issueKey=..., priority=<스킴의 우선순위 id>)로 정정하고, "
                 + "같은 이슈에 add_comment로 정정 사유를 남긴다.\n");
         sb.append("- 중복 의심 이슈는 닫지 말고 add_comment로 \"중복 후보: <다른 이슈 키> — 닫기 제안\"을 남긴다.\n");
-        sb.append("- 담당 제안은 add_comment로 \"<롤/이름>이 맡으면 좋겠다 — 이유\"를 남긴다.\n\n");
+        if (meeting.managerAssign()) {
+            sb.append("- 담당자 없는 이슈·정체로 넘겨야 할 이슈는 get_project_context 명단에서 맞는 롤을 골라 assign_issue로 배정하고 "
+                    + "add_comment로 \"<이름>에게 배정 — 이유\"를 남긴다.\n\n");
+        } else {
+            sb.append("- 담당 제안은 add_comment로 \"<롤/이름>이 맡으면 좋겠다 — 이유\"를 남긴다.\n\n");
+        }
 
         sb.append("## 보고\n");
         sb.append("- 보고 페이지는 create_page(spaceId=").append(spaceId)
@@ -550,10 +566,49 @@ public class WorkerLauncher {
         sb.append("## 보드 현황 요약\n- 상태별 이슈 수 · 이번 순찰에서 본 범위\n");
         sb.append("## 병목·정체와 조치\n- 이슈 키 — 정체 신호(무엇이 얼마나) — 조치(코멘트·우선순위 정정)\n");
         sb.append("## 독려 내역\n- 이슈 키 — 남긴 코멘트 요지\n");
-        sb.append("## 사람에게 필요한 결정\n- Q1. ... (대기 게이트·BLOCKED run·담당 제안·중복 닫기 제안 포함)\n");
+        if (meeting.managerAssign()) {
+            sb.append("## 배정 내역\n- 이슈 키 — 배정한 사람 — 사유\n");
+            sb.append("## 사람에게 필요한 결정\n- Q1. ... (대기 게이트·BLOCKED run·중복 닫기 제안 포함)\n");
+        } else {
+            sb.append("## 사람에게 필요한 결정\n- Q1. ... (대기 게이트·BLOCKED run·담당 제안·중복 닫기 제안 포함)\n");
+        }
         sb.append("```\n\n");
         sb.append("runId=").append(runId).append('\n');
         return sb.toString();
+    }
+
+    /**
+     * 회고 추가 자료(P4b D-P4b-4) — 목록이 null이면 수집 실패라 블록을 통째로 뺀다(빈 블록으로 "없음"이라고 말하면 거짓말이다).
+     * 라인은 서버가 한 줄·꺾쇠 무력화로 다듬어 싣는다({@code RetroMaterialCollector}).
+     */
+    private static void appendRetroData(StringBuilder sb, List<String> blocks, WorkerJob.RetroData retro) {
+        if (retro == null) {
+            return;
+        }
+        if (retro.issueChanges() != null) {
+            appendLines(sb, "## 최근 24시간 이슈 변경(생성·수정·해결 — 키 · 상태 · 제목)", "최근-이슈-변경", retro.issueChanges());
+            blocks.add("<최근-이슈-변경>");
+        }
+        if (retro.commentCounts() != null) {
+            appendLines(sb, "## 최근 24시간 코멘트(이슈별 건수 · 최근 코멘트 앞부분)", "최근-코멘트", retro.commentCounts());
+            blocks.add("<최근-코멘트>");
+        }
+        if (retro.recentPages() != null) {
+            appendLines(sb, "## 최근 24시간 회의록 스페이스 문서", "최근-위키", retro.recentPages());
+            blocks.add("<최근-위키>");
+        }
+    }
+
+    /** 회고 자료가 전부 비었는가 — 실패로 빠진 블록(null)도 자료가 없는 것으로 센다. */
+    static boolean retroMaterialEmpty(WorkerJob.MeetingContext meeting) {
+        WorkerJob.RetroData retro = meeting.retro();
+        return isEmpty(meeting.recentRuns())
+                && (retro == null || (isEmpty(retro.issueChanges()) && isEmpty(retro.commentCounts())
+                        && isEmpty(retro.recentPages())));
+    }
+
+    private static boolean isEmpty(List<String> lines) {
+        return lines == null || lines.isEmpty();
     }
 
     private static void appendLines(StringBuilder sb, String heading, String tag, List<String> lines) {

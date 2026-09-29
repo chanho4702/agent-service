@@ -7,13 +7,13 @@ import com.platform.agentservice.client.TokenService;
 import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
+import com.platform.agentservice.review.ReviewerResolver;
 import com.platform.common.error.NotFoundException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.ObjectProvider;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.core.task.TaskRejectedException;
 import org.springframework.stereotype.Service;
-
-import java.util.Optional;
 
 /**
  * 리뷰 run 상시화(P2c T3, AGP-44 — 스펙 §10.4-4 "검증 없는 확정 없음") — TASK DONE 뒤 REVIEW run을 띄우고,
@@ -47,11 +47,23 @@ public class ReviewService {
     private final MeetingService meetingService;
     private final AlertService alertService;
     private final ObjectProvider<RunService> runServiceProvider;
+    private final ReviewerResolver reviewerResolver;
 
+    /** DB 리뷰어 설정 이전 협력자만 받는 생성자(기존 단위 테스트) — env·자동 해석만. */
     public ReviewService(RunRepository runRepository, PersonaRepository personaRepository, TokenService tokenService,
                          AlmClient almClient, ReviewProperties reviewProperties, SchedulerProperties schedulerProperties,
                          MeetingService meetingService, AlertService alertService,
                          ObjectProvider<RunService> runServiceProvider) {
+        this(runRepository, personaRepository, tokenService, almClient, reviewProperties, schedulerProperties,
+                meetingService, alertService, runServiceProvider, ReviewerResolver.envOnly(personaRepository, reviewProperties));
+    }
+
+    @Autowired
+    public ReviewService(RunRepository runRepository, PersonaRepository personaRepository, TokenService tokenService,
+                         AlmClient almClient, ReviewProperties reviewProperties, SchedulerProperties schedulerProperties,
+                         MeetingService meetingService, AlertService alertService,
+                         ObjectProvider<RunService> runServiceProvider, ReviewerResolver reviewerResolver) {
+        this.reviewerResolver = reviewerResolver;
         this.runRepository = runRepository;
         this.personaRepository = personaRepository;
         this.tokenService = tokenService;
@@ -80,27 +92,25 @@ public class ReviewService {
             warnUnverified(run, "워커가 워크스페이스 경로를 남기지 않았습니다");
             return;
         }
-        String slug = reviewProperties.personaSlug();
-        if (slug == null || slug.isBlank()) {
-            warnUnverified(run, "리뷰어 페르소나가 설정되지 않았습니다(platform.agent.review.persona-slug)");
+        // D-P4b-1: 프로젝트 설정 > 전역 설정 > env > 자동 — 단일 지점. 자동 선택은 작업자를 후보에서 뺀다.
+        ReviewerResolver.Resolution resolution = reviewerResolver.resolve(run.getProjectId(), run.getPersonaId());
+        Persona reviewer = resolution.persona();
+        if (reviewer == null) {
+            warnUnverified(run, resolution.problem());
             return;
         }
-        Optional<Persona> reviewer = personaRepository.findBySlug(slug.trim()).filter(Persona::isActive);
-        if (reviewer.isEmpty()) {
-            warnUnverified(run, "리뷰어 페르소나를 찾을 수 없거나 비활성입니다: " + slug.trim());
-            return;
-        }
-        if (reviewer.get().getId().equals(run.getPersonaId())) {
+        if (reviewer.getId().equals(run.getPersonaId())) {
             // 작업자가 자기 결과를 승인하면 검증이 아니다 — RunType 정의("다른 페르소나가 검증")를 강제한다.
-            warnUnverified(run, "리뷰어가 작업자와 같은 페르소나입니다: " + slug.trim());
+            warnUnverified(run, "리뷰어가 작업자와 같은 페르소나입니다: " + reviewer.getSlug());
             return;
         }
 
-        Run review = runRepository.save(Run.queuedReview(run, reviewer.get().getId(), reviewModel(run, reviewer.get())));
-        log.info("TASK run={} 완료 → 검증 run={} 생성(리뷰어={})", run.getId(), review.getId(), reviewer.get().getSlug());
+        Run review = runRepository.save(Run.queuedReview(run, reviewer.getId(), reviewModel(run, reviewer)));
+        log.info("TASK run={} 완료 → 검증 run={} 생성(리뷰어={}, 출처={})", run.getId(), review.getId(), reviewer.getSlug(),
+                resolution.source());
         submit(review.getId());
         commentBestEffort(run.getPersonaId(), run.getIssueKey(), "🔍 검증 run " + review.getId() + " 시작 — 리뷰어 "
-                + reviewer.get().getName() + "가 확인 후 통과 시 done 처리합니다.");
+                + reviewer.getName() + "가 확인 후 통과 시 done 처리합니다.");
     }
 
     /**

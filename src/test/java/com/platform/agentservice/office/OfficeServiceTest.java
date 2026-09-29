@@ -140,6 +140,20 @@ class OfficeServiceTest {
         assertThat(res.generatedAt()).isEqualTo(now);
     }
 
+    /** P4b D-P4b-1 — 리뷰어 준비 플래그는 해석기에 projectId 그대로 묻는다(없으면 전역 기준). 해석기 없는 생성자는 true. */
+    @Test
+    void 리뷰어_준비_플래그는_필터_프로젝트_기준으로_해석기에_묻는다() {
+        com.platform.agentservice.review.ReviewerResolver resolver = mock(com.platform.agentservice.review.ReviewerResolver.class);
+        given(resolver.reviewReady(7L)).willReturn(false);
+        given(resolver.reviewReady(null)).willReturn(true);
+        OfficeService withResolver = new OfficeService(personas, runs, gates, audits, ledger, budgetService,
+                new MeetingProperties(7L, null, false, true), chatAvailability, null, resolver, Clock.fixed(now, ZoneOffset.UTC));
+
+        assertThat(withResolver.office(7L).reviewReady()).isFalse();
+        assertThat(withResolver.office(null).reviewReady()).isTrue();
+        assertThat(service.office(7L).reviewReady()).isTrue();
+    }
+
     /** AGP-62 — 사무실은 관리 권한을 보지 않는 표면이라 아바타만 싣고 스킬·기본 모델은 싣지 않는다. */
     @Test
     void 아바타_설정은_싣고_스킬과_기본_모델은_싣지_않는다() throws Exception {

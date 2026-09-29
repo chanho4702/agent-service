@@ -9,6 +9,8 @@ import com.platform.agentservice.client.dto.IssueResponse;
 import com.platform.agentservice.persona.Persona;
 import com.platform.agentservice.persona.PersonaRepository;
 import com.platform.agentservice.persona.PersonaRole;
+import com.platform.agentservice.review.ReviewerResolver;
+import com.platform.agentservice.review.ReviewerSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -290,6 +292,55 @@ class ReviewServiceTest {
         service(enabledWith("sora")).onRunDone(doneTask(WORKSPACE, 1));
 
         assertUnverifiedWarning();
+    }
+
+    // ---- D-P4b-1: 리뷰어 해석 단일 지점 ----
+
+    @Test
+    void reviewer_comes_from_the_resolver_with_the_run_project_and_the_worker_excluded_from_auto() {
+        ReviewerResolver resolver = org.mockito.Mockito.mock(ReviewerResolver.class);
+        when(resolver.resolve(1L, WORKER_PERSONA_ID))
+                .thenReturn(new ReviewerResolver.Resolution(reviewer, ReviewerSource.PROJECT, null));
+        ReviewProperties props = enabledWith(null);
+        ReviewService service = new ReviewService(runRepository, personaRepository, tokenService, almClient, props,
+                new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3), meetingService, alertService, runServiceProvider,
+                resolver);
+
+        service.onRunDone(doneTask(WORKSPACE, 1));
+
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository).save(saved.capture());
+        assertThat(saved.getValue().getPersonaId()).isEqualTo(REVIEWER_PERSONA_ID);
+        verify(runService).execute(99L);
+    }
+
+    @Test
+    void resolver_none_leaves_the_issue_unverified_with_its_reason() {
+        ReviewerResolver resolver = org.mockito.Mockito.mock(ReviewerResolver.class);
+        when(resolver.resolve(1L, WORKER_PERSONA_ID)).thenReturn(new ReviewerResolver.Resolution(null, ReviewerSource.NONE,
+                "프로젝트 리뷰어 지정(페르소나 id=3)이 비활성이거나 REVIEWER가 아니거나 이 범위에서 쓸 수 없습니다"));
+        ReviewService service = new ReviewService(runRepository, personaRepository, tokenService, almClient,
+                enabledWith(null), new SchedulerProperties(true, 60000L, 2, 1, "jiho", 3), meetingService, alertService,
+                runServiceProvider, resolver);
+
+        service.onRunDone(doneTask(WORKSPACE, 1));
+
+        assertUnverifiedWarning();
+        verify(almClient).addComment(eq(1L), contains("프로젝트 리뷰어 지정(페르소나 id=3)"), eq(WORKER_BEARER));
+    }
+
+    @Test
+    void without_any_configuration_an_active_reviewer_is_picked_automatically() {
+        Persona autoReviewer = persona(REVIEWER_PERSONA_ID, REVIEWER_MEMBER_ID, "sora");
+        ReflectionTestUtils.setField(autoReviewer, "role", PersonaRole.REVIEWER);
+        when(personaRepository.findByRoleAndActiveTrueOrderByIdAsc(PersonaRole.REVIEWER)).thenReturn(List.of(autoReviewer));
+
+        service(enabledWith(null)).onRunDone(doneTask(WORKSPACE, 1));
+
+        ArgumentCaptor<Run> saved = ArgumentCaptor.forClass(Run.class);
+        verify(runRepository).save(saved.capture());
+        assertThat(saved.getValue().getType()).isEqualTo(RunType.REVIEW);
+        assertThat(saved.getValue().getPersonaId()).isEqualTo(REVIEWER_PERSONA_ID);
     }
 
     @Test

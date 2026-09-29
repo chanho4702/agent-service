@@ -23,8 +23,21 @@ public record OfficeResponse(
         Instant generatedAt,
         List<BoardPost> boardPosts,
         ActiveMeeting activeMeeting,
-        Features features
+        Features features,
+        boolean reviewReady
 ) {
+
+    /**
+     * {@code reviewReady}(P4b D-P4b-1): TASK가 DONE이면 검증 run을 띄울 리뷰어가 있다 — 리뷰가 꺼져 있으면(작업자가 직접 done) true,
+     * 아니면 유효 리뷰어가 NONE이 아닐 때(projectId가 있으면 그 프로젝트 기준, 없으면 전역 기준). false면 화면이 "리뷰어 없음 — done
+     * 불가" 경고를 띄운다. 이 생성자는 플래그 없는 기존 호출부·테스트용(true).
+     */
+    public OfficeResponse(List<OfficePersona> personas, List<RunSummaryResponse> recentRuns, long pendingGateCount,
+                          List<PendingGate> pendingGates, BudgetStatusResponse budget, Instant generatedAt,
+                          List<BoardPost> boardPosts, ActiveMeeting activeMeeting, Features features) {
+        this(personas, recentRuns, pendingGateCount, pendingGates, budget, generatedAt, boardPosts, activeMeeting, features,
+                true);
+    }
 
     /**
      * 기능 플래그(P3g ①). {@code chat} = 사무실 수다가 동작 가능(설치 옵션 {@code CHAT_ENABLED} on + LLM 키가 해석됨 — projectId가

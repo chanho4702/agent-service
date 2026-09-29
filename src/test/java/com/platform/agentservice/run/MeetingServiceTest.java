@@ -494,6 +494,47 @@ class MeetingServiceTest {
         assertThat(job.meeting().recentRuns()).containsExactly("run 12 · TASK · AGP-9 · QUEUED · 시도 1");
     }
 
+    // ---- P4b: 회고 자료(AGP-58)·매니저 배정 스위치(AGP-61) ----
+
+    private MeetingService serviceWithRetro(MeetingProperties props, RetroMaterialCollector collector) {
+        WorkerProperties workerProperties = new WorkerProperties("C:\\agent-work", "C:\\bundle", List.of(), "claude", 80, 40,
+                "Read", "http://localhost/api/agent/mcp", Map.of("AGP", "https://example.com/agp.git"), List.of(), false);
+        SchedulerProperties schedulerProperties = new SchedulerProperties(false, 60000L, 2, 1, "jiho", 3,
+                "claude-sonnet-5", Map.of("AGP", "claude-opus-5-5"));
+        return new MeetingService(runRepository, personaRepository, gateRepository, almClient, tokenService, props,
+                schedulerProperties, workerProperties, runServiceProvider,
+                com.platform.agentservice.execution.ExecutionSiteResolver.serverOnly(), collector);
+    }
+
+    @Test
+    void build_job_for_retro_carries_collected_material_with_the_host_bearer() {
+        RetroMaterialCollector collector = org.mockito.Mockito.mock(RetroMaterialCollector.class);
+        WorkerJob.RetroData data = new WorkerJob.RetroData(List.of("AGP-9 · done · t"), null, List.of());
+        when(collector.collect(PROJECT_ID, SPACE_ID, "Bearer x")).thenReturn(data);
+        Run run = meeting(RunType.RETRO, "PROJECT-1", List.of(1L));
+        when(personaRepository.findAllById(List.of(1L))).thenReturn(List.of(planner));
+
+        WorkerJob job = serviceWithRetro(props(false), collector).buildJob(run, "Bearer x");
+
+        assertThat(job.meeting().retro()).isSameAs(data);
+    }
+
+    @Test
+    void build_job_collects_retro_material_only_for_retro_and_passes_the_manager_assign_switch() {
+        RetroMaterialCollector collector = org.mockito.Mockito.mock(RetroMaterialCollector.class);
+        Run run = meeting(RunType.MANAGER, "PROJECT-1", List.of(8L));
+        when(personaRepository.findAllById(List.of(8L))).thenReturn(List.of(manager));
+
+        WorkerJob on = serviceWithRetro(props(false), collector).buildJob(run, "Bearer x");
+        WorkerJob off = serviceWithRetro(new MeetingProperties(SPACE_ID, null, false, true, null, false), collector)
+                .buildJob(run, "Bearer x");
+
+        assertThat(on.meeting().managerAssign()).isTrue();
+        assertThat(off.meeting().managerAssign()).isFalse();
+        assertThat(on.meeting().retro()).isNull();
+        verifyNoInteractions(collector);
+    }
+
     @Test
     void build_job_after_plan_gate_approval_carries_the_approved_plan_from_the_ancestor_chain() {
         // 50(게이트 승인) → 51(승인 continuation, 실패) → 52(재시도): 52가 조상 사슬에서 계획을 찾는다.

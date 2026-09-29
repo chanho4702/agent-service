@@ -90,6 +90,28 @@ public class AlmClient {
         }
     }
 
+    /**
+     * {@code POST /api/alm/issues/query} — AQL 검색(P4b 회고 자료). 응답의 {@code echoedAql}은 버리고 검색과 같은 페이지 shape로 읽는다.
+     * 접근 범위(볼 수 있는 프로젝트)는 alm이 언제나 AND로 더한다.
+     */
+    public IssuePageResponse query(String aql, int page, int size, String bearer) {
+        try {
+            return almRestClient.post()
+                    .uri("/api/alm/issues/query")
+                    .header(HttpHeaders.AUTHORIZATION, bearer)
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(new AqlQueryRequest(aql, page, size))
+                    .retrieve()
+                    .body(IssuePageResponse.class);
+        } catch (RestClientException e) {
+            throw DownstreamErrors.map(e, "AQL 이슈 검색");
+        }
+    }
+
+    /** alm {@code AqlDtos.QueryRequest}와 같은 shape. */
+    record AqlQueryRequest(String aql, int page, int size) {
+    }
+
     /** {@code GET /api/alm/issues/by-key/{key}}. */
     public IssueResponse getByKey(String key, String bearer) {
         try {

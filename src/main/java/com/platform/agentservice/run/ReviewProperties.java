@@ -9,7 +9,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  *
  * <p>{@link #enabled()} 기본값은 true다 — 스펙 §10.4-4 "검증 없는 확정 없음"이 기본 동작이어야 하고,
  * 끄는 것은 레거시(워커가 스스로 done 전환) 복원이라는 명시적 선택이어야 한다.
- * {@link #personaSlug()}가 비어 있거나 가리키는 페르소나가 없으면 리뷰를 건너뛰는 게 아니라
+ * {@link #personaSlug()}는 P4b(D-P4b-1)부터 폴백이다 — 리뷰어는 AI 팀 설정(DB, 프로젝트 &gt; 전역)이 먼저이고, 그다음 이 값,
+ * 그다음 자동 선택이다({@code ReviewerResolver}). 어느 단계로도 리뷰어가 없으면 리뷰를 건너뛰는 게 아니라
  * 이슈를 미확정으로 남기고 경고한다(D-P2c-3 fail-closed) — {@link ReviewService} 참고.
  * {@link #model()}이 비면 자동화 모델 정책({@link SchedulerProperties#modelFor})을 따른다(D-P2c-5).
  *
